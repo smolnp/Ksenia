@@ -18,6 +18,7 @@ import csv
 from difflib import SequenceMatcher
 import socket
 import urllib3
+import unicodedata
 
 # Отключаем предупреждения SSL
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -90,6 +91,182 @@ class LinkQuality(Enum):
     UNKNOWN = 0
     WORKING = 1
     NOT_WORKING = 2
+
+
+class ChannelNameNormalizer:
+    """Класс для нормализации названий каналов с интеллектуальным удалением информации"""
+    
+    # Паттерны для удаления информации о качестве видео в круглых скобках
+    QUALITY_PATTERNS = [
+        r'\(\s*(?:720|1080|1280|480|360|2160|4K|8K|UHD|HD|SD|FHD|FullHD)[pPi]?\s*\)',
+        r'\(\s*(?:720|1080|1280|480|360|2160)[pP]\s*\)',
+        r'\(\s*(?:4K|8K|UHD|HD|SD|FHD|FullHD)\s*\)',
+        r'\(\s*(?:60|50|30|25)[fFpPsS]?\s*\)',
+        r'\(\s*(?:High|Medium|Low)\s+Quality\s*\)',
+        r'\(\s*\[?[0-9]+[pPi]\s*\]?\s*\)',
+        r'\(\s*HQ\s*\)',
+        r'\(\s*LQ\s*\)',
+        r'\(\s*SQ\s*\)',
+    ]
+    
+    # Паттерны для удаления информации в квадратных скобках (только определённые)
+    BRACKETS_TO_REMOVE = [
+        r'\[Geo-blocked\]',
+        r'\[Not\s+24/7\]',
+        r'\[Geo[-\s]?blocked\]',
+        r'\[Not\s*24\s*/\s*7\]',
+        r'\[Blocked\]',
+        r'\[Restricted\]',
+        r'\[GeoRestricted\]',
+    ]
+    
+    # Паттерны для удаления эмодзи (оставляем буквы, цифры, пробелы, дефисы и некоторые символы)
+    EMOJI_PATTERN = re.compile(
+        '['
+        '\U0001F600-\U0001F64F'  # Emoticons
+        '\U0001F300-\U0001F5FF'  # Symbols & Pictographs
+        '\U0001F680-\U0001F6FF'  # Transport & Map
+        '\U0001F1E0-\U0001F1FF'  # Flags
+        '\U00002702-\U000027B0'  # Dingbats
+        '\U000024C2-\U0001F251'  # Enclosed characters
+        ']+',
+        flags=re.UNICODE
+    )
+    
+    @staticmethod
+    def normalize(name: str, remove_parentheses: bool = True, remove_brackets: bool = True, 
+                  remove_emojis: bool = True, remove_special_chars: bool = True) -> str:
+        """
+        Нормализует название канала с интеллектуальным удалением:
+        - Удаляет только информацию о качестве видео в круглых скобках (720p, 1080p и т.д.)
+        - Удаляет только определённые теги в квадратных скобках ([Geo-blocked], [Not 24/7])
+        - Сохраняет информацию о часовых поясах (+2, +4 и т.д.)
+        - Сохраняет информацию о региональных каналах (Астрахань, Тюмень и т.д.)
+        - Сохраняет информацию о странах ([PL], [LV], [AM], [KZ] и т.д.)
+        - Удаляет эмодзи и специальные символы
+        - Приводит к нижнему регистру
+        - Удаляет лишние пробелы
+        """
+        if not name:
+            return ""
+        
+        normalized = name
+        
+        # Удаляем только информацию о качестве в круглых скобках
+        if remove_parentheses:
+            for pattern in ChannelNameNormalizer.QUALITY_PATTERNS:
+                normalized = re.sub(pattern, '', normalized, flags=re.IGNORECASE)
+            
+            # Дополнительно удаляем пустые скобки
+            normalized = re.sub(r'\(\s*\)', '', normalized)
+        
+        # Удаляем только определённые теги в квадратных скобках
+        if remove_brackets:
+            for pattern in ChannelNameNormalizer.BRACKETS_TO_REMOVE:
+                normalized = re.sub(pattern, '', normalized, flags=re.IGNORECASE)
+            
+            # Дополнительно удаляем пустые скобки
+            normalized = re.sub(r'\[\s*\]', '', normalized)
+        
+        # Удаляем фигурные скобки (все)
+        normalized = re.sub(r'\{[^}]*\}', '', normalized)
+        
+        # Удаляем эмодзи
+        if remove_emojis:
+            normalized = ChannelNameNormalizer.EMOJI_PATTERN.sub('', normalized)
+        
+        # Удаляем специальные символы (оставляем буквы, цифры, пробелы, дефисы, плюсы, слэши)
+        if remove_special_chars:
+            # Сохраняем важные символы: буквы, цифры, пробелы, дефисы, плюсы, слэши, точки, запятые, двоеточия
+            normalized = re.sub(r'[^\w\s\-\+\\/\.\,:()\[\]]', ' ', normalized)
+            normalized = re.sub(r'\s+', ' ', normalized)
+        
+        # Приводим к нижнему регистру
+        normalized = normalized.lower().strip()
+        
+        # Удаляем множественные пробелы
+        normalized = re.sub(r'\s+', ' ', normalized)
+        
+        return normalized
+    
+    @staticmethod
+    def get_normalized_variants(name: str) -> List[str]:
+        """Возвращает список различных вариантов нормализации для гибкого поиска"""
+        variants = []
+        
+        # Основная нормализация
+        base_normalized = ChannelNameNormalizer.normalize(name)
+        if base_normalized:
+            variants.append(base_normalized)
+        
+        # Вариант: только удаление информации о качестве, без удаления эмодзи
+        no_quality = ChannelNameNormalizer.normalize(name, remove_emojis=False)
+        if no_quality and no_quality != base_normalized:
+            variants.append(no_quality)
+        
+        # Вариант: только удаление эмодзи
+        no_emojis = ChannelNameNormalizer.normalize(name, remove_parentheses=False, remove_brackets=False)
+        if no_emojis and no_emojis != base_normalized:
+            variants.append(no_emojis)
+        
+        # Вариант: без удаления скобок (сохраняем всю информацию)
+        no_remove_brackets = ChannelNameNormalizer.normalize(name, remove_parentheses=False, remove_brackets=False, remove_emojis=True)
+        if no_remove_brackets and no_remove_brackets != base_normalized:
+            variants.append(no_remove_brackets)
+        
+        # Удаляем дубликаты
+        return list(dict.fromkeys(variants))
+    
+    @staticmethod
+    def calculate_similarity_normalized(name1: str, name2: str, settings: 'LinkReplacementSettings') -> float:
+        """Вычисляет схожесть между нормализованными названиями"""
+        if settings.ignore_special_chars_in_names:
+            norm1 = ChannelNameNormalizer.normalize(name1)
+            norm2 = ChannelNameNormalizer.normalize(name2)
+        else:
+            norm1 = name1.lower()
+            norm2 = name2.lower()
+        
+        return SequenceMatcher(None, norm1, norm2).ratio()
+    
+    @staticmethod
+    def extract_quality(name: str) -> Optional[str]:
+        """Извлекает информацию о качестве из названия"""
+        for pattern in ChannelNameNormalizer.QUALITY_PATTERNS:
+            match = re.search(pattern, name, re.IGNORECASE)
+            if match:
+                return match.group(0)
+        return None
+    
+    @staticmethod
+    def extract_country_code(name: str) -> Optional[str]:
+        """Извлекает код страны из квадратных скобок"""
+        # Ищем паттерны типа [PL], [LV], [AM], [KZ] и т.д.
+        match = re.search(r'\[([A-Z]{2,3})\]', name)
+        if match:
+            return match.group(1)
+        return None
+    
+    @staticmethod
+    def extract_region(name: str) -> Optional[str]:
+        """Извлекает региональную информацию из круглых скобок"""
+        # Ищем паттерны типа (Астрахань), (Тюмень) и т.д.
+        match = re.search(r'\(([А-Яа-яёЁ\s\-]+)\)', name)
+        if match:
+            region = match.group(1).strip()
+            # Исключаем информацию о качестве
+            if not re.search(r'[0-9]+[pPi]', region, re.IGNORECASE):
+                return region
+        return None
+    
+    @staticmethod
+    def extract_timezone(name: str) -> Optional[str]:
+        """Извлекает информацию о часовом поясе из круглых скобок"""
+        # Ищем паттерны типа (+2), (+4), (+5) и т.д.
+        match = re.search(r'\(\+(\d+)\)', name)
+        if match:
+            return match.group(1)
+        return None
 
 
 class LinkSource:
@@ -520,6 +697,12 @@ class LinkReplacementSettings:
         self.prioritize_whitelisted: bool = True
         self.blacklist_priority: int = -10
         self.whitelist_priority: int = 10
+        
+        # Новые настройки для нормализации названий
+        self.ignore_special_chars_in_names: bool = True
+        self.remove_parentheses_in_names: bool = True
+        self.remove_brackets_in_names: bool = True
+        self.remove_emojis_in_names: bool = True
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -546,7 +729,11 @@ class LinkReplacementSettings:
             'whitelisted_domains': self.whitelisted_domains,
             'prioritize_whitelisted': self.prioritize_whitelisted,
             'blacklist_priority': self.blacklist_priority,
-            'whitelist_priority': self.whitelist_priority
+            'whitelist_priority': self.whitelist_priority,
+            'ignore_special_chars_in_names': self.ignore_special_chars_in_names,
+            'remove_parentheses_in_names': self.remove_parentheses_in_names,
+            'remove_brackets_in_names': self.remove_brackets_in_names,
+            'remove_emojis_in_names': self.remove_emojis_in_names
         }
     
     @classmethod
@@ -578,6 +765,12 @@ class LinkReplacementSettings:
         settings.prioritize_whitelisted = data.get('prioritize_whitelisted', True)
         settings.blacklist_priority = data.get('blacklist_priority', -10)
         settings.whitelist_priority = data.get('whitelist_priority', 10)
+        
+        # Загружаем новые настройки
+        settings.ignore_special_chars_in_names = data.get('ignore_special_chars_in_names', True)
+        settings.remove_parentheses_in_names = data.get('remove_parentheses_in_names', True)
+        settings.remove_brackets_in_names = data.get('remove_brackets_in_names', True)
+        settings.remove_emojis_in_names = data.get('remove_emojis_in_names', True)
         
         return settings
     
@@ -824,6 +1017,17 @@ class LinkSourceManager:
         results = []
         enabled_sources = self.get_enabled_sources()
         
+        # Нормализуем исходное название для поиска
+        if settings.ignore_special_chars_in_names:
+            normalized_search_name = ChannelNameNormalizer.normalize(
+                channel_name,
+                remove_parentheses=settings.remove_parentheses_in_names,
+                remove_brackets=settings.remove_brackets_in_names,
+                remove_emojis=settings.remove_emojis_in_names
+            )
+        else:
+            normalized_search_name = channel_name.lower()
+        
         for source in enabled_sources:
             cached_channels = self.load_cached_links(source)
             if cached_channels is None:
@@ -835,27 +1039,40 @@ class LinkSourceManager:
                 continue
             
             for cached_channel in cached_channels:
-                if self._is_match(channel_name, cached_channel.name, settings):
+                if self._is_match(normalized_search_name, cached_channel.name, settings):
                     results.append(cached_channel)
         
+        # Сортируем результаты по приоритету и схожести
         results.sort(key=lambda x: (
             -self._get_source_priority(x.link_source),
+            -self._get_match_score(channel_name, x.name, settings),
             -settings.get_url_priority(x.url) if x.url else 0
         ))
         
         return results[:settings.max_alternative_urls]
     
-    def _is_match(self, channel1_name: str, channel2_name: str, settings: LinkReplacementSettings) -> bool:
+    def _is_match(self, search_name: str, channel_name: str, settings: LinkReplacementSettings) -> bool:
+        """Проверяет соответствие названий с учётом нормализации"""
+        if settings.ignore_special_chars_in_names:
+            normalized_channel = ChannelNameNormalizer.normalize(
+                channel_name,
+                remove_parentheses=settings.remove_parentheses_in_names,
+                remove_brackets=settings.remove_brackets_in_names,
+                remove_emojis=settings.remove_emojis_in_names
+            )
+        else:
+            normalized_channel = channel_name.lower()
+        
         if settings.search_type == "exact":
-            return channel1_name.lower() == channel2_name.lower()
+            return search_name == normalized_channel
         
         elif settings.search_type == "similar":
-            similarity = self._calculate_similarity(channel1_name, channel2_name)
+            similarity = SequenceMatcher(None, search_name, normalized_channel).ratio()
             return similarity >= settings.min_name_similarity
         
         elif settings.search_type == "fuzzy":
-            words1 = set(re.findall(r'\w+', channel1_name.lower()))
-            words2 = set(re.findall(r'\w+', channel2_name.lower()))
+            words1 = set(re.findall(r'\w+', search_name))
+            words2 = set(re.findall(r'\w+', normalized_channel))
             
             if not words1 or not words2:
                 return False
@@ -866,6 +1083,27 @@ class LinkSourceManager:
             return similarity >= settings.min_name_similarity
         
         return False
+    
+    def _get_match_score(self, original_name: str, channel_name: str, settings: LinkReplacementSettings) -> float:
+        """Вычисляет оценку схожести для сортировки"""
+        if settings.ignore_special_chars_in_names:
+            norm1 = ChannelNameNormalizer.normalize(
+                original_name,
+                remove_parentheses=settings.remove_parentheses_in_names,
+                remove_brackets=settings.remove_brackets_in_names,
+                remove_emojis=settings.remove_emojis_in_names
+            )
+            norm2 = ChannelNameNormalizer.normalize(
+                channel_name,
+                remove_parentheses=settings.remove_parentheses_in_names,
+                remove_brackets=settings.remove_brackets_in_names,
+                remove_emojis=settings.remove_emojis_in_names
+            )
+        else:
+            norm1 = original_name.lower()
+            norm2 = channel_name.lower()
+        
+        return SequenceMatcher(None, norm1, norm2).ratio()
     
     def _calculate_similarity(self, str1: str, str2: str) -> float:
         str1 = str1.lower()
@@ -3516,6 +3754,36 @@ class LinkReplacementSettingsDialog(QDialog):
         
         basic_layout.addWidget(search_group)
         
+        # Новая группа для нормализации названий
+        normalization_group = QGroupBox("Нормализация названий каналов")
+        normalization_layout = QVBoxLayout(normalization_group)
+        
+        self.ignore_special_chars_check = QCheckBox("Игнорировать специальные символы при поиске")
+        self.ignore_special_chars_check.setChecked(True)
+        normalization_layout.addWidget(self.ignore_special_chars_check)
+        
+        self.remove_parentheses_check = QCheckBox("Игнорировать информацию о качестве в круглых скобках (720p, 1080p и т.д.)")
+        self.remove_parentheses_check.setChecked(True)
+        normalization_layout.addWidget(self.remove_parentheses_check)
+        
+        self.remove_brackets_check = QCheckBox("Игнорировать определенные теги в квадратных скобках ([Geo-blocked], [Not 24/7])")
+        self.remove_brackets_check.setChecked(True)
+        normalization_layout.addWidget(self.remove_brackets_check)
+        
+        self.remove_emojis_check = QCheckBox("Игнорировать эмодзи и специальные символы")
+        self.remove_emojis_check.setChecked(True)
+        normalization_layout.addWidget(self.remove_emojis_check)
+        
+        info_label = QLabel(
+            "Пример: 'A24 Ⓨ (1080p) [PL]' → 'A24 [PL]'\n"
+            "Сохраняется информация о странах ([PL], [LV], [AM] и т.д.) и региональных каналах (Астрахань, Тюмень)"
+        )
+        info_label.setWordWrap(True)
+        info_label.setStyleSheet("color: gray; font-style: italic;")
+        normalization_layout.addWidget(info_label)
+        
+        basic_layout.addWidget(normalization_group)
+        
         replace_group = QGroupBox("Настройки замены")
         replace_layout = QVBoxLayout(replace_group)
         
@@ -3676,6 +3944,12 @@ class LinkReplacementSettingsDialog(QDialog):
         else:
             self.search_type_combo.setCurrentIndex(2)
         
+        # Загружаем настройки нормализации
+        self.ignore_special_chars_check.setChecked(self.settings.ignore_special_chars_in_names)
+        self.remove_parentheses_check.setChecked(self.settings.remove_parentheses_in_names)
+        self.remove_brackets_check.setChecked(self.settings.remove_brackets_in_names)
+        self.remove_emojis_check.setChecked(self.settings.remove_emojis_in_names)
+        
         self.filter_temp_check.setChecked(self.settings.filter_temporary_links)
         self.temp_domains_edit.setText(", ".join(self.settings.temporary_domains))
         self.filter_unsafe_check.setChecked(self.settings.filter_unsafe_links)
@@ -3722,6 +3996,12 @@ class LinkReplacementSettingsDialog(QDialog):
             self.settings.search_type = "similar"
         else:
             self.settings.search_type = "fuzzy"
+        
+        # Сохраняем настройки нормализации
+        self.settings.ignore_special_chars_in_names = self.ignore_special_chars_check.isChecked()
+        self.settings.remove_parentheses_in_names = self.remove_parentheses_check.isChecked()
+        self.settings.remove_brackets_in_names = self.remove_brackets_check.isChecked()
+        self.settings.remove_emojis_in_names = self.remove_emojis_check.isChecked()
         
         self.settings.filter_temporary_links = self.filter_temp_check.isChecked()
         self.settings.temporary_domains = [d.strip() for d in self.temp_domains_edit.text().split(",") if d.strip()]
@@ -6191,6 +6471,12 @@ class MainWindow(QMainWindow):
             self.link_replacement_settings.whitelisted_domains = whitelist_domains
         else:
             self.link_replacement_settings.whitelisted_domains = []
+        
+        # Загружаем настройки нормализации
+        self.link_replacement_settings.ignore_special_chars_in_names = settings.value("ignore_special_chars_in_names", True, type=bool)
+        self.link_replacement_settings.remove_parentheses_in_names = settings.value("remove_parentheses_in_names", True, type=bool)
+        self.link_replacement_settings.remove_brackets_in_names = settings.value("remove_brackets_in_names", True, type=bool)
+        self.link_replacement_settings.remove_emojis_in_names = settings.value("remove_emojis_in_names", True, type=bool)
     
     def _save_ip_filter_settings(self):
         """Сохраняет настройки фильтрации IP/доменов"""
@@ -6200,6 +6486,12 @@ class MainWindow(QMainWindow):
         settings.setValue("blacklist_domains", self.link_replacement_settings.blacklisted_domains)
         settings.setValue("whitelist_ips", self.link_replacement_settings.whitelisted_ips)
         settings.setValue("whitelist_domains", self.link_replacement_settings.whitelisted_domains)
+        
+        # Сохраняем настройки нормализации
+        settings.setValue("ignore_special_chars_in_names", self.link_replacement_settings.ignore_special_chars_in_names)
+        settings.setValue("remove_parentheses_in_names", self.link_replacement_settings.remove_parentheses_in_names)
+        settings.setValue("remove_brackets_in_names", self.link_replacement_settings.remove_brackets_in_names)
+        settings.setValue("remove_emojis_in_names", self.link_replacement_settings.remove_emojis_in_names)
     
     def _setup_ui(self):
         central_widget = QWidget()
