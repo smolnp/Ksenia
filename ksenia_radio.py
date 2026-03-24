@@ -2,7 +2,7 @@
 """
 Ksenia Radio Player
 Оптимизированный радио-плеер для работы с M3U плейлистами
-Поддержка: Linux, Windows
+Поддержка: Linux, Windows, macOS
 """
 
 import sys
@@ -10,7 +10,7 @@ import os
 import json
 import re
 import hashlib
-import traceback
+import platform
 from pathlib import Path
 from urllib.parse import urlparse
 from PyQt6.QtWidgets import *
@@ -49,12 +49,17 @@ class M3UParser:
             if parsed.scheme in ('http', 'https'):
                 try:
                     import requests
-                    response = requests.get(file_path, timeout=15)
+                    response = requests.get(file_path, timeout=15, headers={
+                        'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36'
+                    })
                     response.raise_for_status()
                     content = response.text
                 except ImportError:
                     import urllib.request
-                    with urllib.request.urlopen(file_path, timeout=15) as response:
+                    req = urllib.request.Request(file_path, headers={
+                        'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36'
+                    })
+                    with urllib.request.urlopen(req, timeout=15) as response:
                         content = response.read().decode('utf-8', errors='ignore')
                 except Exception as e:
                     raise Exception(f"Ошибка загрузки URL: {str(e)}")
@@ -181,7 +186,7 @@ class VolumeControlWidget(QWidget):
     def wheelEvent(self, event):
         """Обработка колесика мыши для регулировки громкости"""
         delta = event.angleDelta().y()
-        step = 5  # Шаг изменения громкости
+        step = 5
         
         current_volume = self.volume_slider.value()
         
@@ -272,37 +277,31 @@ class ScreenLockWindow(QWidget):
         self.init_ui()
         
     def init_ui(self):
-        # Устанавливаем флаги для окна блокировки
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint |
             Qt.WindowType.WindowStaysOnTopHint |
             Qt.WindowType.Tool
         )
         
-        # На весь экран
         screen_geometry = QApplication.primaryScreen().geometry()
         self.setGeometry(screen_geometry)
         
-        # Темно-синий фон
         self.setStyleSheet("""
             QWidget {
                 background-color: rgba(0, 18, 36, 0.95);
             }
         """)
         
-        # Основной контейнер
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
         
-        # Центральный виджет с информацией
         center_widget = QWidget()
         center_widget.setObjectName("centerWidget")
         center_layout = QVBoxLayout(center_widget)
         center_layout.setSpacing(20)
         center_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
-        # Иконка радио
         radio_icon = QLabel("📻")
         radio_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         radio_icon.setStyleSheet("""
@@ -313,7 +312,6 @@ class ScreenLockWindow(QWidget):
         """)
         center_layout.addWidget(radio_icon)
         
-        # Название текущей станции
         self.station_label = QLabel("Радио не играет")
         self.station_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.station_label.setStyleSheet("""
@@ -327,7 +325,6 @@ class ScreenLockWindow(QWidget):
         self.station_label.setWordWrap(True)
         center_layout.addWidget(self.station_label)
         
-        # Жанр станции
         self.genre_label = QLabel("")
         self.genre_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.genre_label.setStyleSheet("""
@@ -339,7 +336,6 @@ class ScreenLockWindow(QWidget):
         """)
         center_layout.addWidget(self.genre_label)
         
-        # Статус воспроизведения
         self.status_label = QLabel("⏸ Пауза")
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.status_label.setStyleSheet("""
@@ -352,7 +348,6 @@ class ScreenLockWindow(QWidget):
         """)
         center_layout.addWidget(self.status_label)
         
-        # Инструкция
         instruction = QLabel("Двойной клик для разблокировки")
         instruction.setAlignment(Qt.AlignmentFlag.AlignCenter)
         instruction.setStyleSheet("""
@@ -376,13 +371,10 @@ class ScreenLockWindow(QWidget):
         self.status_label.setText("▶ В эфире" if is_playing else "⏸ Пауза")
     
     def mouseDoubleClickEvent(self, event):
-        """Обработка двойного клика для разблокировки"""
         self.parent.toggle_screen_lock()
         event.accept()
     
     def keyPressEvent(self, event):
-        """Обработка нажатий клавиш"""
-        # ESC или F11 для разблокировки
         if event.key() in [Qt.Key.Key_Escape, Qt.Key.Key_F11, Qt.Key.Key_Space]:
             self.parent.toggle_screen_lock()
         else:
@@ -400,57 +392,53 @@ class KseniaRadioPlayer(QMainWindow):
         self.setGeometry(100, 100, 500, 650)
         self.setMinimumSize(450, 500)
         
-        # Флаг для отслеживания изменения размера
+        # Определяем ОС для специфичных настроек
+        self.os_name = platform.system()
+        
+        # Флаги
         self._resizing = False
         self._resize_edge = None
         self._resize_start_pos = None
         self._resize_start_geometry = None
-        self._mouse_pos = QPoint()  # Для отслеживания позиции мыши
-        
-        # Переменные для блокировки экрана
+        self._mouse_pos = QPoint()
         self.screen_locked = False
         self.lock_window = None
-        
-        # Переменные для перетаскивания
         self._dragging = False
         self._drag_position = QPoint()
-        
-        # Флаг для предотвращения рекурсии при ошибках
         self._error_handling = False
+        self._skip_error = False
         
-        # Устанавливаем флаги окна
-        self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint
-        )
-        
-        # Включаем прозрачность для закругленных углов
+        # Настройки окна для разных ОС
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        
-        # Включаем отслеживание мыши для изменения курсора
         self.setMouseTracking(True)
         
         self.set_app_icon()
         
-        # Инициализация медиаплеера
+        # Медиаплеер
         self.player = QMediaPlayer()
         self.audio_output = QAudioOutput()
         self.player.setAudioOutput(self.audio_output)
         
-        # Менеджер сетевых запросов
+        # Настройка медиаплеера для Linux
+        if self.os_name == "Linux":
+            # Для Linux устанавливаем более высокий приоритет аудио
+            self.player.setAudioRole(QAudio.Role.MusicRole)
+        
+        # Сетевой менеджер
         self.network_manager = QNetworkAccessManager()
         self.network_manager.finished.connect(self.on_image_loaded)
         
-        # Переменные состояния
+        # Состояние
         self.current_volume = 50
         self.radio_stations = []
         self.current_index = -1
-        self._skip_error = False  # Флаг для пропуска ошибок при смене станции
         
         # Кэширование
         self.logo_cache = {}
         self.pending_image_requests = {}
         
-        # Настройки
+        # Загрузка настроек
         self.load_settings()
         
         # Инициализация интерфейса
@@ -465,7 +453,7 @@ class KseniaRadioPlayer(QMainWindow):
         # Начальная громкость
         self.audio_output.setVolume(self.current_volume / 100.0)
         
-        # Загрузка плейлиста по умолчанию
+        # Загрузка плейлиста
         QTimer.singleShot(100, self.load_default_playlist)
     
     def set_app_icon(self):
@@ -555,13 +543,12 @@ class KseniaRadioPlayer(QMainWindow):
         info_layout.addWidget(info_text_widget, 1)
         content_layout.addWidget(info_container)
         
-        # Панель управления плеером
+        # Панель управления
         controls_container = QWidget()
         controls_layout = QHBoxLayout(controls_container)
         controls_layout.setContentsMargins(0, 0, 0, 0)
         controls_layout.setSpacing(5)
         
-        # Кнопки управления
         self.prev_btn = QPushButton("⏮")
         self.prev_btn.setFixedSize(45, 45)
         self.prev_btn.clicked.connect(self.prev_station)
@@ -580,7 +567,6 @@ class KseniaRadioPlayer(QMainWindow):
         self.next_btn.setToolTip("Следующая станция")
         self.next_btn.setObjectName("controlButton")
         
-        # Центрируем кнопки
         controls_layout.addStretch()
         controls_layout.addWidget(self.prev_btn)
         controls_layout.addWidget(self.play_btn)
@@ -589,14 +575,14 @@ class KseniaRadioPlayer(QMainWindow):
         
         content_layout.addWidget(controls_container)
         
-        # Ползунок громкости с поддержкой колесика мыши
+        # Громкость
         self.volume_control = VolumeControlWidget()
         self.volume_control.volume_slider.valueChanged.connect(self.set_volume)
         self.volume_control.volumeChanged.connect(self.set_volume)
         self.volume_control.set_volume(self.current_volume)
         content_layout.addWidget(self.volume_control)
         
-        # Таблица радиостанций
+        # Таблица станций
         self.stations_table = QTableWidget()
         self.stations_table.setObjectName("stationsTable")
         self.stations_table.setColumnCount(2)
@@ -608,12 +594,10 @@ class KseniaRadioPlayer(QMainWindow):
         self.stations_table.doubleClicked.connect(self.play_selected_station)
         self.stations_table.setAlternatingRowColors(True)
         
-        # Показываем вертикальный заголовок для отображения количества строк
         self.stations_table.verticalHeader().setVisible(True)
         self.stations_table.verticalHeader().setDefaultSectionSize(35)
         self.stations_table.verticalHeader().setMinimumWidth(40)
         
-        # Настройка таблицы
         header = self.stations_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
@@ -642,9 +626,8 @@ class KseniaRadioPlayer(QMainWindow):
         
         self.apply_styles()
     
-    # --- Функции перетаскивания и изменения размера ---
     def get_resize_edge(self, pos):
-        """Определяет, на какой границе находится курсор для изменения размера"""
+        """Определяет границу для изменения размера"""
         margin = 8
         rect = self.rect()
         
@@ -668,7 +651,7 @@ class KseniaRadioPlayer(QMainWindow):
         return None
     
     def set_cursor_for_edge(self, edge):
-        """Устанавливает соответствующий курсор для границы"""
+        """Устанавливает курсор для границы"""
         if edge is None:
             self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
         elif edge in ["top", "bottom"]:
@@ -749,12 +732,12 @@ class KseniaRadioPlayer(QMainWindow):
         super().mouseReleaseEvent(event)
     
     def leaveEvent(self, event):
-        """Обработка выхода курсора за пределы окна"""
+        """Обработка выхода курсора"""
         self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
         super().leaveEvent(event)
     
     def handle_resize(self, global_pos):
-        """Обработка изменения размера окна"""
+        """Обработка изменения размера"""
         if not self._resize_start_geometry:
             return
         
@@ -802,7 +785,7 @@ class KseniaRadioPlayer(QMainWindow):
             self.setGeometry(x, y, new_width, new_height)
     
     def paintEvent(self, event):
-        """Отрисовка закругленных углов и границы"""
+        """Отрисовка окна"""
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         
@@ -821,49 +804,39 @@ class KseniaRadioPlayer(QMainWindow):
         
         super().paintEvent(event)
     
-    # --- Функции блокировки экрана ---
     def toggle_screen_lock(self):
-        """Переключение режима блокировки экрана"""
+        """Переключение блокировки экрана"""
         self.screen_locked = not self.screen_locked
         
         if self.screen_locked:
-            self.enter_screen_lock_mode()
+            if not self.lock_window:
+                self.lock_window = ScreenLockWindow(self)
+            
+            station_name = ""
+            station_genre = ""
+            is_playing = False
+            
+            if self.current_index >= 0 and self.current_index < len(self.radio_stations):
+                station = self.radio_stations[self.current_index]
+                station_name = station['name']
+                station_genre = station['genre']
+                is_playing = self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+            
+            self.lock_window.update_info(station_name, station_genre, is_playing)
+            self.lock_window.showFullScreen()
+            self.hide()
+            
+            if hasattr(self, 'title_bar'):
+                self.title_bar.lock_btn.setChecked(True)
+                self.title_bar.lock_btn.setText("🔓")
         else:
-            self.exit_screen_lock_mode()
-    
-    def enter_screen_lock_mode(self):
-        """Вход в режим блокировки экрана"""
-        if not self.lock_window:
-            self.lock_window = ScreenLockWindow(self)
-        
-        station_name = ""
-        station_genre = ""
-        is_playing = False
-        
-        if self.current_index >= 0 and self.current_index < len(self.radio_stations):
-            station = self.radio_stations[self.current_index]
-            station_name = station['name']
-            station_genre = station['genre']
-            is_playing = self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
-        
-        self.lock_window.update_info(station_name, station_genre, is_playing)
-        self.lock_window.showFullScreen()
-        self.hide()
-        
-        if hasattr(self, 'title_bar'):
-            self.title_bar.lock_btn.setChecked(True)
-            self.title_bar.lock_btn.setText("🔓")
-    
-    def exit_screen_lock_mode(self):
-        """Выход из режима блокировки экрана"""
-        if self.lock_window:
-            self.lock_window.hide()
-        
-        self.show()
-        
-        if hasattr(self, 'title_bar'):
-            self.title_bar.lock_btn.setChecked(False)
-            self.title_bar.lock_btn.setText("🔒")
+            if self.lock_window:
+                self.lock_window.hide()
+            self.show()
+            
+            if hasattr(self, 'title_bar'):
+                self.title_bar.lock_btn.setChecked(False)
+                self.title_bar.lock_btn.setText("🔒")
     
     def update_lock_screen_info(self):
         """Обновление информации на экране блокировки"""
@@ -881,7 +854,7 @@ class KseniaRadioPlayer(QMainWindow):
             self.lock_window.update_info(station_name, station_genre, is_playing)
     
     def load_default_playlist(self):
-        """Загрузка плейлиста по умолчанию"""
+        """Загрузка плейлиста"""
         default_url = "https://raw.githubusercontent.com/smolnp/IPTVru/refs/heads/gh-pages/IPRadio.m3u"
         self.status_label.setText("Загрузка плейлиста...")
         QApplication.processEvents()
@@ -901,14 +874,14 @@ class KseniaRadioPlayer(QMainWindow):
             self.status_label.setText("Ошибка загрузки плейлиста")
     
     def preload_station_logos(self):
-        """Фоновая предзагрузка логотипов"""
+        """Предзагрузка логотипов"""
         for i, station in enumerate(self.radio_stations):
             logo_url = station.get('logo_url', '')
             if logo_url and logo_url not in self.logo_cache and logo_url not in self.pending_image_requests:
                 self.load_image_from_url(logo_url, f"station_{i}")
     
     def load_image_from_url(self, url, identifier):
-        """Асинхронная загрузка изображения"""
+        """Загрузка изображения"""
         if not url or url in self.pending_image_requests:
             return
         
@@ -942,7 +915,7 @@ class KseniaRadioPlayer(QMainWindow):
             reply.deleteLater()
     
     def on_image_loaded_signal(self, identifier, pixmap):
-        """Обновление изображения при загрузке"""
+        """Сигнал загрузки изображения"""
         if identifier.startswith("station_"):
             try:
                 station_index = int(identifier.split("_")[1])
@@ -952,7 +925,6 @@ class KseniaRadioPlayer(QMainWindow):
             except (ValueError, IndexError):
                 pass
     
-    # --- Управление изображениями ---
     def set_default_image(self):
         """Установка изображения по умолчанию"""
         pixmap = QPixmap(120, 120)
@@ -975,7 +947,7 @@ class KseniaRadioPlayer(QMainWindow):
         self.cover_label.setPixmap(pixmap)
     
     def set_station_image(self, station_name):
-        """Установка изображения радиостанции"""
+        """Установка изображения станции"""
         station = None
         station_index = -1
         
@@ -1039,7 +1011,7 @@ class KseniaRadioPlayer(QMainWindow):
         self.cover_label.setPixmap(pixmap)
     
     def update_stations_table(self):
-        """Обновление таблицы радиостанций"""
+        """Обновление таблицы станций"""
         self.stations_table.setRowCount(len(self.radio_stations))
         
         for i in range(len(self.radio_stations)):
@@ -1063,7 +1035,6 @@ class KseniaRadioPlayer(QMainWindow):
             genre_item.setForeground(QColor(162, 198, 230))
             self.stations_table.setItem(i, 1, genre_item)
     
-    # --- Управление воспроизведением ---
     def play_selected_station(self):
         """Воспроизведение выбранной станции"""
         selected_row = self.stations_table.currentRow()
@@ -1073,7 +1044,7 @@ class KseniaRadioPlayer(QMainWindow):
             self.update_lock_screen_info()
     
     def play_radio_station(self, index):
-        """Воспроизведение радиостанции по индексу"""
+        """Воспроизведение радиостанции"""
         if index < len(self.radio_stations):
             station = self.radio_stations[index]
             
@@ -1082,10 +1053,7 @@ class KseniaRadioPlayer(QMainWindow):
                 return
             
             try:
-                # Останавливаем текущее воспроизведение
                 self.player.stop()
-                
-                # Устанавливаем новый источник
                 self.player.setSource(QUrl(station['url']))
                 
                 self.title_label.setText(station['name'])
@@ -1094,7 +1062,6 @@ class KseniaRadioPlayer(QMainWindow):
                 
                 self.set_station_image(station['name'])
                 
-                # Запускаем воспроизведение с небольшой задержкой
                 QTimer.singleShot(100, lambda: self._start_playback(index))
                 
             except Exception as e:
@@ -1102,7 +1069,7 @@ class KseniaRadioPlayer(QMainWindow):
                 self.status_label.setText("❌ Ошибка воспроизведения")
     
     def _start_playback(self, index):
-        """Запуск воспроизведения после установки источника"""
+        """Запуск воспроизведения"""
         if index < len(self.radio_stations):
             self.player.play()
             self.current_index = index
@@ -1150,7 +1117,7 @@ class KseniaRadioPlayer(QMainWindow):
         self.play_radio_station(new_index)
     
     def highlight_current_station(self, index):
-        """Выделение текущей станции в таблице"""
+        """Выделение текущей станции"""
         for i in range(self.stations_table.rowCount()):
             for col in range(2):
                 item = self.stations_table.item(i, col)
@@ -1163,13 +1130,6 @@ class KseniaRadioPlayer(QMainWindow):
                         station = self.radio_stations[i]
                         item.setForeground(QColor(90, 135, 180) if not station.get('available', True) else QColor(198, 216, 230))
     
-    # --- Обработка ошибок ---
-    def handle_error(self, context, error):
-        """Обработка ошибок"""
-        print(f"Ошибка: {context}: {error}")
-        if not self._skip_error:
-            self.status_label.setText("❌ Ошибка воспроизведения")
-    
     def on_playback_state_changed(self, state):
         """Обработка изменения состояния воспроизведения"""
         if state == QMediaPlayer.PlaybackState.StoppedState:
@@ -1180,7 +1140,7 @@ class KseniaRadioPlayer(QMainWindow):
         self.update_lock_screen_info()
     
     def on_player_error(self, error, error_string):
-        """Обработка ошибок медиаплеера - с защитой от рекурсии"""
+        """Обработка ошибок медиаплеера"""
         if self._error_handling or self._skip_error:
             return
         
@@ -1190,15 +1150,15 @@ class KseniaRadioPlayer(QMainWindow):
             error_msg = str(error_string)
             print(f"Ошибка воспроизведения: {error_msg}")
             
-            # Игнорируем ошибки декодирования mp3
-            if "mp3float" in error_msg or "overread" in error_msg:
-                # Просто игнорируем ошибки декодирования
+            # Игнорируем ошибки декодирования
+            if any(x in error_msg.lower() for x in ['mp3float', 'overread', 'codec', 'format']):
+                # Просто игнорируем
                 pass
             elif "Resource not found" in error_msg or "404" in error_msg:
                 self.status_label.setText("❌ Файл не найден")
             elif "resolve" in error_msg or "NetworkError" in error_msg:
                 self.status_label.setText("❌ Нет подключения")
-            elif "format" in error_msg.lower() or "unsupported" in error_msg.lower():
+            elif "unsupported" in error_msg.lower():
                 self.status_label.setText("❌ Неподдерживаемый формат")
             else:
                 self.status_label.setText("❌ Ошибка воспроизведения")
@@ -1212,7 +1172,6 @@ class KseniaRadioPlayer(QMainWindow):
         finally:
             self._error_handling = False
     
-    # --- Управление громкостью ---
     def set_volume(self, volume):
         """Установка громкости"""
         self.current_volume = volume
@@ -1228,7 +1187,6 @@ class KseniaRadioPlayer(QMainWindow):
         except:
             pass
     
-    # --- Стили ---
     def apply_styles(self):
         """Применение стилей"""
         style_sheet = """
@@ -1483,9 +1441,8 @@ class KseniaRadioPlayer(QMainWindow):
         
         self.setStyleSheet(style_sheet)
     
-    # --- Настройки ---
     def get_config_path(self):
-        """Получение пути к файлу конфигурации"""
+        """Получение пути к конфигурации"""
         if sys.platform == "win32":
             config_dir = Path.home() / "AppData" / "Local" / "KseniaRadio"
         else:
@@ -1551,7 +1508,7 @@ class KseniaRadioPlayer(QMainWindow):
 
 # --- Запуск приложения ---
 def main():
-    """Точка входа в приложение"""
+    """Точка входа"""
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
