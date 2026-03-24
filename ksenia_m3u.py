@@ -16,9 +16,7 @@ import logging
 import hashlib
 import csv
 from difflib import SequenceMatcher
-import socket
 import urllib3
-import unicodedata
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -129,12 +127,36 @@ class ChannelNameNormalizer:
     )
     
     @staticmethod
+    def fix_encoding(text: str) -> str:
+        """Исправление кодировки для строк, которые выглядят как испорченная кириллица"""
+        if not text:
+            return text
+        
+        try:
+            if any(c in text for c in ['–', '—', '∏', 'ø', '—Å', '—Å–ø', '–°–ø']):
+                bytes_data = text.encode('latin1')
+                decoded = bytes_data.decode('utf-8', errors='replace')
+                if any(c in decoded for c in ['а', 'б', 'в', 'г', 'д']):
+                    return decoded
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            pass
+        
+        try:
+            if any(ord(c) > 127 for c in text):
+                return text
+        except:
+            pass
+        
+        return text
+    
+    @staticmethod
     def normalize(name: str, remove_parentheses: bool = True, remove_brackets: bool = True, 
                   remove_emojis: bool = True, remove_special_chars: bool = True) -> str:
         if not name:
             return ""
         
-        normalized = name
+        fixed_name = ChannelNameNormalizer.fix_encoding(name)
+        normalized = fixed_name
         
         if remove_parentheses:
             for pattern in ChannelNameNormalizer.QUALITY_PATTERNS:
@@ -172,9 +194,6 @@ class ChannelNameNormalizer:
         no_emojis = ChannelNameNormalizer.normalize(name, remove_parentheses=False, remove_brackets=False)
         if no_emojis and no_emojis != base_normalized:
             variants.append(no_emojis)
-        no_remove_brackets = ChannelNameNormalizer.normalize(name, remove_parentheses=False, remove_brackets=False, remove_emojis=True)
-        if no_remove_brackets and no_remove_brackets != base_normalized:
-            variants.append(no_remove_brackets)
         return list(dict.fromkeys(variants))
     
     @staticmethod
@@ -210,36 +229,6 @@ class ChannelNameNormalizer:
             if not re.search(r'[0-9]+[pPi]', region, re.IGNORECASE):
                 return region
         return None
-    
-    @staticmethod
-    def extract_timezone(name: str) -> Optional[str]:
-        match = re.search(r'\(\+(\d+)\)', name)
-        if match:
-            return match.group(1)
-        return None
-    
-    @staticmethod
-    def fix_encoding(text: str) -> str:
-        """Исправление кодировки для строк, которые выглядят как испорченная кириллица"""
-        if not text:
-            return text
-        
-        try:
-            if '–' in text or '—' in text or '∏' in text or 'ø' in text:
-                bytes_data = text.encode('latin1')
-                decoded = bytes_data.decode('utf-8', errors='replace')
-                if any(c in decoded for c in ['а', 'б', 'в', 'г', 'д']):
-                    return decoded
-        except (UnicodeEncodeError, UnicodeDecodeError):
-            pass
-        
-        try:
-            if any(ord(c) > 127 for c in text):
-                return text
-        except:
-            pass
-        
-        return text
 
 
 class LinkSource:
@@ -352,8 +341,6 @@ class ChannelData:
         self.link_quality: LinkQuality = LinkQuality.UNKNOWN
         self.link_response_time: Optional[float] = None
         self.alternative_urls: List[str] = []
-        self.url_history: List[Dict[str, Any]] = []
-        self.last_link_replacement: Optional[datetime] = None
         self.created_date: datetime = datetime.now()
         self.modified_date: datetime = datetime.now()
     
@@ -375,8 +362,6 @@ class ChannelData:
         channel.link_quality = self.link_quality
         channel.link_response_time = self.link_response_time
         channel.alternative_urls = self.alternative_urls.copy()
-        channel.url_history = self.url_history.copy()
-        channel.last_link_replacement = self.last_link_replacement
         channel.created_date = self.created_date
         channel.modified_date = self.modified_date
         return channel
@@ -460,20 +445,6 @@ class ChannelData:
             else:
                 self.extvlcopt_lines.append(f'#EXTVLCOPT:http-header="{key}: {value}"')
     
-    def add_url_to_history(self, old_url: str, new_url: str, reason: str, source: str = ""):
-        self.url_history.append({
-            'old_url': old_url,
-            'new_url': new_url,
-            'reason': reason,
-            'source': source,
-            'timestamp': datetime.now().isoformat(),
-            'channel_name': self.name
-        })
-        
-        if len(self.url_history) > 10:
-            self.url_history = self.url_history[-10:]
-        self.modified_date = datetime.now()
-    
     def get_quality_color(self) -> QColor:
         if self.link_quality == LinkQuality.UNKNOWN:
             return QColor("gray")
@@ -533,10 +504,6 @@ class ChannelData:
         if self.alternative_urls:
             tooltip += f"\nАльтернативных ссылок: {len(self.alternative_urls)}"
         
-        if self.url_history:
-            last_change = self.url_history[-1]
-            tooltip += f"\nПоследняя замена: {last_change.get('reason', '')}"
-        
         tooltip += f"\nСоздан: {self.created_date.strftime('%Y-%m-%d %H:%M')}"
         tooltip += f"\nИзменён: {self.modified_date.strftime('%Y-%m-%d %H:%M')}"
         
@@ -560,8 +527,6 @@ class ChannelData:
             'link_quality': self.link_quality.value,
             'link_response_time': self.link_response_time,
             'alternative_urls': self.alternative_urls,
-            'url_history': self.url_history,
-            'last_link_replacement': self.last_link_replacement.isoformat() if self.last_link_replacement else None,
             'created_date': self.created_date.isoformat(),
             'modified_date': self.modified_date.isoformat()
         }
@@ -597,14 +562,6 @@ class ChannelData:
         
         channel.link_response_time = data.get('link_response_time')
         channel.alternative_urls = data.get('alternative_urls', [])
-        channel.url_history = data.get('url_history', [])
-        
-        replacement_time = data.get('last_link_replacement')
-        if replacement_time:
-            try:
-                channel.last_link_replacement = datetime.fromisoformat(replacement_time)
-            except (ValueError, TypeError):
-                channel.last_link_replacement = None
         
         created_date = data.get('created_date')
         if created_date:
@@ -867,7 +824,6 @@ class LinkSourceManager:
         return None
     
     def _detect_encoding(self, content: bytes) -> str:
-        """Определение кодировки содержимого"""
         try:
             content.decode('utf-8')
             return 'utf-8'
@@ -887,22 +843,6 @@ class LinkSourceManager:
             pass
         
         return 'utf-8'
-    
-    def _fix_broken_cyrillic(self, text: str) -> str:
-        """Исправление битой кириллицы в тексте"""
-        if not text:
-            return text
-        
-        try:
-            if '–' in text or '—' in text or '∏' in text or 'ø' in text:
-                bytes_data = text.encode('latin1')
-                decoded = bytes_data.decode('utf-8', errors='replace')
-                if any(c in decoded for c in ['а', 'б', 'в', 'г', 'д']):
-                    return decoded
-        except (UnicodeEncodeError, UnicodeDecodeError):
-            pass
-        
-        return text
     
     def load_links_from_source(self, source: LinkSource) -> List[ChannelData]:
         channels = []
@@ -1120,22 +1060,6 @@ class LinkSourceManager:
             norm2 = channel_name.lower()
         
         return SequenceMatcher(None, norm1, norm2).ratio()
-    
-    def _calculate_similarity(self, str1: str, str2: str) -> float:
-        str1 = str1.lower()
-        str2 = str2.lower()
-        
-        if str1 == str2:
-            return 1.0
-        
-        if not str1 or not str2:
-            return 0.0
-        
-        common = 0
-        for char in set(str1):
-            common += min(str1.count(char), str2.count(char))
-        
-        return common / max(len(str1), len(str2))
     
     def _get_source_priority(self, source_name: str) -> int:
         source = self.get_source_by_name(source_name)
@@ -1366,7 +1290,6 @@ class LinkReplacementWorker(BaseWorker):
             if new_url:
                 old_url = channel.url
                 channel.url = new_url
-                channel.add_url_to_history(old_url, new_url, reason, "auto_replacement")
                 channel.last_link_replacement = datetime.now()
                 return channel, old_url, new_url
         
@@ -2114,10 +2037,6 @@ class ChannelTableWidget(QTableWidget):
                 replace_link_action.triggered.connect(lambda: self._replace_link(row))
                 menu.addAction(replace_link_action)
                 
-                show_link_history_action = QAction("Показать историю ссылок", menu)
-                show_link_history_action.triggered.connect(lambda: self._show_link_history(row))
-                menu.addAction(show_link_history_action)
-                
                 menu.addSeparator()
                 
                 delete_action = QAction("Удалить канал", menu)
@@ -2231,10 +2150,6 @@ class ChannelTableWidget(QTableWidget):
     def _replace_selected_links(self):
         if self.playlist_tab and hasattr(self.playlist_tab, 'replace_selected_links'):
             self.playlist_tab.replace_selected_links()
-    
-    def _show_link_history(self, row: int):
-        if self.playlist_tab and hasattr(self.playlist_tab, 'show_link_history'):
-            self.playlist_tab.show_link_history(row)
     
     def _new_channel(self):
         if self.playlist_tab and hasattr(self.playlist_tab, '_new_channel'):
@@ -2780,292 +2695,6 @@ class PlaylistHeaderDialog(QDialog):
         super().accept()
 
 
-class CopyMetadataDialog(QDialog):
-    
-    def __init__(self, main_window, parent=None):
-        super().__init__(parent)
-        self.main_window = main_window
-        self.setWindowTitle("Копирование метаданных между плейлистами")
-        self.resize(600, 400)
-        
-        self._setup_ui()
-    
-    def _setup_ui(self):
-        layout = QVBoxLayout(self)
-        
-        info_label = QLabel("Копирование метаданных из одного плейлиста в другой")
-        info_label.setStyleSheet("font-weight: bold;")
-        layout.addWidget(info_label)
-        
-        source_group = QGroupBox("Исходный плейлист (откуда копировать)")
-        source_layout = QVBoxLayout(source_group)
-        
-        self.source_tab_combo = QComboBox()
-        source_layout.addWidget(QLabel("Выберите вкладку:"))
-        source_layout.addWidget(self.source_tab_combo)
-        
-        self.source_channels_list = QListWidget()
-        self.source_channels_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
-        source_layout.addWidget(QLabel("Выберите каналы:"))
-        source_layout.addWidget(self.source_channels_list)
-        
-        layout.addWidget(source_group)
-        
-        target_group = QGroupBox("Целевой плейлист (куда вставить)")
-        target_layout = QVBoxLayout(target_group)
-        
-        self.target_tab_combo = QComboBox()
-        target_layout.addWidget(QLabel("Выберите вкладку:"))
-        target_layout.addWidget(self.target_tab_combo)
-        
-        self.target_channels_list = QListWidget()
-        self.target_channels_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
-        target_layout.addWidget(QLabel("Выберите каналы для обновления:"))
-        target_layout.addWidget(self.target_channels_list)
-        
-        layout.addWidget(target_group)
-        
-        options_group = QGroupBox("Параметры копирования")
-        options_layout = QVBoxLayout(options_group)
-        
-        self.copy_tvg_id_check = QCheckBox("Копировать TVG-ID")
-        self.copy_tvg_id_check.setChecked(True)
-        options_layout.addWidget(self.copy_tvg_id_check)
-        
-        self.copy_logo_check = QCheckBox("Копировать логотип")
-        self.copy_logo_check.setChecked(True)
-        options_layout.addWidget(self.copy_logo_check)
-        
-        self.copy_group_check = QCheckBox("Копировать группу")
-        self.copy_group_check.setChecked(True)
-        options_layout.addWidget(self.copy_group_check)
-        
-        self.copy_user_agent_check = QCheckBox("Копировать User-Agent")
-        self.copy_user_agent_check.setChecked(True)
-        options_layout.addWidget(self.copy_user_agent_check)
-        
-        self.copy_headers_check = QCheckBox("Копировать заголовки HTTP")
-        self.copy_headers_check.setChecked(True)
-        options_layout.addWidget(self.copy_headers_check)
-        
-        self.match_by_name_radio = QRadioButton("Сопоставлять по названию канала")
-        self.match_by_name_radio.setChecked(True)
-        options_layout.addWidget(self.match_by_name_radio)
-        
-        self.match_by_name_group_radio = QRadioButton("Сопоставлять по названию и группе")
-        options_layout.addWidget(self.match_by_name_group_radio)
-        
-        layout.addWidget(options_group)
-        
-        button_box = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok |
-            QDialogButtonBox.StandardButton.Cancel
-        )
-        button_box.accepted.connect(self.accept)
-        button_box.rejected.connect(self.reject)
-        
-        preview_btn = QPushButton("Предпросмотр изменений")
-        preview_btn.clicked.connect(self._preview_changes)
-        button_box.addButton(preview_btn, QDialogButtonBox.ButtonRole.ActionRole)
-        
-        layout.addWidget(button_box)
-        
-        self._populate_tab_lists()
-        
-        self.source_tab_combo.currentIndexChanged.connect(self._update_source_channels)
-        self.target_tab_combo.currentIndexChanged.connect(self._update_target_channels)
-    
-    def _populate_tab_lists(self):
-        self.source_tab_combo.clear()
-        self.target_tab_combo.clear()
-        
-        for i in range(self.main_window.tab_widget.count()):
-            widget = self.main_window.tab_widget.widget(i)
-            tab_name = self.main_window.tab_widget.tabText(i)
-            
-            if widget in self.main_window.tabs and self.main_window.tabs[widget] is not None:
-                self.source_tab_combo.addItem(tab_name, i)
-                self.target_tab_combo.addItem(tab_name, i)
-        
-        if self.source_tab_combo.count() > 0:
-            self._update_source_channels()
-            self._update_target_channels()
-    
-    def _update_source_channels(self):
-        self.source_channels_list.clear()
-        
-        index = self.source_tab_combo.currentData()
-        if index is None:
-            return
-        
-        widget = self.main_window.tab_widget.widget(index)
-        if widget not in self.main_window.tabs:
-            return
-        
-        tab = self.main_window.tabs[widget]
-        if tab is None:
-            return
-        
-        for channel in tab.all_channels:
-            item = QListWidgetItem(channel.name)
-            item.setData(Qt.ItemDataRole.UserRole, channel)
-            self.source_channels_list.addItem(item)
-    
-    def _update_target_channels(self):
-        self.target_channels_list.clear()
-        
-        index = self.target_tab_combo.currentData()
-        if index is None:
-            return
-        
-        widget = self.main_window.tab_widget.widget(index)
-        if widget not in self.main_window.tabs:
-            return
-        
-        tab = self.main_window.tabs[widget]
-        if tab is None:
-            return
-        
-        for channel in tab.all_channels:
-            item = QListWidgetItem(channel.name)
-            item.setData(Qt.ItemDataRole.UserRole, channel)
-            self.target_channels_list.addItem(item)
-    
-    def _preview_changes(self):
-        source_tab_index = self.source_tab_combo.currentData()
-        target_tab_index = self.target_tab_combo.currentData()
-        
-        if source_tab_index is None or target_tab_index is None:
-            QMessageBox.warning(self, "Предупреждение", "Выберите исходную и целевую вкладки")
-            return
-        
-        if source_tab_index == target_tab_index:
-            QMessageBox.warning(self, "Предупреждение", "Исходная и целевая вкладки не должны быть одинаковыми")
-            return
-        
-        source_channels = []
-        for item in self.source_channels_list.selectedItems():
-            channel = item.data(Qt.ItemDataRole.UserRole)
-            if channel:
-                source_channels.append(channel)
-        
-        target_channels = []
-        for item in self.target_channels_list.selectedItems():
-            channel = item.data(Qt.ItemDataRole.UserRole)
-            if channel:
-                target_channels.append(channel)
-        
-        if not source_channels:
-            QMessageBox.warning(self, "Предупреждение", "Выберите каналы в исходном плейлисте")
-            return
-        
-        if not target_channels:
-            QMessageBox.warning(self, "Предупреждение", "Выберите каналы в целевом плейлисте")
-            return
-        
-        preview_dialog = QDialog(self)
-        preview_dialog.setWindowTitle("Предпросмотр изменений")
-        preview_dialog.resize(800, 600)
-        
-        layout = QVBoxLayout(preview_dialog)
-        
-        table = QTableWidget()
-        table.setColumnCount(5)
-        table.setHorizontalHeaderLabels(["Название", "TVG-ID", "Логотип", "Группа", "User-Agent"])
-        table.setRowCount(len(target_channels))
-        
-        match_func = None
-        if self.match_by_name_radio.isChecked():
-            match_func = lambda s, t: s.match_by_name(t)
-        else:
-            match_func = lambda s, t: s.match_by_name_and_group(t)
-        
-        for i, target_channel in enumerate(target_channels):
-            source_channel = None
-            for src_ch in source_channels:
-                if match_func(src_ch, target_channel):
-                    source_channel = src_ch
-                    break
-            
-            table.setItem(i, 0, QTableWidgetItem(target_channel.name))
-            
-            if source_channel:
-                old_tvg_id = target_channel.tvg_id or ""
-                new_tvg_id = source_channel.tvg_id or ""
-                if self.copy_tvg_id_check.isChecked() and new_tvg_id and old_tvg_id != new_tvg_id:
-                    table.setItem(i, 1, QTableWidgetItem(f"{old_tvg_id} → {new_tvg_id}"))
-                else:
-                    table.setItem(i, 1, QTableWidgetItem(old_tvg_id))
-                
-                old_logo = target_channel.tvg_logo or ""
-                new_logo = source_channel.tvg_logo or ""
-                if self.copy_logo_check.isChecked() and new_logo and old_logo != new_logo:
-                    table.setItem(i, 2, QTableWidgetItem(f"{old_logo} → {new_logo}"))
-                else:
-                    table.setItem(i, 2, QTableWidgetItem(old_logo))
-                
-                old_group = target_channel.group or ""
-                new_group = source_channel.group or ""
-                if self.copy_group_check.isChecked() and new_group and old_group != new_group:
-                    table.setItem(i, 3, QTableWidgetItem(f"{old_group} → {new_group}"))
-                else:
-                    table.setItem(i, 3, QTableWidgetItem(old_group))
-                
-                old_ua = target_channel.user_agent or ""
-                new_ua = source_channel.user_agent or ""
-                if self.copy_user_agent_check.isChecked() and new_ua and old_ua != new_ua:
-                    table.setItem(i, 4, QTableWidgetItem(f"{old_ua} → {new_ua}"))
-                else:
-                    table.setItem(i, 4, QTableWidgetItem(old_ua))
-            else:
-                table.setItem(i, 1, QTableWidgetItem(target_channel.tvg_id or ""))
-                table.setItem(i, 2, QTableWidgetItem(target_channel.tvg_logo or ""))
-                table.setItem(i, 3, QTableWidgetItem(target_channel.group or ""))
-                table.setItem(i, 4, QTableWidgetItem(target_channel.user_agent or ""))
-        
-        table.horizontalHeader().setStretchLastSection(True)
-        layout.addWidget(table)
-        
-        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        button_box.rejected.connect(preview_dialog.reject)
-        layout.addWidget(button_box)
-        
-        preview_dialog.exec()
-    
-    def get_selected_data(self):
-        source_tab_index = self.source_tab_combo.currentData()
-        target_tab_index = self.target_tab_combo.currentData()
-        
-        if source_tab_index is None or target_tab_index is None:
-            return None
-        
-        source_channels = []
-        for item in self.source_channels_list.selectedItems():
-            channel = item.data(Qt.ItemDataRole.UserRole)
-            if channel:
-                source_channels.append(channel)
-        
-        target_channels = []
-        for item in self.target_channels_list.selectedItems():
-            channel = item.data(Qt.ItemDataRole.UserRole)
-            if channel:
-                target_channels.append(channel)
-        
-        return {
-            'source_tab_index': source_tab_index,
-            'target_tab_index': target_tab_index,
-            'source_channels': source_channels,
-            'target_channels': target_channels,
-            'copy_tvg_id': self.copy_tvg_id_check.isChecked(),
-            'copy_logo': self.copy_logo_check.isChecked(),
-            'copy_group': self.copy_group_check.isChecked(),
-            'copy_user_agent': self.copy_user_agent_check.isChecked(),
-            'copy_headers': self.copy_headers_check.isChecked(),
-            'match_by_name': self.match_by_name_radio.isChecked(),
-            'match_by_name_and_group': self.match_by_name_group_radio.isChecked()
-        }
-
-
 class LinkReplacementDialog(QDialog):
     
     replacement_completed = pyqtSignal(list)
@@ -3197,7 +2826,7 @@ class LinkReplacementDialog(QDialog):
         else:
             new_url_display = new_url
         
-        tooltip = f"Старая: {old_url}\nНовая: {new_url}\nПричина: {channel.url_history[-1]['reason'] if channel.url_history else 'Неизвестно'}"
+        tooltip = f"Старая: {old_url}\nНовая: {new_url}"
         
         item = QListWidgetItem(item_text)
         item.setForeground(QColor("green"))
@@ -4047,122 +3676,6 @@ class LinkReplacementSettingsDialog(QDialog):
         super().accept()
 
 
-class LinkHistoryDialog(QDialog):
-    
-    def __init__(self, channel: ChannelData, parent=None):
-        super().__init__(parent)
-        self.channel = channel
-        self.setWindowTitle(f"История ссылок: {channel.name}")
-        self.resize(700, 400)
-        
-        self._setup_ui()
-        self._load_history()
-    
-    def _setup_ui(self):
-        layout = QVBoxLayout(self)
-        
-        info_group = QGroupBox("Информация о канале")
-        info_layout = QFormLayout(info_group)
-        
-        info_layout.addRow("Название:", QLabel(self.channel.name))
-        info_layout.addRow("Группа:", QLabel(self.channel.group))
-        info_layout.addRow("Текущая ссылка:", QLabel(self.channel.url[:100] + "..." if len(self.channel.url) > 100 else self.channel.url))
-        
-        layout.addWidget(info_group)
-        
-        self.history_table = QTableWidget()
-        self.history_table.setColumnCount(5)
-        self.history_table.setHorizontalHeaderLabels([
-            "Дата", "Старая ссылка", "Новая ссылка", "Причина", "Источник"
-        ])
-        
-        header = self.history_table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
-        
-        layout.addWidget(self.history_table)
-        
-        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        button_box.rejected.connect(self.reject)
-        
-        if self.channel.url_history:
-            restore_btn = QPushButton("Восстановить старую ссылку")
-            restore_btn.clicked.connect(self._restore_old_link)
-            button_box.addButton(restore_btn, QDialogButtonBox.ButtonRole.ActionRole)
-        
-        layout.addWidget(button_box)
-    
-    def _load_history(self):
-        history = self.channel.url_history
-        
-        if not history:
-            self.history_table.setRowCount(1)
-            self.history_table.setItem(0, 0, QTableWidgetItem("Нет истории"))
-            return
-        
-        self.history_table.setRowCount(len(history))
-        
-        for i, record in enumerate(reversed(history)):
-            try:
-                timestamp = datetime.fromisoformat(record.get('timestamp', ''))
-                date_text = timestamp.strftime("%Y-%m-%d %H:%M:%S")
-            except (ValueError, TypeError):
-                date_text = "Неизвестно"
-            
-            self.history_table.setItem(i, 0, QTableWidgetItem(date_text))
-            
-            old_url = record.get('old_url', '')
-            old_url_item = QTableWidgetItem(old_url[:80] + "..." if len(old_url) > 80 else old_url)
-            old_url_item.setToolTip(old_url)
-            self.history_table.setItem(i, 1, old_url_item)
-            
-            new_url = record.get('new_url', '')
-            new_url_item = QTableWidgetItem(new_url[:80] + "..." if len(new_url) > 80 else new_url)
-            new_url_item.setToolTip(new_url)
-            self.history_table.setItem(i, 2, new_url_item)
-            
-            reason = record.get('reason', 'Неизвестно')
-            self.history_table.setItem(i, 3, QTableWidgetItem(reason))
-            
-            source = record.get('source', 'Неизвестно')
-            self.history_table.setItem(i, 4, QTableWidgetItem(source))
-    
-    def _restore_old_link(self):
-        selected_row = self.history_table.currentRow()
-        if selected_row < 0:
-            QMessageBox.warning(self, "Предупреждение", "Выберите запись для восстановления")
-            return
-        
-        history_index = len(self.channel.url_history) - 1 - selected_row
-        
-        if 0 <= history_index < len(self.channel.url_history):
-            record = self.channel.url_history[history_index]
-            old_url = record.get('old_url', '')
-            
-            if not old_url:
-                QMessageBox.warning(self, "Предупреждение", "Не удалось получить старую ссылку")
-                return
-            
-            reply = QMessageBox.question(
-                self, "Подтверждение",
-                f"Восстановить старую ссылку?\n\n"
-                f"Текущая: {self.channel.url[:100]}...\n"
-                f"Старая: {old_url[:100]}...",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-            )
-            
-            if reply == QMessageBox.StandardButton.Yes:
-                current_url = self.channel.url
-                self.channel.url = old_url
-                self.channel.add_url_to_history(current_url, old_url, "Восстановление из истории", "manual")
-                
-                QMessageBox.information(self, "Успех", "Ссылка восстановлена")
-                self.accept()
-
-
 class RemoveMetadataDialog(QDialog):
     
     def __init__(self, parent=None):
@@ -4669,8 +4182,6 @@ class DuplicateManagerDialog(QDialog):
             if channel.url and channel.url != merged.url:
                 if channel.url not in merged.alternative_urls:
                     merged.alternative_urls.append(channel.url)
-            
-            merged.url_history.extend(channel.url_history)
         
         merged.update_extinf()
         merged.update_extvlcopt_from_headers()
@@ -4852,9 +4363,6 @@ class PlaylistTab(QWidget):
                     channel.url_check_time = None
                     channel.link_quality = LinkQuality.UNKNOWN
                     channel.link_response_time = None
-                    
-                    if old_url != channel.url:
-                        channel.add_url_to_history(old_url, channel.url, "Ручное Правка", "manual")
                 
                 self._update_table_row(row, channel)
             finally:
@@ -4902,9 +4410,6 @@ class PlaylistTab(QWidget):
             if channel.user_agent:
                 status_item.setBackground(QColor(220, 255, 220))
             
-            if channel.url_history:
-                status_item.setBackground(QColor(255, 255, 200))
-            
             self.table.setItem(row, 5, status_item)
         finally:
             self.table.blockSignals(False)
@@ -4914,14 +4419,12 @@ class PlaylistTab(QWidget):
             channel = self.filtered_channels[row]
             if channel.url_status is False:
                 self._save_state("Удаление битой ссылки")
-                old_url = channel.url
                 channel.url = ""
                 channel.has_url = False
                 channel.url_status = None
                 channel.url_check_time = None
                 channel.link_quality = LinkQuality.UNKNOWN
                 channel.link_response_time = None
-                channel.add_url_to_history(old_url, "", "Удаление битой ссылки", "manual")
                 
                 self._update_table_row(row, channel)
                 self.modified = True
@@ -4935,14 +4438,12 @@ class PlaylistTab(QWidget):
         count = 0
         for channel in self.selected_channels:
             if channel.url_status is False:
-                old_url = channel.url
                 channel.url = ""
                 channel.has_url = False
                 channel.url_status = None
                 channel.url_check_time = None
                 channel.link_quality = LinkQuality.UNKNOWN
                 channel.link_response_time = None
-                channel.add_url_to_history(old_url, "", "Удаление битой ссылки", "manual")
                 count += 1
         
         if count > 0:
@@ -4971,14 +4472,12 @@ class PlaylistTab(QWidget):
             
             count = 0
             for channel in channels_with_broken:
-                old_url = channel.url
                 channel.url = ""
                 channel.has_url = False
                 channel.url_status = None
                 channel.url_check_time = None
                 channel.link_quality = LinkQuality.UNKNOWN
                 channel.link_response_time = None
-                channel.add_url_to_history(old_url, "", "Удаление битой ссылки", "manual")
                 count += 1
             
             self._apply_filter()
@@ -6202,7 +5701,7 @@ class PlaylistTab(QWidget):
             self.modified = True
             self._update_modified_status()
     
-    def apply_blacklist(self):
+    def apply_blacklist(self) -> int:
         if not self.blacklist_manager:
             return 0
         
@@ -6442,13 +5941,6 @@ class PlaylistTab(QWidget):
             
             dialog.replacement_completed.connect(on_replacement_completed)
             dialog.exec()
-    
-    def show_link_history(self, row: int):
-        if 0 <= row < len(self.filtered_channels):
-            channel = self.filtered_channels[row]
-            
-            dialog = LinkHistoryDialog(channel, self)
-            dialog.exec()
 
 
 class MainWindow(QMainWindow):
@@ -6611,29 +6103,6 @@ class MainWindow(QMainWindow):
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
         
-        edit_menu = menu_bar.addMenu("Правка")
-        
-        undo_action = QAction("Отменить", self)
-        undo_action.setShortcut("Ctrl+Z")
-        undo_action.triggered.connect(self._undo)
-        undo_action.setEnabled(False)
-        self.undo_action = undo_action
-        edit_menu.addAction(undo_action)
-        
-        redo_action = QAction("Повторить", self)
-        redo_action.setShortcut("Ctrl+Y")
-        redo_action.triggered.connect(self._redo)
-        redo_action.setEnabled(False)
-        self.redo_action = redo_action
-        edit_menu.addAction(redo_action)
-        
-        edit_menu.addSeparator()
-        
-        select_all_action = QAction("Выделить всё", self)
-        select_all_action.setShortcut("Ctrl+A")
-        select_all_action.triggered.connect(self._select_all)
-        edit_menu.addAction(select_all_action)
-        
         channels_menu = menu_bar.addMenu("Каналы")
         
         new_channel_action = QAction("Новый канал", self)
@@ -6753,10 +6222,6 @@ class MainWindow(QMainWindow):
         manage_link_sources_action = QAction("Источники ссылок", self)
         manage_link_sources_action.triggered.connect(self._manage_link_sources)
         tools_menu.addAction(manage_link_sources_action)
-        
-        copy_metadata_between_action = QAction("Копирование метаданных между плейлистами...", self)
-        copy_metadata_between_action.triggered.connect(self._copy_metadata_between_playlists)
-        tools_menu.addAction(copy_metadata_between_action)
         
         settings_menu = menu_bar.addMenu("Настройки")
         
@@ -7272,9 +6737,7 @@ class MainWindow(QMainWindow):
             self.current_tab._redo()
     
     def _on_undo_state_changed(self, can_undo: bool, can_redo: bool):
-        self.undo_action.setEnabled(can_undo)
         self.toolbar_undo_action.setEnabled(can_undo)
-        self.redo_action.setEnabled(can_redo)
         self.toolbar_redo_action.setEnabled(can_redo)
     
     def _cut(self):
@@ -7674,72 +7137,6 @@ class MainWindow(QMainWindow):
     def _on_link_replacement_settings_changed(self, settings: LinkReplacementSettings):
         self.link_replacement_settings = settings
         self._save_ip_filter_settings()
-    
-    def _copy_metadata_between_playlists(self):
-        if len(self.tabs) < 2:
-            QMessageBox.information(self, "Информация", "Нужно открыть как минимум 2 плейлиста")
-            return
-        
-        dialog = CopyMetadataDialog(self, self)
-        
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            data = dialog.get_selected_data()
-            if not data:
-                return
-            
-            source_tab_widget = self.tab_widget.widget(data['source_tab_index'])
-            target_tab_widget = self.tab_widget.widget(data['target_tab_index'])
-            
-            if source_tab_widget not in self.tabs or target_tab_widget not in self.tabs:
-                return
-            
-            source_tab = self.tabs[source_tab_widget]
-            target_tab = self.tabs[target_tab_widget]
-            
-            if not data['source_channels'] or not data['target_channels']:
-                return
-            
-            if len(data['source_channels']) != len(data['target_channels']):
-                QMessageBox.warning(self, "Предупреждение", "Количество исходных и целевых каналов должно совпадать")
-                return
-            
-            target_tab._save_state("Копирование метаданных между плейлистами")
-            
-            for i, target_channel in enumerate(data['target_channels']):
-                if i < len(data['source_channels']):
-                    source_channel = data['source_channels'][i]
-                    
-                    match_func = None
-                    if data['match_by_name']:
-                        match_func = lambda s, t: s.match_by_name(t)
-                    else:
-                        match_func = lambda s, t: s.match_by_name_and_group(t)
-                    
-                    if match_func(source_channel, target_channel):
-                        if data['copy_tvg_id'] and source_channel.tvg_id:
-                            target_channel.tvg_id = source_channel.tvg_id
-                        
-                        if data['copy_logo'] and source_channel.tvg_logo:
-                            target_channel.tvg_logo = source_channel.tvg_logo
-                        
-                        if data['copy_group'] and source_channel.group:
-                            target_channel.group = source_channel.group
-                        
-                        if data['copy_user_agent'] and source_channel.user_agent:
-                            target_channel.user_agent = source_channel.user_agent
-                            target_channel.extra_headers['User-Agent'] = source_channel.user_agent
-                        
-                        if data['copy_headers']:
-                            target_channel.extra_headers.update(source_channel.extra_headers)
-                        
-                        target_channel.update_extinf()
-                        target_channel.update_extvlcopt_from_headers()
-            
-            target_tab._apply_filter()
-            target_tab.modified = True
-            target_tab._update_modified_status()
-            
-            self.status_bar.showMessage(f"Скопированы метаданные для {len(data['target_channels'])} каналов", 3000)
     
     def _zoom_in(self):
         if self.current_tab:
