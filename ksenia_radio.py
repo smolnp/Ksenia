@@ -333,6 +333,7 @@ class KseniaRadioPlayer(QMainWindow):
         self._resize_edge = None
         self._resize_start_pos = None
         self._resize_start_geometry = None
+        self._mouse_pos = QPoint()  # Для отслеживания позиции мыши
         
         # Переменные для блокировки экрана
         self.screen_locked = False
@@ -349,6 +350,9 @@ class KseniaRadioPlayer(QMainWindow):
         
         # Включаем прозрачность для закругленных углов
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        
+        # Включаем отслеживание мыши для изменения курсора
+        self.setMouseTracking(True)
         
         self.set_app_icon()
         
@@ -545,6 +549,11 @@ class KseniaRadioPlayer(QMainWindow):
         self.stations_table.doubleClicked.connect(self.play_selected_station)
         self.stations_table.setAlternatingRowColors(True)
         
+        # Показываем вертикальный заголовок для отображения количества строк
+        self.stations_table.verticalHeader().setVisible(True)
+        self.stations_table.verticalHeader().setDefaultSectionSize(35)
+        self.stations_table.verticalHeader().setMinimumWidth(40)
+        
         # Настройка таблицы
         header = self.stations_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
@@ -615,6 +624,41 @@ class KseniaRadioPlayer(QMainWindow):
         elif edge == "top_right" or edge == "bottom_left":
             self.setCursor(QCursor(Qt.CursorShape.SizeBDiagCursor))
     
+    def mouseMoveEvent(self, event):
+        """Обработка движения мыши"""
+        pos = event.position().toPoint()
+        self._mouse_pos = pos
+        
+        # Если не перетаскиваем и не изменяем размер, проверяем курсор
+        if not self._dragging and not self._resizing:
+            # Проверяем, находится ли курсор в области заголовка
+            title_bar_rect = self.title_bar.rect()
+            title_bar_rect.moveTopLeft(self.title_bar.mapTo(self, QPoint(0, 0)))
+            
+            if title_bar_rect.contains(pos):
+                # Если в области заголовка, устанавливаем обычный курсор
+                if self.cursor().shape() != Qt.CursorShape.ArrowCursor:
+                    self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+            else:
+                # Иначе проверяем границы для изменения размера
+                edge = self.get_resize_edge(pos)
+                self.set_cursor_for_edge(edge)
+        
+        # Обработка перетаскивания
+        if self._dragging:
+            new_pos = event.globalPosition().toPoint() - self._drag_position
+            self.move(new_pos)
+            event.accept()
+            return
+        
+        # Обработка изменения размера
+        if self._resizing and self._resize_edge is not None:
+            self.handle_resize(event.globalPosition().toPoint())
+            event.accept()
+            return
+        
+        super().mouseMoveEvent(event)
+    
     def mousePressEvent(self, event):
         """Обработка нажатия кнопки мыши"""
         if event.button() == Qt.MouseButton.LeftButton:
@@ -643,38 +687,26 @@ class KseniaRadioPlayer(QMainWindow):
         
         super().mousePressEvent(event)
     
-    def mouseMoveEvent(self, event):
-        """Обработка движения мыши"""
-        pos = event.position().toPoint()
-        
-        # Если не перетаскиваем и не изменяем размер, устанавливаем курсор
-        if not self._dragging and not self._resizing:
-            edge = self.get_resize_edge(pos)
-            self.set_cursor_for_edge(edge)
-            return
-        
-        # Обработка перетаскивания
-        if self._dragging:
-            new_pos = event.globalPosition().toPoint() - self._drag_position
-            self.move(new_pos)
-            event.accept()
-            return
-        
-        # Обработка изменения размера
-        if self._resizing and self._resize_edge is not None:
-            self.handle_resize(event.globalPosition().toPoint())
-            event.accept()
-    
     def mouseReleaseEvent(self, event):
         """Обработка отпускания кнопки мыши"""
         if event.button() == Qt.MouseButton.LeftButton:
             self._dragging = False
             self._resizing = False
             self._resize_edge = None
-            self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+            
+            # После отпускания кнопки, проверяем текущую позицию для курсора
+            pos = event.position().toPoint()
+            edge = self.get_resize_edge(pos)
+            self.set_cursor_for_edge(edge)
             event.accept()
         
         super().mouseReleaseEvent(event)
+    
+    def leaveEvent(self, event):
+        """Обработка выхода курсора за пределы окна"""
+        # Сбрасываем курсор при выходе из окна
+        self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+        super().leaveEvent(event)
     
     def handle_resize(self, global_pos):
         """Обработка изменения размера окна"""
@@ -995,6 +1027,10 @@ class KseniaRadioPlayer(QMainWindow):
         """Обновление таблицы радиостанций"""
         self.stations_table.setRowCount(len(self.radio_stations))
         
+        # Обновляем номера строк в вертикальном заголовке
+        for i in range(len(self.radio_stations)):
+            self.stations_table.setVerticalHeaderItem(i, QTableWidgetItem(str(i + 1)))
+        
         for i, station in enumerate(self.radio_stations):
             status_icon = "▶" if station.get('available', True) else "❌"
             has_logo = "🖼️" if station.get('logo_url') else ""
@@ -1289,6 +1325,115 @@ class KseniaRadioPlayer(QMainWindow):
                 alternate-background-color: #151d35;
                 color: #ffffff;
             }
+            
+            /* Уголок между заголовками - стилизуем в едином стиле */
+            QTableWidget#stationsTable QTableCornerButton::section {
+                background-color: #273450;
+                border: none;
+                border-bottom: 2px solid #2677e6;
+                border-right: 1px solid #3d5c77;
+                min-width: 40px;
+                min-height: 35px;
+            }
+            
+            /* Вертикальный заголовок (номера строк) */
+            QTableWidget#stationsTable QHeaderView::section:vertical {
+                background-color: #273450;
+                padding: 8px;
+                border: none;
+                border-right: 1px solid #3d5c77;
+                border-bottom: 1px solid #273450;
+                color: #99bbee;
+                font-size: 11px;
+                font-weight: normal;
+            }
+            
+            QTableWidget#stationsTable QHeaderView::section:vertical:hover {
+                background-color: #374560;
+            }
+            
+            /* Горизонтальный заголовок */
+            QTableWidget#stationsTable QHeaderView::section:horizontal {
+                background-color: #273450;
+                padding: 10px;
+                border: none;
+                border-bottom: 2px solid #2677e6;
+                border-right: 1px solid #3d5c77;
+                font-size: 12px;
+                font-weight: bold;
+                color: #ffffff;
+            }
+            
+            QTableWidget#stationsTable QHeaderView::section:horizontal:last {
+                border-right: none;
+            }
+            
+            QTableWidget#stationsTable QHeaderView::section:horizontal:hover {
+                background-color: #374560;
+            }
+            
+            /* Вертикальный ползунок прокрутки */
+            QTableWidget#stationsTable QScrollBar:vertical {
+                background: #18213b;
+                width: 12px;
+                border-radius: 6px;
+                margin: 2px 0px;
+            }
+            
+            QTableWidget#stationsTable QScrollBar::handle:vertical {
+                background: #2677e6;
+                min-height: 30px;
+                border-radius: 5px;
+            }
+            
+            QTableWidget#stationsTable QScrollBar::handle:vertical:hover {
+                background: #4394e6;
+            }
+            
+            QTableWidget#stationsTable QScrollBar::add-line:vertical,
+            QTableWidget#stationsTable QScrollBar::sub-line:vertical {
+                border: none;
+                background: none;
+                height: 0px;
+            }
+            
+            QTableWidget#stationsTable QScrollBar::add-page:vertical,
+            QTableWidget#stationsTable QScrollBar::sub-page:vertical {
+                background: #273450;
+                border-radius: 3px;
+            }
+            
+            /* Горизонтальный ползунок прокрутки */
+            QTableWidget#stationsTable QScrollBar:horizontal {
+                background: #18213b;
+                height: 12px;
+                border-radius: 6px;
+                margin: 0px 2px;
+            }
+            
+            QTableWidget#stationsTable QScrollBar::handle:horizontal {
+                background: #2677e6;
+                min-width: 30px;
+                border-radius: 5px;
+            }
+            
+            QTableWidget#stationsTable QScrollBar::handle:horizontal:hover {
+                background: #4394e6;
+            }
+            
+            QTableWidget#stationsTable QScrollBar::add-line:horizontal,
+            QTableWidget#stationsTable QScrollBar::sub-line:horizontal {
+                border: none;
+                background: none;
+                width: 0px;
+            }
+            
+            QTableWidget#stationsTable QScrollBar::add-page:horizontal,
+            QTableWidget#stationsTable QScrollBar::sub-page:horizontal {
+                background: #273450;
+                border-radius: 3px;
+            }
+            
             QTableWidget#stationsTable::item { 
                 padding: 8px; 
                 border-bottom: 1px solid #273450;
@@ -1296,15 +1441,6 @@ class KseniaRadioPlayer(QMainWindow):
             QTableWidget#stationsTable::item:selected {
                 background-color: #2677e6;
                 color: white;
-            }
-            QHeaderView::section {
-                background-color: #273450; 
-                padding: 10px; 
-                border: none;
-                border-bottom: 2px solid #2677e6; 
-                font-size: 12px; 
-                font-weight: bold;
-                color: #ffffff;
             }
             
             /* Кнопка обновления */
