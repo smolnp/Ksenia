@@ -20,10 +20,8 @@ import socket
 import urllib3
 import unicodedata
 
-# Отключаем предупреждения SSL
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -96,7 +94,6 @@ class LinkQuality(Enum):
 class ChannelNameNormalizer:
     """Класс для нормализации названий каналов с интеллектуальным удалением информации"""
     
-    # Паттерны для удаления информации о качестве видео в круглых скобках
     QUALITY_PATTERNS = [
         r'\(\s*(?:720|1080|1280|480|360|2160|4K|8K|UHD|HD|SD|FHD|FullHD)[pPi]?\s*\)',
         r'\(\s*(?:720|1080|1280|480|360|2160)[pP]\s*\)',
@@ -109,7 +106,6 @@ class ChannelNameNormalizer:
         r'\(\s*SQ\s*\)',
     ]
     
-    # Паттерны для удаления информации в квадратных скобках (только определённые)
     BRACKETS_TO_REMOVE = [
         r'\[Geo-blocked\]',
         r'\[Not\s+24/7\]',
@@ -120,15 +116,14 @@ class ChannelNameNormalizer:
         r'\[GeoRestricted\]',
     ]
     
-    # Паттерны для удаления эмодзи (оставляем буквы, цифры, пробелы, дефисы и некоторые символы)
     EMOJI_PATTERN = re.compile(
         '['
-        '\U0001F600-\U0001F64F'  # Emoticons
-        '\U0001F300-\U0001F5FF'  # Symbols & Pictographs
-        '\U0001F680-\U0001F6FF'  # Transport & Map
-        '\U0001F1E0-\U0001F1FF'  # Flags
-        '\U00002702-\U000027B0'  # Dingbats
-        '\U000024C2-\U0001F251'  # Enclosed characters
+        '\U0001F600-\U0001F64F'
+        '\U0001F300-\U0001F5FF'
+        '\U0001F680-\U0001F6FF'
+        '\U0001F1E0-\U0001F1FF'
+        '\U00002702-\U000027B0'
+        '\U000024C2-\U0001F251'
         ']+',
         flags=re.UNICODE
     )
@@ -136,102 +131,64 @@ class ChannelNameNormalizer:
     @staticmethod
     def normalize(name: str, remove_parentheses: bool = True, remove_brackets: bool = True, 
                   remove_emojis: bool = True, remove_special_chars: bool = True) -> str:
-        """
-        Нормализует название канала с интеллектуальным удалением:
-        - Удаляет только информацию о качестве видео в круглых скобках (720p, 1080p и т.д.)
-        - Удаляет только определённые теги в квадратных скобках ([Geo-blocked], [Not 24/7])
-        - Сохраняет информацию о часовых поясах (+2, +4 и т.д.)
-        - Сохраняет информацию о региональных каналах (Астрахань, Тюмень и т.д.)
-        - Сохраняет информацию о странах ([PL], [LV], [AM], [KZ] и т.д.)
-        - Удаляет эмодзи и специальные символы
-        - Приводит к нижнему регистру
-        - Удаляет лишние пробелы
-        """
         if not name:
             return ""
         
         normalized = name
         
-        # Удаляем только информацию о качестве в круглых скобках
         if remove_parentheses:
             for pattern in ChannelNameNormalizer.QUALITY_PATTERNS:
                 normalized = re.sub(pattern, '', normalized, flags=re.IGNORECASE)
-            
-            # Дополнительно удаляем пустые скобки
             normalized = re.sub(r'\(\s*\)', '', normalized)
         
-        # Удаляем только определённые теги в квадратных скобках
         if remove_brackets:
             for pattern in ChannelNameNormalizer.BRACKETS_TO_REMOVE:
                 normalized = re.sub(pattern, '', normalized, flags=re.IGNORECASE)
-            
-            # Дополнительно удаляем пустые скобки
             normalized = re.sub(r'\[\s*\]', '', normalized)
         
-        # Удаляем фигурные скобки (все)
         normalized = re.sub(r'\{[^}]*\}', '', normalized)
         
-        # Удаляем эмодзи
         if remove_emojis:
             normalized = ChannelNameNormalizer.EMOJI_PATTERN.sub('', normalized)
         
-        # Удаляем специальные символы (оставляем буквы, цифры, пробелы, дефисы, плюсы, слэши)
         if remove_special_chars:
-            # Сохраняем важные символы: буквы, цифры, пробелы, дефисы, плюсы, слэши, точки, запятые, двоеточия
             normalized = re.sub(r'[^\w\s\-\+\\/\.\,:()\[\]]', ' ', normalized)
             normalized = re.sub(r'\s+', ' ', normalized)
         
-        # Приводим к нижнему регистру
         normalized = normalized.lower().strip()
-        
-        # Удаляем множественные пробелы
         normalized = re.sub(r'\s+', ' ', normalized)
         
         return normalized
     
     @staticmethod
     def get_normalized_variants(name: str) -> List[str]:
-        """Возвращает список различных вариантов нормализации для гибкого поиска"""
         variants = []
-        
-        # Основная нормализация
         base_normalized = ChannelNameNormalizer.normalize(name)
         if base_normalized:
             variants.append(base_normalized)
-        
-        # Вариант: только удаление информации о качестве, без удаления эмодзи
         no_quality = ChannelNameNormalizer.normalize(name, remove_emojis=False)
         if no_quality and no_quality != base_normalized:
             variants.append(no_quality)
-        
-        # Вариант: только удаление эмодзи
         no_emojis = ChannelNameNormalizer.normalize(name, remove_parentheses=False, remove_brackets=False)
         if no_emojis and no_emojis != base_normalized:
             variants.append(no_emojis)
-        
-        # Вариант: без удаления скобок (сохраняем всю информацию)
         no_remove_brackets = ChannelNameNormalizer.normalize(name, remove_parentheses=False, remove_brackets=False, remove_emojis=True)
         if no_remove_brackets and no_remove_brackets != base_normalized:
             variants.append(no_remove_brackets)
-        
-        # Удаляем дубликаты
         return list(dict.fromkeys(variants))
     
     @staticmethod
     def calculate_similarity_normalized(name1: str, name2: str, settings: 'LinkReplacementSettings') -> float:
-        """Вычисляет схожесть между нормализованными названиями"""
         if settings.ignore_special_chars_in_names:
             norm1 = ChannelNameNormalizer.normalize(name1)
             norm2 = ChannelNameNormalizer.normalize(name2)
         else:
             norm1 = name1.lower()
             norm2 = name2.lower()
-        
         return SequenceMatcher(None, norm1, norm2).ratio()
     
     @staticmethod
     def extract_quality(name: str) -> Optional[str]:
-        """Извлекает информацию о качестве из названия"""
         for pattern in ChannelNameNormalizer.QUALITY_PATTERNS:
             match = re.search(pattern, name, re.IGNORECASE)
             if match:
@@ -240,8 +197,6 @@ class ChannelNameNormalizer:
     
     @staticmethod
     def extract_country_code(name: str) -> Optional[str]:
-        """Извлекает код страны из квадратных скобок"""
-        # Ищем паттерны типа [PL], [LV], [AM], [KZ] и т.д.
         match = re.search(r'\[([A-Z]{2,3})\]', name)
         if match:
             return match.group(1)
@@ -249,20 +204,15 @@ class ChannelNameNormalizer:
     
     @staticmethod
     def extract_region(name: str) -> Optional[str]:
-        """Извлекает региональную информацию из круглых скобок"""
-        # Ищем паттерны типа (Астрахань), (Тюмень) и т.д.
         match = re.search(r'\(([А-Яа-яёЁ\s\-]+)\)', name)
         if match:
             region = match.group(1).strip()
-            # Исключаем информацию о качестве
             if not re.search(r'[0-9]+[pPi]', region, re.IGNORECASE):
                 return region
         return None
     
     @staticmethod
     def extract_timezone(name: str) -> Optional[str]:
-        """Извлекает информацию о часовом поясе из круглых скобок"""
-        # Ищем паттерны типа (+2), (+4), (+5) и т.д.
         match = re.search(r'\(\+(\d+)\)', name)
         if match:
             return match.group(1)
@@ -697,8 +647,6 @@ class LinkReplacementSettings:
         self.prioritize_whitelisted: bool = True
         self.blacklist_priority: int = -10
         self.whitelist_priority: int = 10
-        
-        # Новые настройки для нормализации названий
         self.ignore_special_chars_in_names: bool = True
         self.remove_parentheses_in_names: bool = True
         self.remove_brackets_in_names: bool = True
@@ -766,7 +714,6 @@ class LinkReplacementSettings:
         settings.blacklist_priority = data.get('blacklist_priority', -10)
         settings.whitelist_priority = data.get('whitelist_priority', 10)
         
-        # Загружаем новые настройки
         settings.ignore_special_chars_in_names = data.get('ignore_special_chars_in_names', True)
         settings.remove_parentheses_in_names = data.get('remove_parentheses_in_names', True)
         settings.remove_brackets_in_names = data.get('remove_brackets_in_names', True)
@@ -1017,7 +964,6 @@ class LinkSourceManager:
         results = []
         enabled_sources = self.get_enabled_sources()
         
-        # Нормализуем исходное название для поиска
         if settings.ignore_special_chars_in_names:
             normalized_search_name = ChannelNameNormalizer.normalize(
                 channel_name,
@@ -1042,7 +988,6 @@ class LinkSourceManager:
                 if self._is_match(normalized_search_name, cached_channel.name, settings):
                     results.append(cached_channel)
         
-        # Сортируем результаты по приоритету и схожести
         results.sort(key=lambda x: (
             -self._get_source_priority(x.link_source),
             -self._get_match_score(channel_name, x.name, settings),
@@ -1052,7 +997,6 @@ class LinkSourceManager:
         return results[:settings.max_alternative_urls]
     
     def _is_match(self, search_name: str, channel_name: str, settings: LinkReplacementSettings) -> bool:
-        """Проверяет соответствие названий с учётом нормализации"""
         if settings.ignore_special_chars_in_names:
             normalized_channel = ChannelNameNormalizer.normalize(
                 channel_name,
@@ -1085,7 +1029,6 @@ class LinkSourceManager:
         return False
     
     def _get_match_score(self, original_name: str, channel_name: str, settings: LinkReplacementSettings) -> float:
-        """Вычисляет оценку схожести для сортировки"""
         if settings.ignore_special_chars_in_names:
             norm1 = ChannelNameNormalizer.normalize(
                 original_name,
@@ -2100,16 +2043,6 @@ class ChannelTableWidget(QTableWidget):
                 
                 menu.addSeparator()
                 
-                move_up_action = QAction("Переместить вверх", menu)
-                move_up_action.triggered.connect(lambda: self._move_channel_up(row))
-                menu.addAction(move_up_action)
-                
-                move_down_action = QAction("Переместить вниз", menu)
-                move_down_action.triggered.connect(lambda: self._move_channel_down(row))
-                menu.addAction(move_down_action)
-                
-                menu.addSeparator()
-                
                 delete_action = QAction("Удалить канал", menu)
                 delete_action.triggered.connect(lambda: self._delete_channel(row))
                 menu.addAction(delete_action)
@@ -2151,14 +2084,6 @@ class ChannelTableWidget(QTableWidget):
                 delete_selected_action = QAction(f"Удалить выбранные ({count})", menu)
                 delete_selected_action.triggered.connect(self._delete_selected_channels)
                 menu.addAction(delete_selected_action)
-                
-                move_selected_up_action = QAction(f"Переместить вверх ({count})", menu)
-                move_selected_up_action.triggered.connect(self._move_selected_up)
-                menu.addAction(move_selected_up_action)
-                
-                move_selected_down_action = QAction(f"Переместить вниз ({count})", menu)
-                move_selected_down_action.triggered.connect(self._move_selected_down)
-                menu.addAction(move_selected_down_action)
                 
                 menu.addSeparator()
                 
@@ -2276,22 +2201,6 @@ class ChannelTableWidget(QTableWidget):
     def _check_selected_urls(self):
         if self.playlist_tab and hasattr(self.playlist_tab, '_check_selected_urls'):
             self.playlist_tab._check_selected_urls()
-    
-    def _move_channel_up(self, row: int):
-        if self.playlist_tab and hasattr(self.playlist_tab, '_move_channel_up'):
-            self.playlist_tab._move_channel_up(row)
-    
-    def _move_selected_up(self):
-        if self.playlist_tab and hasattr(self.playlist_tab, '_move_selected_up'):
-            self.playlist_tab._move_selected_up()
-    
-    def _move_channel_down(self, row: int):
-        if self.playlist_tab and hasattr(self.playlist_tab, '_move_channel_down'):
-            self.playlist_tab._move_channel_down(row)
-    
-    def _move_selected_down(self):
-        if self.playlist_tab and hasattr(self.playlist_tab, '_move_selected_down'):
-            self.playlist_tab._move_selected_down()
     
     def _delete_channel(self, row: int):
         if self.playlist_tab and hasattr(self.playlist_tab, '_delete_channel'):
@@ -3754,7 +3663,6 @@ class LinkReplacementSettingsDialog(QDialog):
         
         basic_layout.addWidget(search_group)
         
-        # Новая группа для нормализации названий
         normalization_group = QGroupBox("Нормализация названий каналов")
         normalization_layout = QVBoxLayout(normalization_group)
         
@@ -3944,7 +3852,6 @@ class LinkReplacementSettingsDialog(QDialog):
         else:
             self.search_type_combo.setCurrentIndex(2)
         
-        # Загружаем настройки нормализации
         self.ignore_special_chars_check.setChecked(self.settings.ignore_special_chars_in_names)
         self.remove_parentheses_check.setChecked(self.settings.remove_parentheses_in_names)
         self.remove_brackets_check.setChecked(self.settings.remove_brackets_in_names)
@@ -3997,7 +3904,6 @@ class LinkReplacementSettingsDialog(QDialog):
         else:
             self.settings.search_type = "fuzzy"
         
-        # Сохраняем настройки нормализации
         self.settings.ignore_special_chars_in_names = self.ignore_special_chars_check.isChecked()
         self.settings.remove_parentheses_in_names = self.remove_parentheses_check.isChecked()
         self.settings.remove_brackets_in_names = self.remove_brackets_check.isChecked()
@@ -4958,6 +4864,40 @@ class PlaylistTab(QWidget):
             self._apply_filter()
             QMessageBox.information(self, "Успех", f"Удалено {count} битых ссылок")
     
+    def _remove_all_broken_urls(self):
+        channels_with_broken = [ch for ch in self.all_channels if ch.url_status is False]
+        
+        if not channels_with_broken:
+            QMessageBox.information(self, "Информация", "Нет каналов с битыми ссылками")
+            return
+        
+        reply = QMessageBox.question(
+            self, "Подтверждение",
+            f"Найдено {len(channels_with_broken)} каналов с битыми ссылками. Удалить все битые ссылки?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            self._save_state("Удаление всех битых ссылок")
+            
+            count = 0
+            for channel in channels_with_broken:
+                old_url = channel.url
+                channel.url = ""
+                channel.has_url = False
+                channel.url_status = None
+                channel.url_check_time = None
+                channel.link_quality = LinkQuality.UNKNOWN
+                channel.link_response_time = None
+                channel.add_url_to_history(old_url, "", "Удаление битой ссылки", "manual")
+                count += 1
+            
+            self._apply_filter()
+            self.modified = True
+            self._update_modified_status()
+            self._update_info()
+            QMessageBox.information(self, "Успех", f"Удалено {count} битых ссылок")
+    
     def _edit_user_agent(self, row: int):
         if 0 <= row < len(self.filtered_channels):
             channel = self.filtered_channels[row]
@@ -5896,6 +5836,11 @@ class PlaylistTab(QWidget):
         
         self._delete_channel()
     
+    def _cut_channel(self):
+        if self.current_channel:
+            self._copy_channel()
+            self._delete_channel()
+    
     def _add_to_blacklist(self, row: int = -1):
         if row == -1:
             if not self.current_channel:
@@ -6427,7 +6372,6 @@ class MainWindow(QMainWindow):
         self.link_source_manager = LinkSourceManager()
         self.link_replacement_settings = LinkReplacementSettings()
         
-        # Загружаем настройки белого и чёрного списка
         self._load_ip_filter_settings()
         
         self.recent_files = []
@@ -6443,10 +6387,8 @@ class MainWindow(QMainWindow):
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
     
     def _load_ip_filter_settings(self):
-        """Загружает настройки фильтрации IP/доменов"""
         settings = QSettings("Ksenia", "M3UEditor")
         
-        # Загружаем чёрный список
         blacklist_ips = settings.value("blacklist_ips", [])
         if isinstance(blacklist_ips, list):
             self.link_replacement_settings.blacklisted_ips = blacklist_ips
@@ -6459,7 +6401,6 @@ class MainWindow(QMainWindow):
         else:
             self.link_replacement_settings.blacklisted_domains = []
         
-        # Загружаем белый список
         whitelist_ips = settings.value("whitelist_ips", [])
         if isinstance(whitelist_ips, list):
             self.link_replacement_settings.whitelisted_ips = whitelist_ips
@@ -6472,14 +6413,12 @@ class MainWindow(QMainWindow):
         else:
             self.link_replacement_settings.whitelisted_domains = []
         
-        # Загружаем настройки нормализации
         self.link_replacement_settings.ignore_special_chars_in_names = settings.value("ignore_special_chars_in_names", True, type=bool)
         self.link_replacement_settings.remove_parentheses_in_names = settings.value("remove_parentheses_in_names", True, type=bool)
         self.link_replacement_settings.remove_brackets_in_names = settings.value("remove_brackets_in_names", True, type=bool)
         self.link_replacement_settings.remove_emojis_in_names = settings.value("remove_emojis_in_names", True, type=bool)
     
     def _save_ip_filter_settings(self):
-        """Сохраняет настройки фильтрации IP/доменов"""
         settings = QSettings("Ksenia", "M3UEditor")
         
         settings.setValue("blacklist_ips", self.link_replacement_settings.blacklisted_ips)
@@ -6487,7 +6426,6 @@ class MainWindow(QMainWindow):
         settings.setValue("whitelist_ips", self.link_replacement_settings.whitelisted_ips)
         settings.setValue("whitelist_domains", self.link_replacement_settings.whitelisted_domains)
         
-        # Сохраняем настройки нормализации
         settings.setValue("ignore_special_chars_in_names", self.link_replacement_settings.ignore_special_chars_in_names)
         settings.setValue("remove_parentheses_in_names", self.link_replacement_settings.remove_parentheses_in_names)
         settings.setValue("remove_brackets_in_names", self.link_replacement_settings.remove_brackets_in_names)
@@ -6535,6 +6473,10 @@ class MainWindow(QMainWindow):
         open_action.triggered.connect(self._open_file)
         file_menu.addAction(open_action)
         
+        create_from_sources_action = QAction("Создать плейлист из источников", self)
+        create_from_sources_action.triggered.connect(self._create_playlist_from_sources)
+        file_menu.addAction(create_from_sources_action)
+        
         self.recent_menu = QMenu("Открыть недавние", self)
         file_menu.addMenu(self.recent_menu)
         
@@ -6565,267 +6507,264 @@ class MainWindow(QMainWindow):
         file_menu.addAction(export_action)
         
         file_menu.addSeparator()
-
+        
         exit_action = QAction("Выход", self)
         exit_action.setShortcut("Alt+F4")
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
-
+        
         edit_menu = menu_bar.addMenu("Правка")
-
+        
         undo_action = QAction("Отменить", self)
         undo_action.setShortcut("Ctrl+Z")
         undo_action.triggered.connect(self._undo)
         undo_action.setEnabled(False)
         self.undo_action = undo_action
         edit_menu.addAction(undo_action)
-
+        
         redo_action = QAction("Повторить", self)
         redo_action.setShortcut("Ctrl+Y")
         redo_action.triggered.connect(self._redo)
         redo_action.setEnabled(False)
         self.redo_action = redo_action
         edit_menu.addAction(redo_action)
-
+        
         edit_menu.addSeparator()
-
-        cut_action = QAction("Вырезать", self)
-        cut_action.setShortcut("Ctrl+X")
-        cut_action.triggered.connect(self._cut)
-        edit_menu.addAction(cut_action)
-
-        copy_action = QAction("Копировать", self)
-        copy_action.setShortcut("Ctrl+C")
-        copy_action.triggered.connect(self._copy)
-        edit_menu.addAction(copy_action)
-
-        paste_action = QAction("Вставить", self)
-        paste_action.setShortcut("Ctrl+V")
-        paste_action.triggered.connect(self._paste)
-        edit_menu.addAction(paste_action)
-
-        delete_action = QAction("Удалить", self)
-        delete_action.setShortcut("Delete")
-        delete_action.triggered.connect(self._delete)
-        edit_menu.addAction(delete_action)
-
-        edit_menu.addSeparator()
-
+        
         select_all_action = QAction("Выделить всё", self)
         select_all_action.setShortcut("Ctrl+A")
         select_all_action.triggered.connect(self._select_all)
         edit_menu.addAction(select_all_action)
-
+        
         channels_menu = menu_bar.addMenu("Каналы")
-
+        
         new_channel_action = QAction("Новый канал", self)
         new_channel_action.setShortcut("Ctrl+Shift+A")
         new_channel_action.triggered.connect(self._new_channel)
         channels_menu.addAction(new_channel_action)
-
-        channels_menu.addSeparator()
-
+        
+        cut_channel_action = QAction("Вырезать канал", self)
+        cut_channel_action.setShortcut("Ctrl+X")
+        cut_channel_action.triggered.connect(self._cut_channel)
+        channels_menu.addAction(cut_channel_action)
+        
         copy_channel_action = QAction("Копировать канал", self)
+        copy_channel_action.setShortcut("Ctrl+C")
         copy_channel_action.triggered.connect(self._copy_channel)
         channels_menu.addAction(copy_channel_action)
-
+        
         paste_channel_action = QAction("Вставить канал", self)
+        paste_channel_action.setShortcut("Ctrl+V")
         paste_channel_action.triggered.connect(self._paste_channel)
         channels_menu.addAction(paste_channel_action)
-
+        
+        channels_menu.addSeparator()
+        
         copy_metadata_action = QAction("Копировать метаданные", self)
         copy_metadata_action.triggered.connect(self._copy_metadata)
         channels_menu.addAction(copy_metadata_action)
-
+        
         paste_metadata_action = QAction("Вставить метаданные", self)
         paste_metadata_action.triggered.connect(self._paste_metadata)
         channels_menu.addAction(paste_metadata_action)
-
+        
         channels_menu.addSeparator()
-
+        
+        delete_channels_without_urls_action = QAction("Удалить каналы без ссылок", self)
+        delete_channels_without_urls_action.triggered.connect(self._delete_channels_without_urls)
+        channels_menu.addAction(delete_channels_without_urls_action)
+        
+        delete_channels_without_metadata_action = QAction("Удалить каналы без метаданных", self)
+        delete_channels_without_metadata_action.triggered.connect(self._delete_channels_without_metadata)
+        channels_menu.addAction(delete_channels_without_metadata_action)
+        
+        channels_menu.addSeparator()
+        
         move_up_action = QAction("Переместить вверх", self)
-        move_up_action.setShortcut("Ctrl+Up")
         move_up_action.triggered.connect(self._move_channel_up)
         channels_menu.addAction(move_up_action)
-
+        
         move_down_action = QAction("Переместить вниз", self)
-        move_down_action.setShortcut("Ctrl+Down")
         move_down_action.triggered.connect(self._move_channel_down)
         channels_menu.addAction(move_down_action)
-
+        
         channels_menu.addSeparator()
-
-        remove_urls_action = QAction("Удалить все ссылки", self)
-        remove_urls_action.triggered.connect(self._remove_all_urls)
-        channels_menu.addAction(remove_urls_action)
-
+        
         remove_metadata_action = QAction("Удалить метаданные...", self)
         remove_metadata_action.triggered.connect(self._remove_metadata)
         channels_menu.addAction(remove_metadata_action)
-
-        tools_menu = menu_bar.addMenu("Инструменты")
-
+        
+        links_menu = menu_bar.addMenu("Ссылки")
+        
+        remove_all_urls_action = QAction("Удалить все ссылки", self)
+        remove_all_urls_action.triggered.connect(self._remove_all_urls)
+        links_menu.addAction(remove_all_urls_action)
+        
+        links_menu.addSeparator()
+        
         check_all_urls_action = QAction("Проверить все ссылки", self)
         check_all_urls_action.triggered.connect(self._check_all_urls)
-        tools_menu.addAction(check_all_urls_action)
-
+        links_menu.addAction(check_all_urls_action)
+        
         check_selected_urls_action = QAction("Проверить выбранные ссылки", self)
         check_selected_urls_action.triggered.connect(self._check_selected_urls)
-        tools_menu.addAction(check_selected_urls_action)
-
-        tools_menu.addSeparator()
-
-        merge_duplicates_action = QAction("Управление дубликатами...", self)
-        merge_duplicates_action.triggered.connect(self._manage_duplicates)
-        tools_menu.addAction(merge_duplicates_action)
-
-        tools_menu.addSeparator()
-
+        links_menu.addAction(check_selected_urls_action)
+        
+        links_menu.addSeparator()
+        
         replace_links_action = QAction("Заменить ссылки...", self)
         replace_links_action.triggered.connect(self._replace_links)
-        tools_menu.addAction(replace_links_action)
-
+        links_menu.addAction(replace_links_action)
+        
         replace_selected_links_action = QAction("Заменить ссылки выбранных", self)
         replace_selected_links_action.triggered.connect(self._replace_selected_links)
-        tools_menu.addAction(replace_selected_links_action)
-
+        links_menu.addAction(replace_selected_links_action)
+        
+        links_menu.addSeparator()
+        
+        remove_selected_broken_urls_action = QAction("Удалить битые ссылки у выбранных", self)
+        remove_selected_broken_urls_action.triggered.connect(self._remove_selected_broken_urls)
+        links_menu.addAction(remove_selected_broken_urls_action)
+        
+        remove_all_broken_urls_action = QAction("Удалить все битые ссылки", self)
+        remove_all_broken_urls_action.triggered.connect(self._remove_all_broken_urls)
+        links_menu.addAction(remove_all_broken_urls_action)
+        
+        tools_menu = menu_bar.addMenu("Инструменты")
+        
+        manage_duplicates_action = QAction("Управление дубликатами...", self)
+        manage_duplicates_action.triggered.connect(self._manage_duplicates)
+        tools_menu.addAction(manage_duplicates_action)
+        
         tools_menu.addSeparator()
-
-        delete_without_urls_action = QAction("Удалить каналы без ссылок", self)
-        delete_without_urls_action.triggered.connect(self._delete_channels_without_urls)
-        tools_menu.addAction(delete_without_urls_action)
-
-        delete_without_metadata_action = QAction("Удалить каналы без метаданных", self)
-        delete_without_metadata_action.triggered.connect(self._delete_channels_without_metadata)
-        tools_menu.addAction(delete_without_metadata_action)
-
-        tools_menu.addSeparator()
-
-        remove_broken_urls_action = QAction("Удалить битые ссылки у выбранных", self)
-        remove_broken_urls_action.triggered.connect(self._remove_selected_broken_urls)
-        tools_menu.addAction(remove_broken_urls_action)
-
-        tools_menu.addSeparator()
-
+        
         edit_header_action = QAction("Редактировать заголовок...", self)
         edit_header_action.triggered.connect(self._edit_playlist_header)
         tools_menu.addAction(edit_header_action)
-
+        
         apply_blacklist_action = QAction("Применить чёрный список", self)
         apply_blacklist_action.triggered.connect(self._apply_blacklist)
         tools_menu.addAction(apply_blacklist_action)
-
-        view_menu = menu_bar.addMenu("Вид")
-
+        
+        tools_menu.addSeparator()
+        
+        manage_blacklist_action = QAction("Менеджер чёрного списка", self)
+        manage_blacklist_action.triggered.connect(self._manage_blacklist)
+        tools_menu.addAction(manage_blacklist_action)
+        
+        manage_link_sources_action = QAction("Источники ссылок", self)
+        manage_link_sources_action.triggered.connect(self._manage_link_sources)
+        tools_menu.addAction(manage_link_sources_action)
+        
+        copy_metadata_between_action = QAction("Копирование метаданных между плейлистами...", self)
+        copy_metadata_between_action.triggered.connect(self._copy_metadata_between_playlists)
+        tools_menu.addAction(copy_metadata_between_action)
+        
+        settings_menu = menu_bar.addMenu("Настройки")
+        
+        link_replacement_settings_action = QAction("Настройки замены ссылок", self)
+        link_replacement_settings_action.triggered.connect(self._manage_link_replacement_settings)
+        settings_menu.addAction(link_replacement_settings_action)
+        
+        settings_menu.addSeparator()
+        
         zoom_in_action = QAction("Увеличить", self)
         zoom_in_action.setShortcut("Ctrl++")
         zoom_in_action.triggered.connect(self._zoom_in)
-        view_menu.addAction(zoom_in_action)
-
+        settings_menu.addAction(zoom_in_action)
+        
         zoom_out_action = QAction("Уменьшить", self)
         zoom_out_action.setShortcut("Ctrl+-")
         zoom_out_action.triggered.connect(self._zoom_out)
-        view_menu.addAction(zoom_out_action)
-
+        settings_menu.addAction(zoom_out_action)
+        
         reset_zoom_action = QAction("Сбросить масштаб", self)
         reset_zoom_action.setShortcut("Ctrl+0")
         reset_zoom_action.triggered.connect(self._reset_zoom)
-        view_menu.addAction(reset_zoom_action)
-
-        view_menu.addSeparator()
-
+        settings_menu.addAction(reset_zoom_action)
+        
+        settings_menu.addSeparator()
+        
         toggle_toolbar_action = QAction("Показать/скрыть панель инструментов", self)
         toggle_toolbar_action.setCheckable(True)
         toggle_toolbar_action.setChecked(True)
         toggle_toolbar_action.triggered.connect(self._toggle_toolbar)
-        view_menu.addAction(toggle_toolbar_action)
-
+        settings_menu.addAction(toggle_toolbar_action)
+        
         toggle_statusbar_action = QAction("Показать/скрыть строку состояния", self)
         toggle_statusbar_action.setCheckable(True)
         toggle_statusbar_action.setChecked(True)
         toggle_statusbar_action.triggered.connect(self._toggle_statusbar)
-        view_menu.addAction(toggle_statusbar_action)
-
-        settings_menu = menu_bar.addMenu("Настройки")
-
-        blacklist_manager_action = QAction("Менеджер чёрного списка", self)
-        blacklist_manager_action.triggered.connect(self._manage_blacklist)
-        settings_menu.addAction(blacklist_manager_action)
-
-        link_sources_action = QAction("Источники ссылок", self)
-        link_sources_action.triggered.connect(self._manage_link_sources)
-        settings_menu.addAction(link_sources_action)
-
-        link_replacement_settings_action = QAction("Настройки замены ссылок", self)
-        link_replacement_settings_action.triggered.connect(self._manage_link_replacement_settings)
-        settings_menu.addAction(link_replacement_settings_action)
-
-        settings_menu.addSeparator()
-
-        copy_metadata_between_action = QAction("Копирование метаданных между плейлистами...", self)
-        copy_metadata_between_action.triggered.connect(self._copy_metadata_between_playlists)
-        settings_menu.addAction(copy_metadata_between_action)
-
+        settings_menu.addAction(toggle_statusbar_action)
+    
     def _setup_toolbar(self):
         self.toolbar = QToolBar("Основная панель")
         self.toolbar.setObjectName("mainToolbar")
         self.toolbar.setMovable(False)
         self.addToolBar(self.toolbar)
-
-        new_action = QAction(QIcon.fromTheme("document-new", self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon)), "Новый", self)
+        
+        icon = self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon)
+        
+        new_action = QAction(icon, "Новый", self)
         new_action.triggered.connect(self._new_file)
         self.toolbar.addAction(new_action)
-
+        
         open_action = QAction(QIcon.fromTheme("document-open", self.style().standardIcon(QStyle.StandardPixmap.SP_DialogOpenButton)), "Открыть", self)
         open_action.triggered.connect(self._open_file)
         self.toolbar.addAction(open_action)
-
+        
         save_action = QAction(QIcon.fromTheme("document-save", self.style().standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton)), "Сохранить", self)
         save_action.triggered.connect(self._save_file)
         self.toolbar.addAction(save_action)
-
+        
         self.toolbar.addSeparator()
-
+        
         undo_action = QAction(QIcon.fromTheme("edit-undo", self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowBack)), "Отменить", self)
         undo_action.triggered.connect(self._undo)
         self.toolbar_undo_action = undo_action
         self.toolbar.addAction(undo_action)
-
+        
         redo_action = QAction(QIcon.fromTheme("edit-redo", self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowForward)), "Повторить", self)
         redo_action.triggered.connect(self._redo)
         self.toolbar_redo_action = redo_action
         self.toolbar.addAction(redo_action)
-
+        
         self.toolbar.addSeparator()
-
-        cut_action = QAction(QIcon.fromTheme("edit-cut", self.style().standardIcon(QStyle.StandardPixmap.SP_DialogCancelButton)), "Вырезать", self)
-        cut_action.triggered.connect(self._cut)
-        self.toolbar.addAction(cut_action)
-
+        
+        move_up_action = QAction(QIcon.fromTheme("go-up", self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowUp)), "Переместить вверх", self)
+        move_up_action.triggered.connect(self._move_channel_up)
+        self.toolbar.addAction(move_up_action)
+        
+        move_down_action = QAction(QIcon.fromTheme("go-down", self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowDown)), "Переместить вниз", self)
+        move_down_action.triggered.connect(self._move_channel_down)
+        self.toolbar.addAction(move_down_action)
+        
+        self.toolbar.addSeparator()
+        
         copy_action = QAction(QIcon.fromTheme("edit-copy", self.style().standardIcon(QStyle.StandardPixmap.SP_DialogYesButton)), "Копировать", self)
         copy_action.triggered.connect(self._copy)
         self.toolbar.addAction(copy_action)
-
+        
         paste_action = QAction(QIcon.fromTheme("edit-paste", self.style().standardIcon(QStyle.StandardPixmap.SP_DialogApplyButton)), "Вставить", self)
         paste_action.triggered.connect(self._paste)
         self.toolbar.addAction(paste_action)
-
+        
         self.toolbar.addSeparator()
-
+        
         check_urls_action = QAction(QIcon.fromTheme("network-connect", self.style().standardIcon(QStyle.StandardPixmap.SP_DialogOkButton)), "Проверить ссылки", self)
         check_urls_action.triggered.connect(self._check_selected_urls)
         self.toolbar.addAction(check_urls_action)
-
+        
         self.toolbar.addSeparator()
-
+        
         zoom_in_action = QAction(QIcon.fromTheme("zoom-in", self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowUp)), "Увеличить", self)
         zoom_in_action.triggered.connect(self._zoom_in)
         self.toolbar.addAction(zoom_in_action)
-
+        
         zoom_out_action = QAction(QIcon.fromTheme("zoom-out", self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowDown)), "Уменьшить", self)
         zoom_out_action.triggered.connect(self._zoom_out)
         self.toolbar.addAction(zoom_out_action)
-
+    
     def _setup_statusbar(self):
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
@@ -6868,7 +6807,6 @@ class MainWindow(QMainWindow):
         settings.setValue("window_state", self.saveState())
         settings.setValue("recent_files", self.recent_files)
         
-        # Сохраняем настройки фильтрации
         self._save_ip_filter_settings()
     
     def _update_recent_menu(self):
@@ -6976,6 +6914,66 @@ class MainWindow(QMainWindow):
             
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", f"Не удалось открыть файл:\n{str(e)}")
+    
+    def _create_playlist_from_sources(self):
+        sources = self.link_source_manager.get_enabled_sources()
+        
+        if not sources:
+            QMessageBox.warning(self, "Предупреждение", "Нет включенных источников ссылок")
+            return
+        
+        progress_dialog = QProgressDialog("Загрузка плейлистов из источников...", "Отмена", 0, len(sources), self)
+        progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        
+        all_channels = []
+        failed_sources = []
+        
+        for i, source in enumerate(sources):
+            progress_dialog.setValue(i)
+            progress_dialog.setLabelText(f"Загрузка: {source.name}")
+            
+            if progress_dialog.wasCanceled():
+                break
+            
+            try:
+                channels = self.link_source_manager.load_links_from_source(source)
+                if channels:
+                    for channel in channels:
+                        channel.link_source = source.name
+                    all_channels.extend(channels)
+                else:
+                    failed_sources.append(source.name)
+                time.sleep(0.1)
+            except Exception as e:
+                logger.error(f"Ошибка загрузки источника {source.name}: {e}")
+                failed_sources.append(source.name)
+        
+        progress_dialog.setValue(len(sources))
+        
+        if not all_channels:
+            QMessageBox.warning(self, "Предупреждение", "Не удалось загрузить каналы из источников")
+            return
+        
+        self._new_file()
+        
+        if self.current_tab:
+            self.current_tab._save_state("Создание плейлиста из источников")
+            self.current_tab.all_channels = all_channels
+            self.current_tab._apply_filter()
+            self.current_tab.modified = True
+            self.current_tab._update_modified_status()
+            
+            if failed_sources:
+                QMessageBox.warning(
+                    self, "Частичная загрузка",
+                    f"Загружено {len(all_channels)} каналов\n"
+                    f"Не удалось загрузить: {', '.join(failed_sources)}"
+                )
+            else:
+                QMessageBox.information(
+                    self, "Успех",
+                    f"Загружено {len(all_channels)} каналов из {len(sources)} источников"
+                )
     
     def _save_file(self):
         if not self.current_tab:
@@ -7202,6 +7200,10 @@ class MainWindow(QMainWindow):
         if self.current_tab:
             self.current_tab._new_channel()
     
+    def _cut_channel(self):
+        if self.current_tab:
+            self.current_tab._cut_channel()
+    
     def _copy_channel(self):
         if self.current_tab:
             self.current_tab._copy_channel()
@@ -7352,6 +7354,10 @@ class MainWindow(QMainWindow):
     def _remove_selected_broken_urls(self):
         if self.current_tab:
             self.current_tab._remove_selected_broken_urls()
+    
+    def _remove_all_broken_urls(self):
+        if self.current_tab:
+            self.current_tab._remove_all_broken_urls()
     
     def _edit_playlist_header(self):
         if self.current_tab:
@@ -7735,3 +7741,12 @@ def main():
 
 if __name__ == "__main__":
     main()
+1. при создании плейлиста из источников, из некоторых источников получаются крякозябры вместо кириллицы, возможно разные окончания или разница в кодировке:
+#EXTINF:-1 tvg-id="match-football3" tvg-logo="https://iptvx.one/picons/match-football3.png" group-title="–°–ø–æ—Ä—Ç–∏–≤–Ω—ã–µ",–ú–∞—Ç—á! –§—É—Ç–±–æ–ª 3 HD
+http://185.57.68.33/110/mpegts
+не из всех источников, но из некоторых такое происходит: group-title="–°–ø–æ—Ä—Ç–∏–≤–Ω—ã–µ",–ú–∞—Ç—á! –§—É—Ç–±–æ–ª 3 HD
+2. добавь в контекстное меню таблицы "Вырезать канал"
+3. удали меню правка
+4. в настройках замены ссылок -> настройки замены -> автозамена битых ссылок. функция по умолчанию должна быть включена
+5. если имеется мёртвый код удали его
+покажи полную версию файла, сохранив остальной функционал
