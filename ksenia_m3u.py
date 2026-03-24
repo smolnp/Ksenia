@@ -217,6 +217,29 @@ class ChannelNameNormalizer:
         if match:
             return match.group(1)
         return None
+    
+    @staticmethod
+    def fix_encoding(text: str) -> str:
+        """Исправление кодировки для строк, которые выглядят как испорченная кириллица"""
+        if not text:
+            return text
+        
+        try:
+            if '–' in text or '—' in text or '∏' in text or 'ø' in text:
+                bytes_data = text.encode('latin1')
+                decoded = bytes_data.decode('utf-8', errors='replace')
+                if any(c in decoded for c in ['а', 'б', 'в', 'г', 'д']):
+                    return decoded
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            pass
+        
+        try:
+            if any(ord(c) > 127 for c in text):
+                return text
+        except:
+            pass
+        
+        return text
 
 
 class LinkSource:
@@ -236,6 +259,7 @@ class LinkSource:
         self.description: str = ""
         self.link_cache: Dict[str, List[str]] = {}
         self.last_cache_update: Optional[datetime] = None
+        self.encoding: str = "utf-8"
     
     def copy(self) -> 'LinkSource':
         source = LinkSource()
@@ -253,6 +277,7 @@ class LinkSource:
         source.description = self.description
         source.link_cache = self.link_cache.copy()
         source.last_cache_update = self.last_cache_update
+        source.encoding = self.encoding
         return source
     
     def to_dict(self) -> Dict[str, Any]:
@@ -270,7 +295,8 @@ class LinkSource:
             'tags': self.tags,
             'description': self.description,
             'link_cache': self.link_cache,
-            'last_cache_update': self.last_cache_update.isoformat() if self.last_cache_update else None
+            'last_cache_update': self.last_cache_update.isoformat() if self.last_cache_update else None,
+            'encoding': self.encoding
         }
     
     @classmethod
@@ -288,6 +314,7 @@ class LinkSource:
         source.tags = data.get('tags', [])
         source.description = data.get('description', '')
         source.link_cache = data.get('link_cache', {})
+        source.encoding = data.get('encoding', 'utf-8')
         
         last_updated = data.get('last_updated')
         if last_updated:
@@ -635,7 +662,7 @@ class LinkReplacementSettings:
         self.max_workers: int = 5
         self.max_retries: int = 2
         self.retry_delay: float = 0.5
-        self.auto_replace_broken: bool = False
+        self.auto_replace_broken: bool = True
         self.auto_replace_missing: bool = True
         self.keep_backup_links: bool = True
         self.max_alternative_urls: int = 5
@@ -700,7 +727,7 @@ class LinkReplacementSettings:
         settings.max_workers = data.get('max_workers', 5)
         settings.max_retries = data.get('max_retries', 2)
         settings.retry_delay = data.get('retry_delay', 0.5)
-        settings.auto_replace_broken = data.get('auto_replace_broken', False)
+        settings.auto_replace_broken = data.get('auto_replace_broken', True)
         settings.auto_replace_missing = data.get('auto_replace_missing', True)
         settings.keep_backup_links = data.get('keep_backup_links', True)
         settings.max_alternative_urls = data.get('max_alternative_urls', 5)
@@ -839,20 +866,63 @@ class LinkSourceManager:
                 return source
         return None
     
+    def _detect_encoding(self, content: bytes) -> str:
+        """Определение кодировки содержимого"""
+        try:
+            content.decode('utf-8')
+            return 'utf-8'
+        except UnicodeDecodeError:
+            pass
+        
+        try:
+            content.decode('windows-1251')
+            return 'windows-1251'
+        except UnicodeDecodeError:
+            pass
+        
+        try:
+            content.decode('cp1251')
+            return 'cp1251'
+        except UnicodeDecodeError:
+            pass
+        
+        return 'utf-8'
+    
+    def _fix_broken_cyrillic(self, text: str) -> str:
+        """Исправление битой кириллицы в тексте"""
+        if not text:
+            return text
+        
+        try:
+            if '–' in text or '—' in text or '∏' in text or 'ø' in text:
+                bytes_data = text.encode('latin1')
+                decoded = bytes_data.decode('utf-8', errors='replace')
+                if any(c in decoded for c in ['а', 'б', 'в', 'г', 'д']):
+                    return decoded
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            pass
+        
+        return text
+    
     def load_links_from_source(self, source: LinkSource) -> List[ChannelData]:
         channels = []
         
         try:
             if source.source_type == "local":
                 if os.path.exists(source.path):
-                    with open(source.path, 'r', encoding='utf-8', errors='replace') as f:
-                        content = f.read()
+                    with open(source.path, 'rb') as f:
+                        raw_content = f.read()
+                    
+                    detected_encoding = self._detect_encoding(raw_content)
+                    content = raw_content.decode(detected_encoding, errors='replace')
                     channels = self._parse_content(content, source.name)
+                    
             elif source.source_type == "online":
                 try:
                     response = requests.get(source.path, timeout=10, verify=False)
                     if response.status_code == 200:
-                        channels = self._parse_content(response.text, source.name)
+                        content = response.text
+                        channels = self._parse_content(content, source.name)
                 except Exception as e:
                     logger.error(f"Ошибка загрузки онлайн источника {source.name}: {e}")
             
@@ -877,26 +947,29 @@ class LinkSourceManager:
             
             if line.startswith('#EXTINF:'):
                 channel = ChannelData()
-                channel.extinf = line
+                fixed_line = ChannelNameNormalizer.fix_encoding(line)
+                channel.extinf = fixed_line
                 channel.link_source = source_name
                 
-                if ',' in line:
-                    parts = line.split(',', 1)
-                    channel.name = parts[1].strip()
+                if ',' in fixed_line:
+                    parts = fixed_line.split(',', 1)
+                    channel.name = ChannelNameNormalizer.fix_encoding(parts[1].strip())
                 
-                attrs_part = line.split(',')[0] if ',' in line else line
+                attrs_part = fixed_line.split(',')[0] if ',' in fixed_line else fixed_line
                 
                 tvg_id_match = re.search(r'tvg-id="([^"]*)"', attrs_part)
                 if tvg_id_match:
-                    channel.tvg_id = tvg_id_match.group(1)
+                    channel.tvg_id = ChannelNameNormalizer.fix_encoding(tvg_id_match.group(1))
                 
                 logo_match = re.search(r'tvg-logo="([^"]*)"', attrs_part)
                 if logo_match:
-                    channel.tvg_logo = logo_match.group(1)
+                    channel.tvg_logo = ChannelNameNormalizer.fix_encoding(logo_match.group(1))
                 
                 group_match = re.search(r'group-title="([^"]*)"', attrs_part)
                 if group_match:
-                    channel.group = group_match.group(1)
+                    channel.group = ChannelNameNormalizer.fix_encoding(group_match.group(1))
+                else:
+                    channel.group = "Без группы"
                 
                 j = i + 1
                 while j < len(lines):
@@ -909,10 +982,10 @@ class LinkSourceManager:
                         break
                     
                     if next_line.startswith('#'):
-                        if next_line.startswith('#EXTVLCOPT'):
-                            channel.extvlcopt_lines.append(next_line)
+                        fixed_next_line = ChannelNameNormalizer.fix_encoding(next_line)
+                        channel.extvlcopt_lines.append(fixed_next_line)
                     else:
-                        channel.url = next_line.strip()
+                        channel.url = ChannelNameNormalizer.fix_encoding(next_line.strip())
                         channel.has_url = bool(channel.url)
                         break
                     
@@ -2001,6 +2074,10 @@ class ChannelTableWidget(QTableWidget):
                 copy_channel_action.triggered.connect(lambda: self._copy_channel(row))
                 menu.addAction(copy_channel_action)
                 
+                cut_channel_action = QAction("Вырезать канал", menu)
+                cut_channel_action.triggered.connect(lambda: self._cut_channel(row))
+                menu.addAction(cut_channel_action)
+                
                 paste_channel_action = QAction("Вставить канал", menu)
                 paste_channel_action.triggered.connect(lambda: self._paste_channel(row))
                 menu.addAction(paste_channel_action)
@@ -2058,6 +2135,10 @@ class ChannelTableWidget(QTableWidget):
                 copy_channels_action = QAction(f"Копировать каналы ({count})", menu)
                 copy_channels_action.triggered.connect(self._copy_selected_channels)
                 menu.addAction(copy_channels_action)
+                
+                cut_channels_action = QAction(f"Вырезать каналы ({count})", menu)
+                cut_channels_action.triggered.connect(self._cut_selected_channels)
+                menu.addAction(cut_channels_action)
                 
                 paste_channels_action = QAction(f"Вставить каналы ({count})", menu)
                 paste_channels_action.triggered.connect(self._paste_selected_channels)
@@ -2124,6 +2205,14 @@ class ChannelTableWidget(QTableWidget):
             menu.addAction(rename_groups_action)
         
         menu.exec(self.mapToGlobal(position))
+    
+    def _cut_channel(self, row: int):
+        if self.playlist_tab and hasattr(self.playlist_tab, '_cut_channel'):
+            self.playlist_tab._cut_channel()
+    
+    def _cut_selected_channels(self):
+        if self.playlist_tab and hasattr(self.playlist_tab, '_cut_selected_channels'):
+            self.playlist_tab._cut_selected_channels()
     
     def _remove_broken_url(self, row: int):
         self.remove_broken_url_requested.emit(row)
@@ -3696,7 +3785,7 @@ class LinkReplacementSettingsDialog(QDialog):
         replace_layout = QVBoxLayout(replace_group)
         
         self.auto_broken_check = QCheckBox("Автозамена битых ссылок")
-        self.auto_broken_check.setChecked(False)
+        self.auto_broken_check.setChecked(True)
         replace_layout.addWidget(self.auto_broken_check)
         
         self.auto_missing_check = QCheckBox("Автозамена отсутствующих ссылок")
@@ -4930,6 +5019,16 @@ class PlaylistTab(QWidget):
             if parent and hasattr(parent, 'copied_channel'):
                 parent.copied_channel = self.current_channel.copy()
     
+    def _cut_channel(self):
+        if self.current_channel:
+            self._copy_channel()
+            self._delete_channel()
+    
+    def _cut_selected_channels(self):
+        if self.selected_channels:
+            self._copy_selected_channels()
+            self._delete_selected_channels()
+    
     def _copy_selected_channels(self):
         if not self.selected_channels:
             return
@@ -5122,6 +5221,7 @@ class PlaylistTab(QWidget):
             QKeySequence("Ctrl+Y"): self._redo,
             QKeySequence("Ctrl+Shift+A"): self._new_channel,
             QKeySequence("Ctrl+C"): self._copy_channel,
+            QKeySequence("Ctrl+X"): self._cut_channel,
             QKeySequence("Ctrl+V"): self._paste_channel,
             QKeySequence("Ctrl+Up"): self._move_channel_up,
             QKeySequence("Ctrl+Down"): self._move_channel_down,
@@ -5566,25 +5666,26 @@ class PlaylistTab(QWidget):
                 
                 if line.startswith('#EXTINF:'):
                     channel = ChannelData()
-                    channel.extinf = line
+                    fixed_line = ChannelNameNormalizer.fix_encoding(line)
+                    channel.extinf = fixed_line
                     
-                    if ',' in line:
-                        parts = line.split(',', 1)
-                        channel.name = parts[1].strip()
+                    if ',' in fixed_line:
+                        parts = fixed_line.split(',', 1)
+                        channel.name = ChannelNameNormalizer.fix_encoding(parts[1].strip())
                     
-                    attrs_part = line.split(',')[0] if ',' in line else line
+                    attrs_part = fixed_line.split(',')[0] if ',' in fixed_line else fixed_line
                     
                     tvg_id_match = re.search(r'tvg-id="([^"]*)"', attrs_part)
                     if tvg_id_match:
-                        channel.tvg_id = tvg_id_match.group(1)
+                        channel.tvg_id = ChannelNameNormalizer.fix_encoding(tvg_id_match.group(1))
                     
                     logo_match = re.search(r'tvg-logo="([^"]*)"', attrs_part)
                     if logo_match:
-                        channel.tvg_logo = logo_match.group(1)
+                        channel.tvg_logo = ChannelNameNormalizer.fix_encoding(logo_match.group(1))
                     
                     group_match = re.search(r'group-title="([^"]*)"', attrs_part)
                     if group_match:
-                        channel.group = group_match.group(1)
+                        channel.group = ChannelNameNormalizer.fix_encoding(group_match.group(1))
                     else:
                         channel.group = "Без группы"
                     
@@ -5603,9 +5704,10 @@ class PlaylistTab(QWidget):
                             break
                         
                         if next_line.startswith('#'):
-                            extvlcopt_lines.append(next_line)
+                            fixed_next_line = ChannelNameNormalizer.fix_encoding(next_line)
+                            extvlcopt_lines.append(fixed_next_line)
                         else:
-                            url_lines.append(next_line)
+                            url_lines.append(ChannelNameNormalizer.fix_encoding(next_line))
                             has_url = True
                             break
                         
@@ -5624,7 +5726,8 @@ class PlaylistTab(QWidget):
                                 break
                             
                             if next_line.startswith('#'):
-                                extvlcopt_lines.append(next_line)
+                                fixed_next_line = ChannelNameNormalizer.fix_encoding(next_line)
+                                extvlcopt_lines.append(fixed_next_line)
                             else:
                                 break
                             
@@ -5835,11 +5938,6 @@ class PlaylistTab(QWidget):
             return
         
         self._delete_channel()
-    
-    def _cut_channel(self):
-        if self.current_channel:
-            self._copy_channel()
-            self._delete_channel()
     
     def _add_to_blacklist(self, row: int = -1):
         if row == -1:
@@ -6745,6 +6843,10 @@ class MainWindow(QMainWindow):
         copy_action.triggered.connect(self._copy)
         self.toolbar.addAction(copy_action)
         
+        cut_action = QAction(QIcon.fromTheme("edit-cut", self.style().standardIcon(QStyle.StandardPixmap.SP_DialogDiscardButton)), "Вырезать", self)
+        cut_action.triggered.connect(self._cut)
+        self.toolbar.addAction(cut_action)
+        
         paste_action = QAction(QIcon.fromTheme("edit-paste", self.style().standardIcon(QStyle.StandardPixmap.SP_DialogApplyButton)), "Вставить", self)
         paste_action.triggered.connect(self._paste)
         self.toolbar.addAction(paste_action)
@@ -7177,8 +7279,7 @@ class MainWindow(QMainWindow):
     
     def _cut(self):
         if self.current_tab:
-            self.current_tab._copy_channel()
-            self.current_tab._delete_channel()
+            self.current_tab._cut_channel()
     
     def _copy(self):
         if self.current_tab:
@@ -7741,12 +7842,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-1. при создании плейлиста из источников, из некоторых источников получаются крякозябры вместо кириллицы, возможно разные окончания или разница в кодировке:
-#EXTINF:-1 tvg-id="match-football3" tvg-logo="https://iptvx.one/picons/match-football3.png" group-title="–°–ø–æ—Ä—Ç–∏–≤–Ω—ã–µ",–ú–∞—Ç—á! –§—É—Ç–±–æ–ª 3 HD
-http://185.57.68.33/110/mpegts
-не из всех источников, но из некоторых такое происходит: group-title="–°–ø–æ—Ä—Ç–∏–≤–Ω—ã–µ",–ú–∞—Ç—á! –§—É—Ç–±–æ–ª 3 HD
-2. добавь в контекстное меню таблицы "Вырезать канал"
-3. удали меню правка
-4. в настройках замены ссылок -> настройки замены -> автозамена битых ссылок. функция по умолчанию должна быть включена
-5. если имеется мёртвый код удали его
-покажи полную версию файла, сохранив остальной функционал
