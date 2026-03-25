@@ -2,7 +2,7 @@
 
 Редактор M3U плейлистов для управления IPTV каналами с расширенными функциями проверки и замены ссылок. Редактор ещё в разработке, но уже может многое.
 
-[Главное окно](01.png)
+[Главное окно](https://github.com/smolnp/Ksenia/blob/main/Ksenia%20M3U%20Editor/01.png)
 
 ![Python Version](https://img.shields.io/badge/python-3.8+-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-lightgrey.svg)
