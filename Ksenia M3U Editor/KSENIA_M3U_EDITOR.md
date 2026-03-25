@@ -2,6 +2,8 @@
 
 Редактор M3U плейлистов для управления IPTV каналами с расширенными функциями проверки и замены ссылок. Редактор ещё в разработке, но уже может многое.
 
+[Главное окно](01.png)
+
 ![Python Version](https://img.shields.io/badge/python-3.8+-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-lightgrey.svg)
 ![PyQt6](https://img.shields.io/badge/PyQt6-6.0+-brightgreen.svg)
