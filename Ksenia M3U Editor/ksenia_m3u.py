@@ -14,7 +14,6 @@ from urllib.parse import urlparse
 import time
 import logging
 import hashlib
-import csv
 from difflib import SequenceMatcher
 import urllib3
 
@@ -53,8 +52,410 @@ from PyQt6.QtGui import (
 )
 
 
-class SystemThemeManager:
+class DomainUserAgentRule:
+    def __init__(self, domain: str = "", user_agent: str = ""):
+        self.domain: str = domain.strip()
+        self.user_agent: str = user_agent.strip()
+        self.enabled: bool = True
+        self.created_date: datetime = datetime.now()
     
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'domain': self.domain,
+            'user_agent': self.user_agent,
+            'enabled': self.enabled,
+            'created_date': self.created_date.isoformat()
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'DomainUserAgentRule':
+        rule = cls()
+        rule.domain = data.get('domain', '')
+        rule.user_agent = data.get('user_agent', '')
+        rule.enabled = data.get('enabled', True)
+        
+        created_date = data.get('created_date')
+        if created_date:
+            try:
+                rule.created_date = datetime.fromisoformat(created_date)
+            except (ValueError, TypeError):
+                rule.created_date = datetime.now()
+        
+        return rule
+    
+    def matches_url(self, url: str) -> bool:
+        if not url or not self.domain:
+            return False
+        
+        return self.domain.lower() in url.lower()
+
+
+class DomainUserAgentManager:
+    def __init__(self, config_dir: str = None):
+        if config_dir is None:
+            config_dir = SystemThemeManager.get_config_dir()
+        
+        self.config_dir = config_dir
+        self.rules_file = os.path.join(config_dir, "domain_user_agent_rules.json")
+        self.rules: List[DomainUserAgentRule] = []
+        
+        self._ensure_config_dir()
+        self._load_rules()
+    
+    def _ensure_config_dir(self):
+        try:
+            os.makedirs(self.config_dir, exist_ok=True)
+        except (OSError, PermissionError) as e:
+            logger.error(f"Ошибка создания директории: {e}")
+            raise
+    
+    def _load_rules(self):
+        try:
+            if os.path.exists(self.rules_file):
+                with open(self.rules_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                
+                if isinstance(data, list):
+                    self.rules = [DomainUserAgentRule.from_dict(item) for item in data]
+                else:
+                    self.rules = []
+            else:
+                self.rules = []
+                self._save_rules()
+                
+        except (json.JSONDecodeError, IOError, OSError) as e:
+            logger.error(f"Ошибка загрузки правил: {e}")
+            self.rules = []
+    
+    def _save_rules(self):
+        try:
+            data = [rule.to_dict() for rule in self.rules]
+            with open(self.rules_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            return True
+        except (IOError, OSError) as e:
+            logger.error(f"Ошибка сохранения правил: {e}")
+            return False
+    
+    def add_rule(self, domain: str, user_agent: str) -> bool:
+        if not domain:
+            return False
+        
+        for rule in self.rules:
+            if rule.domain == domain:
+                rule.user_agent = user_agent
+                return self._save_rules()
+        
+        rule = DomainUserAgentRule(domain, user_agent)
+        self.rules.append(rule)
+        return self._save_rules()
+    
+    def remove_rule(self, domain: str) -> bool:
+        for i, rule in enumerate(self.rules):
+            if rule.domain == domain:
+                del self.rules[i]
+                return self._save_rules()
+        return False
+    
+    def get_rule(self, domain: str) -> Optional[DomainUserAgentRule]:
+        for rule in self.rules:
+            if rule.domain == domain:
+                return rule
+        return None
+    
+    def get_all_rules(self) -> List[DomainUserAgentRule]:
+        return self.rules.copy()
+    
+    def get_user_agent_for_url(self, url: str) -> Optional[str]:
+        if not url:
+            return None
+        
+        for rule in self.rules:
+            if rule.enabled and rule.matches_url(url):
+                return rule.user_agent if rule.user_agent else None
+        
+        return None
+    
+    def should_remove_user_agent(self, url: str) -> bool:
+        if not url:
+            return False
+        
+        for rule in self.rules:
+            if rule.enabled and rule.matches_url(url) and not rule.user_agent:
+                return True
+        
+        return False
+    
+    def apply_rules_to_channel(self, channel: 'ChannelData') -> bool:
+        if not channel.url:
+            return False
+        
+        modified = False
+        
+        if self.should_remove_user_agent(channel.url):
+            if channel.user_agent:
+                channel.user_agent = ""
+                if 'User-Agent' in channel.extra_headers:
+                    del channel.extra_headers['User-Agent']
+                channel.update_extvlcopt_from_headers()
+                modified = True
+            return modified
+        
+        new_user_agent = self.get_user_agent_for_url(channel.url)
+        if new_user_agent is not None and new_user_agent != channel.user_agent:
+            channel.user_agent = new_user_agent
+            channel.extra_headers['User-Agent'] = new_user_agent
+            channel.update_extvlcopt_from_headers()
+            modified = True
+        
+        return modified
+    
+    def apply_rules_to_channels(self, channels: List['ChannelData']) -> int:
+        modified_count = 0
+        
+        for channel in channels:
+            if self.apply_rules_to_channel(channel):
+                modified_count += 1
+        
+        return modified_count
+
+
+class DomainUserAgentDialog(QDialog):
+    rules_updated = pyqtSignal()
+    
+    def __init__(self, manager: DomainUserAgentManager, parent=None):
+        super().__init__(parent)
+        self.manager = manager
+        self.setWindowTitle("Управление User-Agent для доменов")
+        self.resize(800, 500)
+        
+        self._setup_ui()
+        self._load_rules()
+    
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        
+        info_label = QLabel(
+            "Настройка автоматической установки User-Agent для каналов по домену.\n"
+            "Если поле User-Agent пустое, то User-Agent будет удалён для всех каналов с указанным доменом."
+        )
+        info_label.setWordWrap(True)
+        info_label.setStyleSheet("color: gray;")
+        layout.addWidget(info_label)
+        
+        self.rules_table = QTableWidget()
+        self.rules_table.setColumnCount(3)
+        self.rules_table.setHorizontalHeaderLabels(["Домен", "User-Agent", "Включено"])
+        
+        header = self.rules_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        
+        self.rules_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.rules_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        
+        layout.addWidget(self.rules_table)
+        
+        btn_layout = QHBoxLayout()
+        
+        self.add_btn = QPushButton("Добавить правило")
+        self.add_btn.clicked.connect(self._add_rule)
+        btn_layout.addWidget(self.add_btn)
+        
+        self.edit_btn = QPushButton("Редактировать")
+        self.edit_btn.clicked.connect(self._edit_rule)
+        btn_layout.addWidget(self.edit_btn)
+        
+        self.remove_btn = QPushButton("Удалить")
+        self.remove_btn.clicked.connect(self._remove_rule)
+        btn_layout.addWidget(self.remove_btn)
+        
+        self.apply_btn = QPushButton("Применить ко всем каналам")
+        self.apply_btn.clicked.connect(self._apply_to_all_channels)
+        btn_layout.addWidget(self.apply_btn)
+        
+        btn_layout.addStretch()
+        
+        layout.addLayout(btn_layout)
+        
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+    
+    def _load_rules(self):
+        rules = self.manager.get_all_rules()
+        self.rules_table.setRowCount(len(rules))
+        
+        for i, rule in enumerate(rules):
+            self.rules_table.setItem(i, 0, QTableWidgetItem(rule.domain))
+            
+            ua_display = rule.user_agent[:50] + "..." if len(rule.user_agent) > 50 else rule.user_agent
+            ua_item = QTableWidgetItem(ua_display if rule.user_agent else "(удалить User-Agent)")
+            if not rule.user_agent:
+                ua_item.setForeground(QColor("orange"))
+            ua_item.setToolTip(rule.user_agent)
+            self.rules_table.setItem(i, 1, ua_item)
+            
+            enabled_item = QTableWidgetItem()
+            enabled_item.setCheckState(Qt.CheckState.Checked if rule.enabled else Qt.CheckState.Unchecked)
+            self.rules_table.setItem(i, 2, enabled_item)
+    
+    def _add_rule(self):
+        dialog = DomainUserAgentEditDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            domain, user_agent = dialog.get_rule()
+            if domain:
+                if self.manager.add_rule(domain, user_agent):
+                    self._load_rules()
+                    self.rules_updated.emit()
+    
+    def _edit_rule(self):
+        selected_row = self.rules_table.currentRow()
+        if selected_row < 0:
+            QMessageBox.warning(self, "Предупреждение", "Выберите правило для редактирования")
+            return
+        
+        domain_item = self.rules_table.item(selected_row, 0)
+        
+        if domain_item:
+            domain = domain_item.text()
+            rule = self.manager.get_rule(domain)
+            
+            if rule:
+                dialog = DomainUserAgentEditDialog(self, rule)
+                if dialog.exec() == QDialog.DialogCode.Accepted:
+                    new_domain, new_user_agent = dialog.get_rule()
+                    if new_domain:
+                        if new_domain != domain:
+                            self.manager.remove_rule(domain)
+                        self.manager.add_rule(new_domain, new_user_agent)
+                        self._load_rules()
+                        self.rules_updated.emit()
+    
+    def _remove_rule(self):
+        selected_row = self.rules_table.currentRow()
+        if selected_row < 0:
+            QMessageBox.warning(self, "Предупреждение", "Выберите правило для удаления")
+            return
+        
+        domain_item = self.rules_table.item(selected_row, 0)
+        if domain_item:
+            domain = domain_item.text()
+            
+            reply = QMessageBox.question(
+                self, "Подтверждение",
+                f"Удалить правило для домена '{domain}'?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            
+            if reply == QMessageBox.StandardButton.Yes:
+                if self.manager.remove_rule(domain):
+                    self._load_rules()
+                    self.rules_updated.emit()
+    
+    def _apply_to_all_channels(self):
+        parent = self.parent()
+        while parent and not hasattr(parent, 'current_tab'):
+            parent = parent.parent()
+        
+        if not parent or not parent.current_tab:
+            QMessageBox.warning(self, "Предупреждение", "Нет открытого плейлиста")
+            return
+        
+        tab = parent.current_tab
+        
+        reply = QMessageBox.question(
+            self, "Подтверждение",
+            "Применить правила User-Agent ко всем каналам в текущем плейлисте?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            modified_count = self.manager.apply_rules_to_channels(tab.all_channels)
+            
+            if modified_count > 0:
+                tab._save_state("Применение правил User-Agent для доменов")
+                tab._apply_filter()
+                tab.modified = True
+                tab._update_modified_status()
+                QMessageBox.information(self, "Успех", f"Обновлено {modified_count} каналов")
+            else:
+                QMessageBox.information(self, "Информация", "Изменений не требуется")
+    
+    def reject(self):
+        self.rules_updated.emit()
+        super().reject()
+
+
+class DomainUserAgentEditDialog(QDialog):
+    def __init__(self, parent=None, rule: DomainUserAgentRule = None):
+        super().__init__(parent)
+        self.rule = rule
+        self.setWindowTitle("Редактирование правила" if rule else "Добавление правила")
+        self.resize(500, 200)
+        
+        self._setup_ui()
+        if rule:
+            self._load_rule_data()
+    
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        
+        form_layout = QFormLayout()
+        
+        self.domain_edit = QLineEdit()
+        self.domain_edit.setPlaceholderText("https://zabava-htlive.cdn.ngenix.net")
+        self.domain_edit.setToolTip("Домен или часть URL для сопоставления")
+        form_layout.addRow("Домен:", self.domain_edit)
+        
+        self.user_agent_edit = QTextEdit()
+        self.user_agent_edit.setPlaceholderText(
+            '#EXTVLCOPT:http-user-agent="WINK/1.40.1 (AndroidTV/9) HlsWinkPlayer"\n\n'
+            "Оставьте поле пустым, чтобы удалить User-Agent для каналов с этим доменом"
+        )
+        self.user_agent_edit.setMaximumHeight(100)
+        form_layout.addRow("User-Agent:", self.user_agent_edit)
+        
+        info_label = QLabel(
+            "Примечание: Если поле User-Agent пустое, то User-Agent будет удалён\n"
+            "для всех каналов, URL которых содержит указанный домен."
+        )
+        info_label.setWordWrap(True)
+        info_label.setStyleSheet("color: gray; font-style: italic;")
+        form_layout.addRow(info_label)
+        
+        layout.addLayout(form_layout)
+        
+        button_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok |
+            QDialogButtonBox.StandardButton.Cancel
+        )
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+    
+    def _load_rule_data(self):
+        if self.rule:
+            self.domain_edit.setText(self.rule.domain)
+            self.user_agent_edit.setPlainText(self.rule.user_agent)
+    
+    def get_rule(self) -> Tuple[str, str]:
+        domain = self.domain_edit.text().strip()
+        user_agent = self.user_agent_edit.toPlainText().strip()
+        return domain, user_agent
+    
+    def accept(self):
+        domain = self.domain_edit.text().strip()
+        if not domain:
+            QMessageBox.warning(self, "Предупреждение", "Введите домен")
+            self.domain_edit.setFocus()
+            return
+        
+        super().accept()
+
+
+class SystemThemeManager:
     @staticmethod
     def get_hotkeys() -> Dict[str, str]:
         return {
@@ -90,7 +491,6 @@ class LinkQuality(Enum):
 
 
 class ChannelNameNormalizer:
-    
     QUALITY_PATTERNS = [
         r'\(\s*(?:720|1080|1280|480|360|2160|4K|8K|UHD|HD|SD|FHD|FullHD)[pPi]?\s*\)',
         r'\(\s*(?:720|1080|1280|480|360|2160)[pP]\s*\)',
@@ -230,7 +630,6 @@ class ChannelNameNormalizer:
 
 
 class LinkSource:
-    
     def __init__(self):
         self.name: str = ""
         self.path: str = ""
@@ -321,7 +720,6 @@ class LinkSource:
 
 
 class ChannelData:
-    
     def __init__(self):
         self.name: str = ""
         self.group: str = "Без группы"
@@ -339,6 +737,7 @@ class ChannelData:
         self.link_quality: LinkQuality = LinkQuality.UNKNOWN
         self.link_response_time: Optional[float] = None
         self.alternative_urls: List[str] = []
+        self.last_link_replacement: Optional[datetime] = None
         self.created_date: datetime = datetime.now()
         self.modified_date: datetime = datetime.now()
     
@@ -505,6 +904,9 @@ class ChannelData:
         tooltip += f"\nСоздан: {self.created_date.strftime('%Y-%m-%d %H:%M')}"
         tooltip += f"\nИзменён: {self.modified_date.strftime('%Y-%m-%d %H:%M')}"
         
+        if self.user_agent:
+            tooltip += f"\nUser-Agent: {self.user_agent[:50]}..."
+        
         return tooltip
     
     def to_dict(self) -> Dict[str, Any]:
@@ -525,6 +927,7 @@ class ChannelData:
             'link_quality': self.link_quality.value,
             'link_response_time': self.link_response_time,
             'alternative_urls': self.alternative_urls,
+            'last_link_replacement': self.last_link_replacement.isoformat() if self.last_link_replacement else None,
             'created_date': self.created_date.isoformat(),
             'modified_date': self.modified_date.isoformat()
         }
@@ -561,6 +964,13 @@ class ChannelData:
         channel.link_response_time = data.get('link_response_time')
         channel.alternative_urls = data.get('alternative_urls', [])
         
+        last_replacement = data.get('last_link_replacement')
+        if last_replacement:
+            try:
+                channel.last_link_replacement = datetime.fromisoformat(last_replacement)
+            except (ValueError, TypeError):
+                channel.last_link_replacement = None
+        
         created_date = data.get('created_date')
         if created_date:
             try:
@@ -576,13 +986,6 @@ class ChannelData:
                 channel.modified_date = datetime.now()
         
         return channel
-    
-    def match_by_name(self, other_channel: 'ChannelData') -> bool:
-        return self.name.lower() == other_channel.name.lower()
-    
-    def match_by_name_and_group(self, other_channel: 'ChannelData') -> bool:
-        return (self.name.lower() == other_channel.name.lower() and 
-                self.group.lower() == other_channel.group.lower())
     
     def get_similarity_score(self, other: 'ChannelData') -> float:
         scores = []
@@ -603,7 +1006,6 @@ class ChannelData:
 
 
 class LinkReplacementSettings:
-    
     def __init__(self):
         self.match_threshold_percent: float = 80.0
         self.use_fuzzy_matching: bool = True
@@ -745,7 +1147,6 @@ class LinkReplacementSettings:
 
 
 class LinkSourceManager:
-    
     def __init__(self, config_dir: str = None):
         if config_dir is None:
             config_dir = SystemThemeManager.get_config_dir()
@@ -1067,10 +1468,8 @@ class LinkSourceManager:
 
 
 class URLUtils:
-    
     @staticmethod
-    def check_url_availability(url: str, timeout: int = 5, 
-                              verify_ssl: bool = False) -> Tuple[bool, Optional[float], str]:
+    def check_url_availability(url: str, timeout: int = 5, verify_ssl: bool = False) -> Tuple[bool, Optional[float], str]:
         try:
             if not url or not url.strip():
                 return False, None, "Пустой URL"
@@ -1099,12 +1498,6 @@ class URLUtils:
                     allow_redirects=True,
                     stream=True
                 )
-                
-                content = b''
-                for chunk in response.iter_content(chunk_size=1024):
-                    content += chunk
-                    if len(content) >= 1024 or len(chunk) == 0:
-                        break
                 
                 response_time = time.time() - start_time
                 
@@ -1142,12 +1535,6 @@ class URLUtils:
             return False, None, f"Ошибка: {str(e)[:50]}"
     
     @staticmethod
-    def estimate_quality(response_time: float, status_code: int) -> LinkQuality:
-        if status_code >= 400:
-            return LinkQuality.NOT_WORKING
-        return LinkQuality.WORKING
-    
-    @staticmethod
     def should_filter_url(url: str, temporary_domains: List[str], unsafe_domains: List[str]) -> bool:
         url_lower = url.lower()
         
@@ -1163,7 +1550,6 @@ class URLUtils:
 
 
 class SafeWorker(QRunnable):
-    
     class WorkerSignals(QObject):
         progress = pyqtSignal(int, int, str)
         error = pyqtSignal(str)
@@ -1198,7 +1584,6 @@ class SafeWorker(QRunnable):
 
 
 class BaseWorker(QThread):
-    
     progress = pyqtSignal(int, int, str)
     error = pyqtSignal(str)
     finished = pyqtSignal()
@@ -1216,7 +1601,6 @@ class BaseWorker(QThread):
 
 
 class LinkReplacementWorker(BaseWorker):
-    
     channel_updated = pyqtSignal(ChannelData, str, str)
     
     def __init__(self, 
@@ -1274,17 +1658,14 @@ class LinkReplacementWorker(BaseWorker):
             return None
         
         should_replace = False
-        reason = ""
         
         if not channel.has_url or not channel.url or not channel.url.strip():
             should_replace = self.settings.auto_replace_missing
-            reason = "Отсутствует ссылка"
         elif channel.url_status is False:
             should_replace = self.settings.auto_replace_broken
-            reason = "Битая ссылка"
         
         if should_replace:
-            new_url = self._find_replacement(channel, reason)
+            new_url = self._find_replacement(channel)
             if new_url:
                 old_url = channel.url
                 channel.url = new_url
@@ -1293,7 +1674,7 @@ class LinkReplacementWorker(BaseWorker):
         
         return None
     
-    def _find_replacement(self, channel: ChannelData, reason: str) -> Optional[str]:
+    def _find_replacement(self, channel: ChannelData) -> Optional[str]:
         try:
             alternative_channels = self.source_manager.search_channel(channel.name, self.settings)
             
@@ -1309,7 +1690,7 @@ class LinkReplacementWorker(BaseWorker):
                         continue
                     
                     if self.settings.is_whitelisted(alt_channel.url):
-                        is_available, response_time, _ = URLUtils.check_url_availability(
+                        is_available, _, _ = URLUtils.check_url_availability(
                             alt_channel.url, 
                             self.settings.check_timeout,
                             False
@@ -1330,7 +1711,7 @@ class LinkReplacementWorker(BaseWorker):
                                             self.settings.unsafe_domains):
                     continue
                 
-                is_available, response_time, _ = URLUtils.check_url_availability(
+                is_available, _, _ = URLUtils.check_url_availability(
                     alt_channel.url, 
                     self.settings.check_timeout,
                     False
@@ -1347,7 +1728,6 @@ class LinkReplacementWorker(BaseWorker):
 
 
 class PlaylistHeaderManager:
-    
     def __init__(self):
         self.header_lines: List[str] = []
         self.epg_sources: List[str] = []
@@ -1363,7 +1743,6 @@ class PlaylistHeaderManager:
         self.has_extm3u = False
         
         lines = content.split('\n')
-        header_end = 0
         
         for i, line in enumerate(lines):
             line = line.strip()
@@ -1390,8 +1769,6 @@ class PlaylistHeaderManager:
                 self.header_lines.append(line)
             elif line.startswith('#'):
                 self.header_lines.append(line)
-            
-            header_end = i + 1
     
     def update_epg_sources(self, sources: List[str]):
         self.epg_sources = sources
@@ -1451,7 +1828,6 @@ class PlaylistHeaderManager:
 
 
 class BlacklistManager:
-    
     def __init__(self, config_dir: str = None):
         if config_dir is None:
             config_dir = SystemThemeManager.get_config_dir()
@@ -1550,7 +1926,6 @@ class BlacklistManager:
 
 
 class URLCheckerWorker(BaseWorker):
-    
     url_checked = pyqtSignal(int, bool, str, object, LinkQuality, str)
     
     def __init__(self, urls: List[str], timeout: int = 5, max_workers: int = 5):
@@ -1745,7 +2120,6 @@ class URLCheckerWorker(BaseWorker):
 
 
 class M3USyntaxHighlighter(QSyntaxHighlighter):
-    
     def __init__(self, parent=None):
         super().__init__(parent)
         self.highlighting_rules = []
@@ -1771,7 +2145,7 @@ class M3USyntaxHighlighter(QSyntaxHighlighter):
         
         attribute_format = QTextCharFormat()
         attribute_format.setForeground(QColor("#3498DB"))
-        self.highlighting_rules.append((r'\b(tvg-id|tvg-logo|group-title)=\"[^"]*\"', attribute_format))
+        self.highlighting_rules.append((r'\b(tvg-id|tvg-logo|group-title)=\"[^\"]*\"', attribute_format))
         
         url_format = QTextCharFormat()
         url_format.setForeground(QColor("#2ECC71"))
@@ -1800,7 +2174,6 @@ class M3USyntaxHighlighter(QSyntaxHighlighter):
 
 
 class EnhancedTextEdit(QPlainTextEdit):
-    
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFont(QFont("Courier New", 10))
@@ -1878,7 +2251,6 @@ class EnhancedTextEdit(QPlainTextEdit):
 
 
 class LineEditWithContextMenu(QLineEdit):
-    
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -1925,7 +2297,6 @@ class LineEditWithContextMenu(QLineEdit):
 
 
 class ChannelTableWidget(QTableWidget):
-    
     cell_edited = pyqtSignal(int, int, str)
     url_check_requested = pyqtSignal(int)
     edit_user_agent_requested = pyqtSignal(int)
@@ -2214,7 +2585,6 @@ class ChannelTableWidget(QTableWidget):
 
 
 class URLCheckDialog(QDialog):
-    
     url_check_completed = pyqtSignal(dict)
     
     def __init__(self, parent=None):
@@ -2390,7 +2760,6 @@ class URLCheckDialog(QDialog):
 
 
 class UndoRedoManager:
-    
     def __init__(self, max_steps: int = 50):
         self.max_steps = max_steps
         self.undo_stack: List[Dict[str, Any]] = []
@@ -2444,7 +2813,6 @@ class UndoRedoManager:
 
 
 class PlaylistHeaderDialog(QDialog):
-    
     def __init__(self, header_manager: PlaylistHeaderManager, parent=None):
         super().__init__(parent)
         self.header_manager = header_manager
@@ -2469,7 +2837,7 @@ class PlaylistHeaderDialog(QDialog):
         
         layout.addWidget(general_group)
         
-        epg_group = QGroupBox("Источники EPG (Electronic Program Guide)")
+        epg_group = QGroupBox("Источники EPG")
         epg_layout = QVBoxLayout(epg_group)
         
         self.epg_list = QListWidget()
@@ -2694,7 +3062,6 @@ class PlaylistHeaderDialog(QDialog):
 
 
 class LinkReplacementDialog(QDialog):
-    
     replacement_completed = pyqtSignal(list)
     
     def __init__(self, parent=None):
@@ -2884,7 +3251,6 @@ class LinkReplacementDialog(QDialog):
 
 
 class LinkSourceManagerDialog(QDialog):
-    
     sources_updated = pyqtSignal()
     
     def __init__(self, source_manager: LinkSourceManager, parent=None):
@@ -3132,7 +3498,6 @@ class LinkSourceManagerDialog(QDialog):
 
 
 class LinkSourceEditDialog(QDialog):
-    
     def __init__(self, parent=None, source: Optional[LinkSource] = None):
         super().__init__(parent)
         self.source = source
@@ -3331,351 +3696,7 @@ class LinkSourceEditDialog(QDialog):
             super().accept()
 
 
-class LinkReplacementSettingsDialog(QDialog):
-    
-    settings_changed = pyqtSignal(LinkReplacementSettings)
-    
-    def __init__(self, settings: LinkReplacementSettings, parent=None):
-        super().__init__(parent)
-        self.settings = settings
-        self.setWindowTitle("Настройки замены ссылок")
-        self.resize(800, 600)
-        
-        self._setup_ui()
-        self._load_settings()
-    
-    def _setup_ui(self):
-        layout = QVBoxLayout(self)
-        
-        self.tab_widget = QTabWidget()
-        
-        basic_tab = QWidget()
-        basic_layout = QVBoxLayout(basic_tab)
-        
-        search_group = QGroupBox("Настройки поиска")
-        search_layout = QFormLayout(search_group)
-        
-        self.search_type_combo = QComboBox()
-        self.search_type_combo.addItems(["Точный поиск", "Похожий поиск", "Нечеткий поиск"])
-        self.search_type_combo.currentIndexChanged.connect(self._on_search_type_changed)
-        search_layout.addRow("Тип поиска:", self.search_type_combo)
-        
-        self.match_threshold_spin = QDoubleSpinBox()
-        self.match_threshold_spin.setRange(0, 100)
-        self.match_threshold_spin.setDecimals(1)
-        self.match_threshold_spin.setSuffix("%")
-        search_layout.addRow("Порог совпадения:", self.match_threshold_spin)
-        
-        self.min_similarity_spin = QDoubleSpinBox()
-        self.min_similarity_spin.setRange(0, 1)
-        self.min_similarity_spin.setDecimals(2)
-        self.min_similarity_spin.setSingleStep(0.05)
-        self.min_similarity_spin.setEnabled(False)
-        search_layout.addRow("Минимальная схожесть:", self.min_similarity_spin)
-        
-        self.use_fuzzy_check = QCheckBox("Использовать нечеткий поиск")
-        self.use_fuzzy_check.setChecked(True)
-        search_layout.addRow(self.use_fuzzy_check)
-        
-        basic_layout.addWidget(search_group)
-        
-        normalization_group = QGroupBox("Нормализация названий каналов")
-        normalization_layout = QVBoxLayout(normalization_group)
-        
-        self.ignore_special_chars_check = QCheckBox("Игнорировать специальные символы при поиске")
-        self.ignore_special_chars_check.setChecked(True)
-        normalization_layout.addWidget(self.ignore_special_chars_check)
-        
-        self.remove_parentheses_check = QCheckBox("Игнорировать информацию о качестве в круглых скобках (720p, 1080p и т.д.)")
-        self.remove_parentheses_check.setChecked(True)
-        normalization_layout.addWidget(self.remove_parentheses_check)
-        
-        self.remove_brackets_check = QCheckBox("Игнорировать определенные теги в квадратных скобках ([Geo-blocked], [Not 24/7])")
-        self.remove_brackets_check.setChecked(True)
-        normalization_layout.addWidget(self.remove_brackets_check)
-        
-        self.remove_emojis_check = QCheckBox("Игнорировать эмодзи и специальные символы")
-        self.remove_emojis_check.setChecked(True)
-        normalization_layout.addWidget(self.remove_emojis_check)
-        
-        info_label = QLabel(
-            "Пример: 'A24 Ⓨ (1080p) [PL]' → 'A24 [PL]'\n"
-            "Сохраняется информация о странах ([PL], [LV], [AM] и т.д.) и региональных каналах (Астрахань, Тюмень)"
-        )
-        info_label.setWordWrap(True)
-        info_label.setStyleSheet("color: gray; font-style: italic;")
-        normalization_layout.addWidget(info_label)
-        
-        basic_layout.addWidget(normalization_group)
-        
-        replace_group = QGroupBox("Настройки замены")
-        replace_layout = QVBoxLayout(replace_group)
-        
-        self.auto_broken_check = QCheckBox("Автозамена битых ссылок")
-        self.auto_broken_check.setChecked(True)
-        replace_layout.addWidget(self.auto_broken_check)
-        
-        self.auto_missing_check = QCheckBox("Автозамена отсутствующих ссылок")
-        self.auto_missing_check.setChecked(True)
-        replace_layout.addWidget(self.auto_missing_check)
-        
-        self.keep_backup_check = QCheckBox("Сохранять резервные ссылки")
-        self.keep_backup_check.setChecked(True)
-        replace_layout.addWidget(self.keep_backup_check)
-        
-        self.max_alt_spin = QSpinBox()
-        self.max_alt_spin.setRange(1, 20)
-        replace_layout.addWidget(QLabel("Максимум альтернативных ссылок:"))
-        replace_layout.addWidget(self.max_alt_spin)
-        
-        basic_layout.addWidget(replace_group)
-        basic_layout.addStretch()
-        
-        self.tab_widget.addTab(basic_tab, "Основные")
-        
-        filters_tab = QWidget()
-        filters_layout = QVBoxLayout(filters_tab)
-        
-        filter_group = QGroupBox("Фильтры ссылок")
-        filter_layout = QFormLayout(filter_group)
-        
-        self.filter_temp_check = QCheckBox("Фильтровать временные ссылки")
-        filter_layout.addRow(self.filter_temp_check)
-        
-        self.temp_domains_edit = QLineEdit()
-        self.temp_domains_edit.setPlaceholderText("tmp., temp., short.")
-        filter_layout.addRow("Временные домены:", self.temp_domains_edit)
-        
-        self.filter_unsafe_check = QCheckBox("Фильтровать небезопасные ссылки")
-        filter_layout.addRow(self.filter_unsafe_check)
-        
-        self.unsafe_domains_edit = QLineEdit()
-        self.unsafe_domains_edit.setPlaceholderText("malware., phishing., spam.")
-        filter_layout.addRow("Небезопасные домены:", self.unsafe_domains_edit)
-        
-        filters_layout.addWidget(filter_group)
-        
-        ip_filter_group = QGroupBox("Фильтрация по IP/доменам")
-        ip_filter_layout = QFormLayout(ip_filter_group)
-        
-        self.use_ip_filter_check = QCheckBox("Использовать фильтрацию по IP/доменам")
-        ip_filter_layout.addRow(self.use_ip_filter_check)
-        
-        self.prioritize_whitelist_check = QCheckBox("Приоритет ссылок из белого списка")
-        ip_filter_layout.addRow(self.prioritize_whitelist_check)
-        
-        blacklist_label = QLabel("Чёрный список IP/доменов:")
-        blacklist_label.setStyleSheet("font-weight: bold; color: red;")
-        ip_filter_layout.addRow(blacklist_label)
-        
-        self.blacklist_ips_edit = QTextEdit()
-        self.blacklist_ips_edit.setMaximumHeight(80)
-        self.blacklist_ips_edit.setPlaceholderText("Введите IP адреса или домены (каждый с новой строки)\nПример:\n176.107.219.20\n95.66.188.74\niam-profi.ru")
-        ip_filter_layout.addRow("Чёрный список:", self.blacklist_ips_edit)
-        
-        whitelist_label = QLabel("Белый список IP/доменов:")
-        whitelist_label.setStyleSheet("font-weight: bold; color: green;")
-        ip_filter_layout.addRow(whitelist_label)
-        
-        self.whitelist_ips_edit = QTextEdit()
-        self.whitelist_ips_edit.setMaximumHeight(80)
-        self.whitelist_ips_edit.setPlaceholderText("Введите IP адреса или домены (каждый с новой строки)\nПример:\n158.101.222.193\ncdn.ntv.ru\norigin5.mediacdn.ru")
-        ip_filter_layout.addRow("Белый список:", self.whitelist_ips_edit)
-        
-        priority_layout = QHBoxLayout()
-        priority_layout.addWidget(QLabel("Приоритет белого списка:"))
-        
-        self.whitelist_priority_spin = QSpinBox()
-        self.whitelist_priority_spin.setRange(-100, 100)
-        self.whitelist_priority_spin.setValue(10)
-        priority_layout.addWidget(self.whitelist_priority_spin)
-        
-        priority_layout.addWidget(QLabel("Приоритет черного списка:"))
-        
-        self.blacklist_priority_spin = QSpinBox()
-        self.blacklist_priority_spin.setRange(-100, 100)
-        self.blacklist_priority_spin.setValue(-10)
-        priority_layout.addWidget(self.blacklist_priority_spin)
-        
-        priority_layout.addStretch()
-        ip_filter_layout.addRow(priority_layout)
-        
-        filters_layout.addWidget(ip_filter_group)
-        filters_layout.addStretch()
-        
-        self.tab_widget.addTab(filters_tab, "Фильтры")
-        
-        check_tab = QWidget()
-        check_layout = QVBoxLayout(check_tab)
-        
-        timeout_group = QGroupBox("Таймауты и повторные попытки")
-        timeout_layout = QFormLayout(timeout_group)
-        
-        self.check_timeout_spin = QSpinBox()
-        self.check_timeout_spin.setRange(1, 10)
-        self.check_timeout_spin.setSuffix(" сек")
-        timeout_layout.addRow("Таймаут проверки:", self.check_timeout_spin)
-        
-        self.max_retries_spin = QSpinBox()
-        self.max_retries_spin.setRange(0, 3)
-        timeout_layout.addRow("Повторных попыток:", self.max_retries_spin)
-        
-        self.retry_delay_spin = QDoubleSpinBox()
-        self.retry_delay_spin.setRange(0, 2)
-        self.retry_delay_spin.setDecimals(1)
-        self.retry_delay_spin.setSuffix(" сек")
-        timeout_layout.addRow("Задержка повтора:", self.retry_delay_spin)
-        
-        check_layout.addWidget(timeout_group)
-        
-        workers_group = QGroupBox("Параметры многопоточности")
-        workers_layout = QFormLayout(workers_group)
-        
-        self.max_workers_spin = QSpinBox()
-        self.max_workers_spin.setRange(1, 10)
-        workers_layout.addRow("Максимум потоков:", self.max_workers_spin)
-        
-        check_layout.addWidget(workers_group)
-        check_layout.addStretch()
-        
-        self.tab_widget.addTab(check_tab, "Проверка")
-        
-        layout.addWidget(self.tab_widget)
-        
-        button_box = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok |
-            QDialogButtonBox.StandardButton.Cancel |
-            QDialogButtonBox.StandardButton.Reset
-        )
-        button_box.accepted.connect(self.accept)
-        button_box.rejected.connect(self.reject)
-        button_box.button(QDialogButtonBox.StandardButton.Reset).clicked.connect(self._reset_to_default)
-        
-        layout.addWidget(button_box)
-    
-    def _on_search_type_changed(self, index):
-        self.min_similarity_spin.setEnabled(index == 1)
-    
-    def _load_settings(self):
-        self.match_threshold_spin.setValue(self.settings.match_threshold_percent)
-        self.use_fuzzy_check.setChecked(self.settings.use_fuzzy_matching)
-        self.min_similarity_spin.setValue(self.settings.min_name_similarity)
-        
-        if self.settings.search_type == "exact":
-            self.search_type_combo.setCurrentIndex(0)
-        elif self.settings.search_type == "similar":
-            self.search_type_combo.setCurrentIndex(1)
-        else:
-            self.search_type_combo.setCurrentIndex(2)
-        
-        self.ignore_special_chars_check.setChecked(self.settings.ignore_special_chars_in_names)
-        self.remove_parentheses_check.setChecked(self.settings.remove_parentheses_in_names)
-        self.remove_brackets_check.setChecked(self.settings.remove_brackets_in_names)
-        self.remove_emojis_check.setChecked(self.settings.remove_emojis_in_names)
-        
-        self.filter_temp_check.setChecked(self.settings.filter_temporary_links)
-        self.temp_domains_edit.setText(", ".join(self.settings.temporary_domains))
-        self.filter_unsafe_check.setChecked(self.settings.filter_unsafe_links)
-        self.unsafe_domains_edit.setText(", ".join(self.settings.unsafe_domains))
-        
-        self.check_timeout_spin.setValue(self.settings.check_timeout)
-        self.max_workers_spin.setValue(self.settings.max_workers)
-        self.max_retries_spin.setValue(self.settings.max_retries)
-        self.retry_delay_spin.setValue(self.settings.retry_delay)
-        
-        self.auto_broken_check.setChecked(self.settings.auto_replace_broken)
-        self.auto_missing_check.setChecked(self.settings.auto_replace_missing)
-        self.keep_backup_check.setChecked(self.settings.keep_backup_links)
-        self.max_alt_spin.setValue(self.settings.max_alternative_urls)
-        
-        self.use_ip_filter_check.setChecked(self.settings.use_ip_filtering)
-        self.prioritize_whitelist_check.setChecked(self.settings.prioritize_whitelisted)
-        self.blacklist_ips_edit.setPlainText("\n".join(self.settings.blacklisted_ips + self.settings.blacklisted_domains))
-        self.whitelist_ips_edit.setPlainText("\n".join(self.settings.whitelisted_ips + self.settings.whitelisted_domains))
-        self.whitelist_priority_spin.setValue(self.settings.whitelist_priority)
-        self.blacklist_priority_spin.setValue(self.settings.blacklist_priority)
-    
-    def _reset_to_default(self):
-        reply = QMessageBox.question(
-            self, "Подтверждение",
-            "Сбросить все настройки к значениям по умолчанию?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-        
-        if reply == QMessageBox.StandardButton.Yes:
-            default_settings = LinkReplacementSettings()
-            self.settings = default_settings
-            self._load_settings()
-    
-    def _save_settings_from_form(self):
-        self.settings.match_threshold_percent = self.match_threshold_spin.value()
-        self.settings.use_fuzzy_matching = self.use_fuzzy_check.isChecked()
-        self.settings.min_name_similarity = self.min_similarity_spin.value()
-        
-        search_index = self.search_type_combo.currentIndex()
-        if search_index == 0:
-            self.settings.search_type = "exact"
-        elif search_index == 1:
-            self.settings.search_type = "similar"
-        else:
-            self.settings.search_type = "fuzzy"
-        
-        self.settings.ignore_special_chars_in_names = self.ignore_special_chars_check.isChecked()
-        self.settings.remove_parentheses_in_names = self.remove_parentheses_check.isChecked()
-        self.settings.remove_brackets_in_names = self.remove_brackets_check.isChecked()
-        self.settings.remove_emojis_in_names = self.remove_emojis_check.isChecked()
-        
-        self.settings.filter_temporary_links = self.filter_temp_check.isChecked()
-        self.settings.temporary_domains = [d.strip() for d in self.temp_domains_edit.text().split(",") if d.strip()]
-        self.settings.filter_unsafe_links = self.filter_unsafe_check.isChecked()
-        self.settings.unsafe_domains = [d.strip() for d in self.unsafe_domains_edit.text().split(",") if d.strip()]
-        
-        self.settings.check_timeout = self.check_timeout_spin.value()
-        self.settings.max_workers = self.max_workers_spin.value()
-        self.settings.max_retries = self.max_retries_spin.value()
-        self.settings.retry_delay = self.retry_delay_spin.value()
-        
-        self.settings.auto_replace_broken = self.auto_broken_check.isChecked()
-        self.settings.auto_replace_missing = self.auto_missing_check.isChecked()
-        self.settings.keep_backup_links = self.keep_backup_check.isChecked()
-        self.settings.max_alternative_urls = self.max_alt_spin.value()
-        
-        self.settings.use_ip_filtering = self.use_ip_filter_check.isChecked()
-        self.settings.prioritize_whitelisted = self.prioritize_whitelist_check.isChecked()
-        
-        blacklist_text = self.blacklist_ips_edit.toPlainText().strip()
-        blacklist_items = [item.strip() for item in blacklist_text.split("\n") if item.strip()]
-        self.settings.blacklisted_ips = []
-        self.settings.blacklisted_domains = []
-        
-        for item in blacklist_items:
-            if re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+)?$', item):
-                self.settings.blacklisted_ips.append(item)
-            else:
-                self.settings.blacklisted_domains.append(item)
-        
-        whitelist_text = self.whitelist_ips_edit.toPlainText().strip()
-        whitelist_items = [item.strip() for item in whitelist_text.split("\n") if item.strip()]
-        self.settings.whitelisted_ips = []
-        self.settings.whitelisted_domains = []
-        
-        for item in whitelist_items:
-            if re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+)?$', item):
-                self.settings.whitelisted_ips.append(item)
-            else:
-                self.settings.whitelisted_domains.append(item)
-        
-        self.settings.whitelist_priority = self.whitelist_priority_spin.value()
-        self.settings.blacklist_priority = self.blacklist_priority_spin.value()
-    
-    def accept(self):
-        self._save_settings_from_form()
-        self.settings_changed.emit(self.settings)
-        super().accept()
-
-
 class RemoveMetadataDialog(QDialog):
-    
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Удаление метаданных из каналов")
@@ -3751,7 +3772,6 @@ class RemoveMetadataDialog(QDialog):
 
 
 class DuplicateManagerDialog(QDialog):
-    
     def __init__(self, tab, parent=None):
         super().__init__(parent)
         self.tab = tab
@@ -4016,15 +4036,8 @@ class DuplicateManagerDialog(QDialog):
                 continue
             
             key, idx = name_item.data(Qt.ItemDataRole.UserRole)
-            channel = self.all_channels[idx]
             
-            should_select = False
-            
-            if mode == "all":
-                should_select = True
-            elif mode == "none":
-                should_select = False
-            
+            should_select = mode == "all"
             checkbox_item.setCheckState(Qt.CheckState.Checked if should_select else Qt.CheckState.Unchecked)
     
     def _update_stats(self):
@@ -4262,7 +4275,6 @@ class DuplicateManagerDialog(QDialog):
 
 
 class PlaylistTab(QWidget):
-    
     channel_selected = pyqtSignal(ChannelData)
     undo_state_changed = pyqtSignal(bool, bool)
     info_changed = pyqtSignal(str)
@@ -4361,8 +4373,6 @@ class PlaylistTab(QWidget):
                     channel.url_check_time = None
                     channel.link_quality = LinkQuality.UNKNOWN
                     channel.link_response_time = None
-                
-                self._update_table_row(row, channel)
             finally:
                 self.table.blockSignals(False)
             
@@ -4890,9 +4900,6 @@ class PlaylistTab(QWidget):
         dialog.url_check_completed.connect(on_check_completed)
         dialog.exec()
     
-    def check_selected_urls(self):
-        self._check_selected_urls()
-    
     def delete_channels_without_urls(self):
         channels_without_urls = [ch for ch in self.all_channels if not ch.has_url or not ch.url or not ch.url.strip()]
         
@@ -5080,39 +5087,6 @@ class PlaylistTab(QWidget):
             self._update_modified_status()
             
             dialog.accept()
-    
-    def remove_duplicate_urls(self):
-        duplicates = self._find_duplicate_urls()
-        
-        if not duplicates:
-            return
-        
-        total_duplicates = sum(len(channels) - 1 for channels in duplicates.values())
-        
-        reply = QMessageBox.question(
-            self, "Подтверждение",
-            f"Найдено {total_duplicates} дубликатов по URL.\n"
-            "Удалить дубликаты, оставляя только первый канал в каждой группе?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-        
-        if reply == QMessageBox.StandardButton.Yes:
-            self._save_state("Удаление дубликатов по URL")
-            
-            removed_count = 0
-            
-            for url, channels in duplicates.items():
-                for i in range(1, len(channels)):
-                    if channels[i] in self.all_channels:
-                        self.all_channels.remove(channels[i])
-                        removed_count += 1
-            
-            self._apply_filter()
-            if self.parent_window and hasattr(self.parent_window, '_update_group_filter'):
-                self.parent_window._update_group_filter()
-            
-            self.modified = True
-            self._update_modified_status()
     
     def _load_file(self, filepath: str):
         try:
@@ -5942,7 +5916,6 @@ class PlaylistTab(QWidget):
 
 
 class MainWindow(QMainWindow):
-    
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Ksenia M3U Editor")
@@ -5959,6 +5932,7 @@ class MainWindow(QMainWindow):
         self.blacklist_manager = BlacklistManager()
         self.link_source_manager = LinkSourceManager()
         self.link_replacement_settings = LinkReplacementSettings()
+        self.domain_user_agent_manager = DomainUserAgentManager()
         
         self._load_ip_filter_settings()
         
@@ -6208,6 +6182,16 @@ class MainWindow(QMainWindow):
         edit_header_action = QAction("Редактировать заголовок...", self)
         edit_header_action.triggered.connect(self._edit_playlist_header)
         tools_menu.addAction(edit_header_action)
+        
+        tools_menu.addSeparator()
+        
+        manage_domain_ua_action = QAction("User-Agent для доменов...", self)
+        manage_domain_ua_action.triggered.connect(self._manage_domain_user_agent)
+        tools_menu.addAction(manage_domain_ua_action)
+        
+        apply_domain_ua_action = QAction("Применить User-Agent для доменов", self)
+        apply_domain_ua_action.triggered.connect(self._apply_domain_user_agent)
+        tools_menu.addAction(apply_domain_ua_action)
         
         tools_menu.addSeparator()
         
@@ -7164,6 +7148,31 @@ class MainWindow(QMainWindow):
     
     def _on_info_changed(self, info: str):
         self.info_label.setText(info)
+    
+    def _manage_domain_user_agent(self):
+        dialog = DomainUserAgentDialog(self.domain_user_agent_manager, self)
+        dialog.rules_updated.connect(self._on_domain_ua_rules_updated)
+        dialog.exec()
+    
+    def _on_domain_ua_rules_updated(self):
+        pass
+    
+    def _apply_domain_user_agent(self):
+        if not self.current_tab:
+            QMessageBox.warning(self, "Предупреждение", "Нет открытого плейлиста")
+            return
+        
+        modified_count = self.domain_user_agent_manager.apply_rules_to_channels(self.current_tab.all_channels)
+        
+        if modified_count > 0:
+            self.current_tab._save_state("Применение правил User-Agent для доменов")
+            self.current_tab._apply_filter()
+            self.current_tab.modified = True
+            self.current_tab._update_modified_status()
+            self.status_bar.showMessage(f"Обновлено {modified_count} каналов", 3000)
+            QMessageBox.information(self, "Успех", f"Обновлено {modified_count} каналов")
+        else:
+            QMessageBox.information(self, "Информация", "Изменений не требуется")
     
     def closeEvent(self, event):
         modified_tabs = [tab for tab in self.tabs.values() if tab.modified]
