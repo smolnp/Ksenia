@@ -289,8 +289,8 @@ class Config:
         'use_proxy': False,
         'request_timeout': 15,
         'use_cache': True,
-        'cache_hours': 24,
-        'max_channels': 4000  # Увеличено с 1000 до 4000
+        'cache_hours': 24
+        # Ограничение max_channels удалено
     }
     
     def __init__(self):
@@ -958,11 +958,7 @@ class PlaylistGenerator(QThread):
         if self.use_smart_dedup and deduplicator:
             self._channels = deduplicator.deduplicate()
         
-        # Ограничение общего количества каналов (4000 по умолчанию)
-        max_channels = self.config.get('max_channels', 4000)
-        if len(self._channels) > max_channels:
-            self._channels = self._channels[:max_channels]
-            logger.info(f"Ограничено общее количество каналов: {len(self._channels)}")
+        # Ограничение по количеству каналов УДАЛЕНО
         
         # ИСПРАВЛЕНО: Сортировка в алфавитном порядке по названию
         self._channels.sort(key=lambda x: x.name.lower())
