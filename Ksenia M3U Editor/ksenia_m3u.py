@@ -1,3 +1,24 @@
+# -*- coding: utf-8 -*-
+"""
+Ksenia M3U Editor - Редактор и менеджер IPTV плейлистов
+Copyright (C) 2026 Ksenia Project
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+"""
+
+from __future__ import annotations
+
 import sys
 import os
 import re
@@ -16,6 +37,7 @@ import logging
 import hashlib
 from difflib import SequenceMatcher
 import urllib3
+import webbrowser
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -52,409 +74,6 @@ from PyQt6.QtGui import (
 )
 
 
-class DomainUserAgentRule:
-    def __init__(self, domain: str = "", user_agent: str = ""):
-        self.domain: str = domain.strip()
-        self.user_agent: str = user_agent.strip()
-        self.enabled: bool = True
-        self.created_date: datetime = datetime.now()
-    
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            'domain': self.domain,
-            'user_agent': self.user_agent,
-            'enabled': self.enabled,
-            'created_date': self.created_date.isoformat()
-        }
-    
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'DomainUserAgentRule':
-        rule = cls()
-        rule.domain = data.get('domain', '')
-        rule.user_agent = data.get('user_agent', '')
-        rule.enabled = data.get('enabled', True)
-        
-        created_date = data.get('created_date')
-        if created_date:
-            try:
-                rule.created_date = datetime.fromisoformat(created_date)
-            except (ValueError, TypeError):
-                rule.created_date = datetime.now()
-        
-        return rule
-    
-    def matches_url(self, url: str) -> bool:
-        if not url or not self.domain:
-            return False
-        
-        return self.domain.lower() in url.lower()
-
-
-class DomainUserAgentManager:
-    def __init__(self, config_dir: str = None):
-        if config_dir is None:
-            config_dir = SystemThemeManager.get_config_dir()
-        
-        self.config_dir = config_dir
-        self.rules_file = os.path.join(config_dir, "domain_user_agent_rules.json")
-        self.rules: List[DomainUserAgentRule] = []
-        
-        self._ensure_config_dir()
-        self._load_rules()
-    
-    def _ensure_config_dir(self):
-        try:
-            os.makedirs(self.config_dir, exist_ok=True)
-        except (OSError, PermissionError) as e:
-            logger.error(f"Ошибка создания директории: {e}")
-            raise
-    
-    def _load_rules(self):
-        try:
-            if os.path.exists(self.rules_file):
-                with open(self.rules_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                
-                if isinstance(data, list):
-                    self.rules = [DomainUserAgentRule.from_dict(item) for item in data]
-                else:
-                    self.rules = []
-            else:
-                self.rules = []
-                self._save_rules()
-                
-        except (json.JSONDecodeError, IOError, OSError) as e:
-            logger.error(f"Ошибка загрузки правил: {e}")
-            self.rules = []
-    
-    def _save_rules(self):
-        try:
-            data = [rule.to_dict() for rule in self.rules]
-            with open(self.rules_file, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            return True
-        except (IOError, OSError) as e:
-            logger.error(f"Ошибка сохранения правил: {e}")
-            return False
-    
-    def add_rule(self, domain: str, user_agent: str) -> bool:
-        if not domain:
-            return False
-        
-        for rule in self.rules:
-            if rule.domain == domain:
-                rule.user_agent = user_agent
-                return self._save_rules()
-        
-        rule = DomainUserAgentRule(domain, user_agent)
-        self.rules.append(rule)
-        return self._save_rules()
-    
-    def remove_rule(self, domain: str) -> bool:
-        for i, rule in enumerate(self.rules):
-            if rule.domain == domain:
-                del self.rules[i]
-                return self._save_rules()
-        return False
-    
-    def get_rule(self, domain: str) -> Optional[DomainUserAgentRule]:
-        for rule in self.rules:
-            if rule.domain == domain:
-                return rule
-        return None
-    
-    def get_all_rules(self) -> List[DomainUserAgentRule]:
-        return self.rules.copy()
-    
-    def get_user_agent_for_url(self, url: str) -> Optional[str]:
-        if not url:
-            return None
-        
-        for rule in self.rules:
-            if rule.enabled and rule.matches_url(url):
-                return rule.user_agent if rule.user_agent else None
-        
-        return None
-    
-    def should_remove_user_agent(self, url: str) -> bool:
-        if not url:
-            return False
-        
-        for rule in self.rules:
-            if rule.enabled and rule.matches_url(url) and not rule.user_agent:
-                return True
-        
-        return False
-    
-    def apply_rules_to_channel(self, channel: 'ChannelData') -> bool:
-        if not channel.url:
-            return False
-        
-        modified = False
-        
-        if self.should_remove_user_agent(channel.url):
-            if channel.user_agent:
-                channel.user_agent = ""
-                if 'User-Agent' in channel.extra_headers:
-                    del channel.extra_headers['User-Agent']
-                channel.update_extvlcopt_from_headers()
-                modified = True
-            return modified
-        
-        new_user_agent = self.get_user_agent_for_url(channel.url)
-        if new_user_agent is not None and new_user_agent != channel.user_agent:
-            channel.user_agent = new_user_agent
-            channel.extra_headers['User-Agent'] = new_user_agent
-            channel.update_extvlcopt_from_headers()
-            modified = True
-        
-        return modified
-    
-    def apply_rules_to_channels(self, channels: List['ChannelData']) -> int:
-        modified_count = 0
-        
-        for channel in channels:
-            if self.apply_rules_to_channel(channel):
-                modified_count += 1
-        
-        return modified_count
-
-
-class DomainUserAgentDialog(QDialog):
-    rules_updated = pyqtSignal()
-    
-    def __init__(self, manager: DomainUserAgentManager, parent=None):
-        super().__init__(parent)
-        self.manager = manager
-        self.setWindowTitle("Управление User-Agent для доменов")
-        self.resize(800, 500)
-        
-        self._setup_ui()
-        self._load_rules()
-    
-    def _setup_ui(self):
-        layout = QVBoxLayout(self)
-        
-        info_label = QLabel(
-            "Настройка автоматической установки User-Agent для каналов по домену.\n"
-            "Если поле User-Agent пустое, то User-Agent будет удалён для всех каналов с указанным доменом."
-        )
-        info_label.setWordWrap(True)
-        info_label.setStyleSheet("color: gray;")
-        layout.addWidget(info_label)
-        
-        self.rules_table = QTableWidget()
-        self.rules_table.setColumnCount(3)
-        self.rules_table.setHorizontalHeaderLabels(["Домен", "User-Agent", "Включено"])
-        
-        header = self.rules_table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        
-        self.rules_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.rules_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        
-        layout.addWidget(self.rules_table)
-        
-        btn_layout = QHBoxLayout()
-        
-        self.add_btn = QPushButton("Добавить правило")
-        self.add_btn.clicked.connect(self._add_rule)
-        btn_layout.addWidget(self.add_btn)
-        
-        self.edit_btn = QPushButton("Редактировать")
-        self.edit_btn.clicked.connect(self._edit_rule)
-        btn_layout.addWidget(self.edit_btn)
-        
-        self.remove_btn = QPushButton("Удалить")
-        self.remove_btn.clicked.connect(self._remove_rule)
-        btn_layout.addWidget(self.remove_btn)
-        
-        self.apply_btn = QPushButton("Применить ко всем каналам")
-        self.apply_btn.clicked.connect(self._apply_to_all_channels)
-        btn_layout.addWidget(self.apply_btn)
-        
-        btn_layout.addStretch()
-        
-        layout.addLayout(btn_layout)
-        
-        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        button_box.rejected.connect(self.reject)
-        layout.addWidget(button_box)
-    
-    def _load_rules(self):
-        rules = self.manager.get_all_rules()
-        self.rules_table.setRowCount(len(rules))
-        
-        for i, rule in enumerate(rules):
-            self.rules_table.setItem(i, 0, QTableWidgetItem(rule.domain))
-            
-            ua_display = rule.user_agent[:50] + "..." if len(rule.user_agent) > 50 else rule.user_agent
-            ua_item = QTableWidgetItem(ua_display if rule.user_agent else "(удалить User-Agent)")
-            if not rule.user_agent:
-                ua_item.setForeground(QColor("orange"))
-            ua_item.setToolTip(rule.user_agent)
-            self.rules_table.setItem(i, 1, ua_item)
-            
-            enabled_item = QTableWidgetItem()
-            enabled_item.setCheckState(Qt.CheckState.Checked if rule.enabled else Qt.CheckState.Unchecked)
-            self.rules_table.setItem(i, 2, enabled_item)
-    
-    def _add_rule(self):
-        dialog = DomainUserAgentEditDialog(self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            domain, user_agent = dialog.get_rule()
-            if domain:
-                if self.manager.add_rule(domain, user_agent):
-                    self._load_rules()
-                    self.rules_updated.emit()
-    
-    def _edit_rule(self):
-        selected_row = self.rules_table.currentRow()
-        if selected_row < 0:
-            QMessageBox.warning(self, "Предупреждение", "Выберите правило для редактирования")
-            return
-        
-        domain_item = self.rules_table.item(selected_row, 0)
-        
-        if domain_item:
-            domain = domain_item.text()
-            rule = self.manager.get_rule(domain)
-            
-            if rule:
-                dialog = DomainUserAgentEditDialog(self, rule)
-                if dialog.exec() == QDialog.DialogCode.Accepted:
-                    new_domain, new_user_agent = dialog.get_rule()
-                    if new_domain:
-                        if new_domain != domain:
-                            self.manager.remove_rule(domain)
-                        self.manager.add_rule(new_domain, new_user_agent)
-                        self._load_rules()
-                        self.rules_updated.emit()
-    
-    def _remove_rule(self):
-        selected_row = self.rules_table.currentRow()
-        if selected_row < 0:
-            QMessageBox.warning(self, "Предупреждение", "Выберите правило для удаления")
-            return
-        
-        domain_item = self.rules_table.item(selected_row, 0)
-        if domain_item:
-            domain = domain_item.text()
-            
-            reply = QMessageBox.question(
-                self, "Подтверждение",
-                f"Удалить правило для домена '{domain}'?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-            )
-            
-            if reply == QMessageBox.StandardButton.Yes:
-                if self.manager.remove_rule(domain):
-                    self._load_rules()
-                    self.rules_updated.emit()
-    
-    def _apply_to_all_channels(self):
-        parent = self.parent()
-        while parent and not hasattr(parent, 'current_tab'):
-            parent = parent.parent()
-        
-        if not parent or not parent.current_tab:
-            QMessageBox.warning(self, "Предупреждение", "Нет открытого плейлиста")
-            return
-        
-        tab = parent.current_tab
-        
-        reply = QMessageBox.question(
-            self, "Подтверждение",
-            "Применить правила User-Agent ко всем каналам в текущем плейлисте?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-        
-        if reply == QMessageBox.StandardButton.Yes:
-            modified_count = self.manager.apply_rules_to_channels(tab.all_channels)
-            
-            if modified_count > 0:
-                tab._save_state("Применение правил User-Agent для доменов")
-                tab._apply_filter()
-                tab.modified = True
-                tab._update_modified_status()
-                QMessageBox.information(self, "Успех", f"Обновлено {modified_count} каналов")
-            else:
-                QMessageBox.information(self, "Информация", "Изменений не требуется")
-    
-    def reject(self):
-        self.rules_updated.emit()
-        super().reject()
-
-
-class DomainUserAgentEditDialog(QDialog):
-    def __init__(self, parent=None, rule: DomainUserAgentRule = None):
-        super().__init__(parent)
-        self.rule = rule
-        self.setWindowTitle("Редактирование правила" if rule else "Добавление правила")
-        self.resize(500, 200)
-        
-        self._setup_ui()
-        if rule:
-            self._load_rule_data()
-    
-    def _setup_ui(self):
-        layout = QVBoxLayout(self)
-        
-        form_layout = QFormLayout()
-        
-        self.domain_edit = QLineEdit()
-        self.domain_edit.setPlaceholderText("https://zabava-htlive.cdn.ngenix.net")
-        self.domain_edit.setToolTip("Домен или часть URL для сопоставления")
-        form_layout.addRow("Домен:", self.domain_edit)
-        
-        self.user_agent_edit = QTextEdit()
-        self.user_agent_edit.setPlaceholderText(
-            '#EXTVLCOPT:http-user-agent="WINK/1.40.1 (AndroidTV/9) HlsWinkPlayer"\n\n'
-            "Оставьте поле пустым, чтобы удалить User-Agent для каналов с этим доменом"
-        )
-        self.user_agent_edit.setMaximumHeight(100)
-        form_layout.addRow("User-Agent:", self.user_agent_edit)
-        
-        info_label = QLabel(
-            "Примечание: Если поле User-Agent пустое, то User-Agent будет удалён\n"
-            "для всех каналов, URL которых содержит указанный домен."
-        )
-        info_label.setWordWrap(True)
-        info_label.setStyleSheet("color: gray; font-style: italic;")
-        form_layout.addRow(info_label)
-        
-        layout.addLayout(form_layout)
-        
-        button_box = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok |
-            QDialogButtonBox.StandardButton.Cancel
-        )
-        button_box.accepted.connect(self.accept)
-        button_box.rejected.connect(self.reject)
-        layout.addWidget(button_box)
-    
-    def _load_rule_data(self):
-        if self.rule:
-            self.domain_edit.setText(self.rule.domain)
-            self.user_agent_edit.setPlainText(self.rule.user_agent)
-    
-    def get_rule(self) -> Tuple[str, str]:
-        domain = self.domain_edit.text().strip()
-        user_agent = self.user_agent_edit.toPlainText().strip()
-        return domain, user_agent
-    
-    def accept(self):
-        domain = self.domain_edit.text().strip()
-        if not domain:
-            QMessageBox.warning(self, "Предупреждение", "Введите домен")
-            self.domain_edit.setFocus()
-            return
-        
-        super().accept()
-
-
 class SystemThemeManager:
     @staticmethod
     def get_hotkeys() -> Dict[str, str]:
@@ -482,6 +101,154 @@ class SystemThemeManager:
             return os.path.expanduser("~/Library/Application Support/Ksenia")
         else:
             return os.path.expanduser("~/.ksenia")
+
+# --- Вспомогательные классы для диалога справки ---
+class SupportDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Поддержка проекта")
+        self.setMinimumWidth(500)
+        self.setMinimumHeight(300)
+
+        layout = QVBoxLayout(self)
+
+        title_label = QLabel("☕ Поддержать проект")
+        title_font = title_label.font()
+        title_font.setPointSize(16)
+        title_font.setBold(True)
+        title_label.setFont(title_font)
+        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title_label)
+
+        info_label = QLabel(
+            "Если вам нравится этот инструмент и вы хотите поддержать его развитие,\n"
+            "вы можете отправить добровольное пожертвование.\n\n"
+            "Ваша поддержка поможет:\n"
+            "• Добавлять новые функции\n"
+            "• Поддерживать актуальность источников\n"
+            "• Улучшать производительность\n\n"
+            "Спасибо за вашу поддержку! 💝"
+        )
+        info_label.setWordWrap(True)
+        info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(info_label)
+
+        self.donate_btn = QPushButton("💰 Отправить перевод")
+        self.donate_btn.setMinimumHeight(50)
+        self.donate_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #FF9800;
+                color: white;
+                font-weight: bold;
+                font-size: 14px;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background-color: #F57C00;
+            }
+        """)
+        self.donate_btn.clicked.connect(self._open_donate_link)
+        layout.addWidget(self.donate_btn)
+
+        wallet_label = QLabel(
+            "Кошелек для переводов:\n"
+            "<b>4100119518517127</b>\n\n"
+            "YooMoney / ЮMoney"
+        )
+        wallet_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        wallet_label.setWordWrap(True)
+        layout.addWidget(wallet_label)
+
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+
+    def _open_donate_link(self):
+        webbrowser.open("https://yoomoney.ru/to/4100119518517127")
+
+class HelpDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Справка")
+        self.setMinimumWidth(550)
+        self.setMinimumHeight(450)
+
+        layout = QVBoxLayout(self)
+
+        tabs = QTabWidget()
+
+        # Вкладка с лицензией
+        license_tab = QWidget()
+        license_layout = QVBoxLayout(license_tab)
+
+        license_text = QLabel(
+            "GNU General Public License v3.0\n\n"
+            "This program is free software: you can redistribute it and/or modify\n"
+            "it under the terms of the GNU General Public License as published by\n"
+            "the Free Software Foundation, either version 3 of the License, or\n"
+            "(at your option) any later version.\n\n"
+            "This program is distributed in the hope that it will be useful,\n"
+            "but WITHOUT ANY WARRANTY; without even the implied warranty of\n"
+            "MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the\n"
+            "GNU General Public License for more details.\n\n"
+            "You should have received a copy of the GNU General Public License\n"
+            "along with this program. If not, see <https://www.gnu.org/licenses/>."
+        )
+        license_text.setWordWrap(True)
+        license_layout.addWidget(license_text)
+
+        # Вкладка с инструментами
+        tools_tab = QWidget()
+        tools_layout = QVBoxLayout(tools_tab)
+
+        tools_info = QLabel(
+            "Используемые инструменты и библиотеки:\n\n"
+            "• Python 3.8+\n"
+            "• PyQt6 - GUI framework\n"
+            "• Requests - HTTP библиотека\n"
+            "• urllib3 - HTTP клиент\n"
+            "• threading / concurrent.futures - многопоточность\n"
+            "• re - регулярные выражения\n"
+            "• json - работа с конфигурацией\n"
+            "• logging - система логирования\n\n"
+            "Исходные коды и документация:\n"
+            "https://github.com/smolnp/Ksenia"
+        )
+        tools_info.setWordWrap(True)
+        tools_layout.addWidget(tools_info)
+
+        # Вкладка с поддержкой
+        support_tab = QWidget()
+        support_layout = QVBoxLayout(support_tab)
+
+        support_label = QLabel(
+            "Поддержать развитие проекта:\n\n"
+            "Разработка и поддержка этого инструмента требует времени и усилий.\n"
+            "Если вы хотите помочь проекту, вы можете:\n\n"
+            "• Сообщать об ошибках и проблемах\n"
+            "• Предлагать новые источники плейлистов\n"
+            "• Делать добровольные пожертвования\n\n"
+            "Способы поддержки:"
+        )
+        support_label.setWordWrap(True)
+        support_layout.addWidget(support_label)
+
+        donate_btn = QPushButton("☕ Поддержать проект (донат)")
+        donate_btn.clicked.connect(lambda: SupportDialog(self).exec())
+        support_layout.addWidget(donate_btn)
+
+        support_layout.addStretch()
+
+        tabs.addTab(license_tab, "Лицензия GPLv3")
+        tabs.addTab(tools_tab, "Инструменты")
+        tabs.addTab(support_tab, "Поддержка")
+
+        layout.addWidget(tabs)
+
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+# --- Конец вспомогательных классов ---
 
 
 class LinkQuality(Enum):
@@ -595,7 +362,7 @@ class ChannelNameNormalizer:
         return list(dict.fromkeys(variants))
     
     @staticmethod
-    def calculate_similarity_normalized(name1: str, name2: str, settings: 'LinkReplacementSettings') -> float:
+    def calculate_similarity_normalized(name1: str, name2: str, settings: LinkReplacementSettings) -> float:
         if settings.ignore_special_chars_in_names:
             norm1 = ChannelNameNormalizer.normalize(name1)
             norm2 = ChannelNameNormalizer.normalize(name2)
@@ -717,6 +484,141 @@ class LinkSource:
                 source.last_cache_update = None
         
         return source
+
+
+class LinkReplacementSettings:
+    def __init__(self):
+        self.match_threshold_percent: float = 80.0
+        self.use_fuzzy_matching: bool = True
+        self.min_name_similarity: float = 0.7
+        self.search_type: str = "exact"
+        self.temporary_domains: List[str] = ["tmp.", "temp.", "short."]
+        self.unsafe_domains: List[str] = ["malware.", "phishing.", "spam."]
+        self.check_timeout: int = 5
+        self.max_workers: int = 5
+        self.max_retries: int = 2
+        self.retry_delay: float = 0.5
+        self.auto_replace_broken: bool = True
+        self.auto_replace_missing: bool = True
+        self.keep_backup_links: bool = True
+        self.max_alternative_urls: int = 5
+        self.use_ip_filtering: bool = True
+        self.blacklisted_ips: List[str] = []
+        self.whitelisted_ips: List[str] = []
+        self.blacklisted_domains: List[str] = []
+        self.whitelisted_domains: List[str] = []
+        self.prioritize_whitelisted: bool = True
+        self.blacklist_priority: int = -10
+        self.whitelist_priority: int = 10
+        self.ignore_special_chars_in_names: bool = True
+        self.remove_parentheses_in_names: bool = True
+        self.remove_brackets_in_names: bool = True
+        self.remove_emojis_in_names: bool = True
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'match_threshold_percent': self.match_threshold_percent,
+            'use_fuzzy_matching': self.use_fuzzy_matching,
+            'min_name_similarity': self.min_name_similarity,
+            'search_type': self.search_type,
+            'temporary_domains': self.temporary_domains,
+            'unsafe_domains': self.unsafe_domains,
+            'check_timeout': self.check_timeout,
+            'max_workers': self.max_workers,
+            'max_retries': self.max_retries,
+            'retry_delay': self.retry_delay,
+            'auto_replace_broken': self.auto_replace_broken,
+            'auto_replace_missing': self.auto_replace_missing,
+            'keep_backup_links': self.keep_backup_links,
+            'max_alternative_urls': self.max_alternative_urls,
+            'use_ip_filtering': self.use_ip_filtering,
+            'blacklisted_ips': self.blacklisted_ips,
+            'whitelisted_ips': self.whitelisted_ips,
+            'blacklisted_domains': self.blacklisted_domains,
+            'whitelisted_domains': self.whitelisted_domains,
+            'prioritize_whitelisted': self.prioritize_whitelisted,
+            'blacklist_priority': self.blacklist_priority,
+            'whitelist_priority': self.whitelist_priority,
+            'ignore_special_chars_in_names': self.ignore_special_chars_in_names,
+            'remove_parentheses_in_names': self.remove_parentheses_in_names,
+            'remove_brackets_in_names': self.remove_brackets_in_names,
+            'remove_emojis_in_names': self.remove_emojis_in_names
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'LinkReplacementSettings':
+        settings = cls()
+        
+        settings.match_threshold_percent = data.get('match_threshold_percent', 80.0)
+        settings.use_fuzzy_matching = data.get('use_fuzzy_matching', True)
+        settings.min_name_similarity = data.get('min_name_similarity', 0.7)
+        settings.search_type = data.get('search_type', 'exact')
+        settings.temporary_domains = data.get('temporary_domains', ["tmp.", "temp.", "short."])
+        settings.unsafe_domains = data.get('unsafe_domains', ["malware.", "phishing.", "spam."])
+        settings.check_timeout = data.get('check_timeout', 5)
+        settings.max_workers = data.get('max_workers', 5)
+        settings.max_retries = data.get('max_retries', 2)
+        settings.retry_delay = data.get('retry_delay', 0.5)
+        settings.auto_replace_broken = data.get('auto_replace_broken', True)
+        settings.auto_replace_missing = data.get('auto_replace_missing', True)
+        settings.keep_backup_links = data.get('keep_backup_links', True)
+        settings.max_alternative_urls = data.get('max_alternative_urls', 5)
+        
+        settings.use_ip_filtering = data.get('use_ip_filtering', True)
+        settings.blacklisted_ips = data.get('blacklisted_ips', [])
+        settings.whitelisted_ips = data.get('whitelisted_ips', [])
+        settings.blacklisted_domains = data.get('blacklisted_domains', [])
+        settings.whitelisted_domains = data.get('whitelisted_domains', [])
+        settings.prioritize_whitelisted = data.get('prioritize_whitelisted', True)
+        settings.blacklist_priority = data.get('blacklist_priority', -10)
+        settings.whitelist_priority = data.get('whitelist_priority', 10)
+        
+        settings.ignore_special_chars_in_names = data.get('ignore_special_chars_in_names', True)
+        settings.remove_parentheses_in_names = data.get('remove_parentheses_in_names', True)
+        settings.remove_brackets_in_names = data.get('remove_brackets_in_names', True)
+        settings.remove_emojis_in_names = data.get('remove_emojis_in_names', True)
+        
+        return settings
+    
+    def is_blacklisted(self, url: str) -> bool:
+        if not self.use_ip_filtering:
+            return False
+        
+        url_lower = url.lower()
+        
+        for ip in self.blacklisted_ips:
+            if ip.lower() in url_lower:
+                return True
+        
+        for domain in self.blacklisted_domains:
+            if domain.lower() in url_lower:
+                return True
+        
+        return False
+    
+    def is_whitelisted(self, url: str) -> bool:
+        if not self.use_ip_filtering:
+            return False
+        
+        url_lower = url.lower()
+        
+        for ip in self.whitelisted_ips:
+            if ip.lower() in url_lower:
+                return True
+        
+        for domain in self.whitelisted_domains:
+            if domain.lower() in url_lower:
+                return True
+        
+        return False
+    
+    def get_url_priority(self, url: str) -> int:
+        if self.is_blacklisted(url):
+            return self.blacklist_priority
+        elif self.is_whitelisted(url):
+            return self.whitelist_priority
+        else:
+            return 0
 
 
 class ChannelData:
@@ -986,485 +888,426 @@ class ChannelData:
                 channel.modified_date = datetime.now()
         
         return channel
-    
-    def get_similarity_score(self, other: 'ChannelData') -> float:
-        scores = []
-        
-        if self.name and other.name:
-            name_similarity = SequenceMatcher(None, self.name.lower(), other.name.lower()).ratio()
-            scores.append(name_similarity * 0.4)
-        
-        if self.group and other.group:
-            group_similarity = SequenceMatcher(None, self.group.lower(), other.group.lower()).ratio()
-            scores.append(group_similarity * 0.3)
-        
-        if self.url and other.url:
-            url_similarity = 1.0 if self.url == other.url else 0.0
-            scores.append(url_similarity * 0.3)
-        
-        return sum(scores) / len(scores) if scores else 0.0
 
 
-class LinkReplacementSettings:
-    def __init__(self):
-        self.match_threshold_percent: float = 80.0
-        self.use_fuzzy_matching: bool = True
-        self.min_name_similarity: float = 0.7
-        self.search_type: str = "exact"
-        self.filter_temporary_links: bool = True
-        self.filter_unsafe_links: bool = True
-        self.temporary_domains: List[str] = ["tmp.", "temp.", "short."]
-        self.unsafe_domains: List[str] = ["malware.", "phishing.", "spam."]
-        self.check_timeout: int = 5
-        self.max_workers: int = 5
-        self.max_retries: int = 2
-        self.retry_delay: float = 0.5
-        self.auto_replace_broken: bool = True
-        self.auto_replace_missing: bool = True
-        self.keep_backup_links: bool = True
-        self.max_alternative_urls: int = 5
-        self.use_ip_filtering: bool = True
-        self.blacklisted_ips: List[str] = []
-        self.whitelisted_ips: List[str] = []
-        self.blacklisted_domains: List[str] = []
-        self.whitelisted_domains: List[str] = []
-        self.prioritize_whitelisted: bool = True
-        self.blacklist_priority: int = -10
-        self.whitelist_priority: int = 10
-        self.ignore_special_chars_in_names: bool = True
-        self.remove_parentheses_in_names: bool = True
-        self.remove_brackets_in_names: bool = True
-        self.remove_emojis_in_names: bool = True
+class DomainUserAgentRule:
+    def __init__(self, domain: str = "", user_agent: str = ""):
+        self.domain: str = domain.strip()
+        self.user_agent: str = user_agent.strip()
+        self.enabled: bool = True
+        self.created_date: datetime = datetime.now()
     
     def to_dict(self) -> Dict[str, Any]:
         return {
-            'match_threshold_percent': self.match_threshold_percent,
-            'use_fuzzy_matching': self.use_fuzzy_matching,
-            'min_name_similarity': self.min_name_similarity,
-            'search_type': self.search_type,
-            'filter_temporary_links': self.filter_temporary_links,
-            'filter_unsafe_links': self.filter_unsafe_links,
-            'temporary_domains': self.temporary_domains,
-            'unsafe_domains': self.unsafe_domains,
-            'check_timeout': self.check_timeout,
-            'max_workers': self.max_workers,
-            'max_retries': self.max_retries,
-            'retry_delay': self.retry_delay,
-            'auto_replace_broken': self.auto_replace_broken,
-            'auto_replace_missing': self.auto_replace_missing,
-            'keep_backup_links': self.keep_backup_links,
-            'max_alternative_urls': self.max_alternative_urls,
-            'use_ip_filtering': self.use_ip_filtering,
-            'blacklisted_ips': self.blacklisted_ips,
-            'whitelisted_ips': self.whitelisted_ips,
-            'blacklisted_domains': self.blacklisted_domains,
-            'whitelisted_domains': self.whitelisted_domains,
-            'prioritize_whitelisted': self.prioritize_whitelisted,
-            'blacklist_priority': self.blacklist_priority,
-            'whitelist_priority': self.whitelist_priority,
-            'ignore_special_chars_in_names': self.ignore_special_chars_in_names,
-            'remove_parentheses_in_names': self.remove_parentheses_in_names,
-            'remove_brackets_in_names': self.remove_brackets_in_names,
-            'remove_emojis_in_names': self.remove_emojis_in_names
+            'domain': self.domain,
+            'user_agent': self.user_agent,
+            'enabled': self.enabled,
+            'created_date': self.created_date.isoformat()
         }
     
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'LinkReplacementSettings':
-        settings = cls()
+    def from_dict(cls, data: Dict[str, Any]) -> 'DomainUserAgentRule':
+        rule = cls()
+        rule.domain = data.get('domain', '')
+        rule.user_agent = data.get('user_agent', '')
+        rule.enabled = data.get('enabled', True)
         
-        settings.match_threshold_percent = data.get('match_threshold_percent', 80.0)
-        settings.use_fuzzy_matching = data.get('use_fuzzy_matching', True)
-        settings.min_name_similarity = data.get('min_name_similarity', 0.7)
-        settings.search_type = data.get('search_type', 'exact')
-        settings.filter_temporary_links = data.get('filter_temporary_links', True)
-        settings.filter_unsafe_links = data.get('filter_unsafe_links', True)
-        settings.temporary_domains = data.get('temporary_domains', ["tmp.", "temp.", "short."])
-        settings.unsafe_domains = data.get('unsafe_domains', ["malware.", "phishing.", "spam."])
-        settings.check_timeout = data.get('check_timeout', 5)
-        settings.max_workers = data.get('max_workers', 5)
-        settings.max_retries = data.get('max_retries', 2)
-        settings.retry_delay = data.get('retry_delay', 0.5)
-        settings.auto_replace_broken = data.get('auto_replace_broken', True)
-        settings.auto_replace_missing = data.get('auto_replace_missing', True)
-        settings.keep_backup_links = data.get('keep_backup_links', True)
-        settings.max_alternative_urls = data.get('max_alternative_urls', 5)
+        created_date = data.get('created_date')
+        if created_date:
+            try:
+                rule.created_date = datetime.fromisoformat(created_date)
+            except (ValueError, TypeError):
+                rule.created_date = datetime.now()
         
-        settings.use_ip_filtering = data.get('use_ip_filtering', True)
-        settings.blacklisted_ips = data.get('blacklisted_ips', [])
-        settings.whitelisted_ips = data.get('whitelisted_ips', [])
-        settings.blacklisted_domains = data.get('blacklisted_domains', [])
-        settings.whitelisted_domains = data.get('whitelisted_domains', [])
-        settings.prioritize_whitelisted = data.get('prioritize_whitelisted', True)
-        settings.blacklist_priority = data.get('blacklist_priority', -10)
-        settings.whitelist_priority = data.get('whitelist_priority', 10)
-        
-        settings.ignore_special_chars_in_names = data.get('ignore_special_chars_in_names', True)
-        settings.remove_parentheses_in_names = data.get('remove_parentheses_in_names', True)
-        settings.remove_brackets_in_names = data.get('remove_brackets_in_names', True)
-        settings.remove_emojis_in_names = data.get('remove_emojis_in_names', True)
-        
-        return settings
+        return rule
     
-    def is_blacklisted(self, url: str) -> bool:
-        if not self.use_ip_filtering:
+    def matches_url(self, url: str) -> bool:
+        if not url or not self.domain:
             return False
         
-        url_lower = url.lower()
-        
-        for ip in self.blacklisted_ips:
-            if ip.lower() in url_lower:
+        try:
+            parsed = urlparse(url)
+            hostname = parsed.netloc.lower()
+            domain_lower = self.domain.lower()
+            
+            if hostname == domain_lower:
                 return True
-        
-        for domain in self.blacklisted_domains:
-            if domain.lower() in url_lower:
+            
+            if hostname.endswith('.' + domain_lower):
                 return True
+            
+            if domain_lower in url.lower():
+                return True
+                
+        except Exception:
+            return self.domain.lower() in url.lower()
         
         return False
-    
-    def is_whitelisted(self, url: str) -> bool:
-        if not self.use_ip_filtering:
-            return False
-        
-        url_lower = url.lower()
-        
-        for ip in self.whitelisted_ips:
-            if ip.lower() in url_lower:
-                return True
-        
-        for domain in self.whitelisted_domains:
-            if domain.lower() in url_lower:
-                return True
-        
-        return False
-    
-    def get_url_priority(self, url: str) -> int:
-        if self.is_blacklisted(url):
-            return self.blacklist_priority
-        elif self.is_whitelisted(url):
-            return self.whitelist_priority
-        else:
-            return 0
 
 
-class LinkSourceManager:
+class DomainUserAgentManager:
     def __init__(self, config_dir: str = None):
         if config_dir is None:
             config_dir = SystemThemeManager.get_config_dir()
         
         self.config_dir = config_dir
-        self.sources_file = os.path.join(config_dir, "link_sources.json")
-        self.sources: List[LinkSource] = []
-        self.cache_dir = os.path.join(config_dir, "link_cache")
+        self.rules_file = os.path.join(config_dir, "domain_user_agent_rules.json")
+        self.rules: List[DomainUserAgentRule] = []
         
         self._ensure_config_dir()
-        self._load_sources()
+        self._load_rules()
     
     def _ensure_config_dir(self):
         try:
             os.makedirs(self.config_dir, exist_ok=True)
-            os.makedirs(self.cache_dir, exist_ok=True)
         except (OSError, PermissionError) as e:
             logger.error(f"Ошибка создания директории: {e}")
             raise
     
-    def _load_sources(self):
+    def _load_rules(self):
         try:
-            if os.path.exists(self.sources_file):
-                with open(self.sources_file, 'r', encoding='utf-8') as f:
+            if os.path.exists(self.rules_file):
+                with open(self.rules_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
-                    
+                
                 if isinstance(data, list):
-                    self.sources = [LinkSource.from_dict(item) for item in data]
+                    self.rules = [DomainUserAgentRule.from_dict(item) for item in data]
                 else:
-                    self.sources = []
+                    self.rules = []
             else:
-                self.sources = []
-                self._save_sources()
+                self.rules = []
+                self._save_rules()
                 
         except (json.JSONDecodeError, IOError, OSError) as e:
-            logger.error(f"Ошибка загрузки источников: {e}")
-            self.sources = []
+            logger.error(f"Ошибка загрузки правил: {e}")
+            self.rules = []
     
-    def _save_sources(self):
+    def _save_rules(self):
         try:
-            data = [source.to_dict() for source in self.sources]
-            with open(self.sources_file, 'w', encoding='utf-8') as f:
+            data = [rule.to_dict() for rule in self.rules]
+            with open(self.rules_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
             return True
         except (IOError, OSError) as e:
-            logger.error(f"Ошибка сохранения источников: {e}")
+            logger.error(f"Ошибка сохранения правил: {e}")
             return False
     
-    def add_source(self, source: LinkSource) -> bool:
-        self.sources.append(source)
-        return self._save_sources()
+    def add_rule(self, domain: str, user_agent: str) -> bool:
+        if not domain:
+            return False
+        
+        for rule in self.rules:
+            if rule.domain == domain:
+                rule.user_agent = user_agent
+                return self._save_rules()
+        
+        rule = DomainUserAgentRule(domain, user_agent)
+        self.rules.append(rule)
+        return self._save_rules()
     
-    def remove_source(self, source_name: str) -> bool:
-        self.sources = [s for s in self.sources if s.name != source_name]
-        return self._save_sources()
-    
-    def update_source(self, old_name: str, new_source: LinkSource) -> bool:
-        for i, source in enumerate(self.sources):
-            if source.name == old_name:
-                self.sources[i] = new_source
-                return self._save_sources()
+    def remove_rule(self, domain: str) -> bool:
+        for i, rule in enumerate(self.rules):
+            if rule.domain == domain:
+                del self.rules[i]
+                return self._save_rules()
         return False
     
-    def get_all_sources(self) -> List[LinkSource]:
-        return self.sources.copy()
-    
-    def get_enabled_sources(self) -> List[LinkSource]:
-        return [source for source in self.sources if source.enabled]
-    
-    def get_source_by_name(self, name: str) -> Optional[LinkSource]:
-        for source in self.sources:
-            if source.name == name:
-                return source
+    def get_rule(self, domain: str) -> Optional[DomainUserAgentRule]:
+        for rule in self.rules:
+            if rule.domain == domain:
+                return rule
         return None
     
-    def _detect_encoding(self, content: bytes) -> str:
-        try:
-            content.decode('utf-8')
-            return 'utf-8'
-        except UnicodeDecodeError:
-            pass
-        
-        try:
-            content.decode('windows-1251')
-            return 'windows-1251'
-        except UnicodeDecodeError:
-            pass
-        
-        try:
-            content.decode('cp1251')
-            return 'cp1251'
-        except UnicodeDecodeError:
-            pass
-        
-        return 'utf-8'
+    def get_all_rules(self) -> List[DomainUserAgentRule]:
+        return self.rules.copy()
     
-    def load_links_from_source(self, source: LinkSource) -> List[ChannelData]:
-        channels = []
+    def get_user_agent_for_url(self, url: str) -> Optional[str]:
+        if not url:
+            return None
         
-        try:
-            if source.source_type == "local":
-                if os.path.exists(source.path):
-                    with open(source.path, 'rb') as f:
-                        raw_content = f.read()
-                    
-                    detected_encoding = self._detect_encoding(raw_content)
-                    content = raw_content.decode(detected_encoding, errors='replace')
-                    channels = self._parse_content(content, source.name)
-                    
-            elif source.source_type == "online":
-                try:
-                    response = requests.get(source.path, timeout=10, verify=False)
-                    if response.status_code == 200:
-                        content = response.text
-                        channels = self._parse_content(content, source.name)
-                except Exception as e:
-                    logger.error(f"Ошибка загрузки онлайн источника {source.name}: {e}")
-            
-            source.total_links = len(channels)
-            
-        except Exception as e:
-            logger.error(f"Ошибка загрузки источника {source.name}: {e}")
-            return []
+        for rule in self.rules:
+            if rule.enabled and rule.matches_url(url):
+                return rule.user_agent if rule.user_agent else None
         
-        source.last_updated = datetime.now()
-        self._save_sources()
-        
-        return channels
+        return None
     
-    def _parse_content(self, content: str, source_name: str) -> List[ChannelData]:
-        channels = []
-        lines = content.split('\n')
+    def should_remove_user_agent(self, url: str) -> bool:
+        if not url:
+            return False
         
-        i = 0
-        while i < len(lines):
-            line = lines[i].strip()
+        for rule in self.rules:
+            if rule.enabled and rule.matches_url(url) and not rule.user_agent:
+                return True
+        
+        return False
+    
+    def apply_rules_to_channel(self, channel: ChannelData) -> bool:
+        if not channel.url:
+            return False
+        
+        modified = False
+        
+        if self.should_remove_user_agent(channel.url):
+            if channel.user_agent:
+                channel.user_agent = ""
+                if 'User-Agent' in channel.extra_headers:
+                    del channel.extra_headers['User-Agent']
+                channel.update_extvlcopt_from_headers()
+                modified = True
+            return modified
+        
+        new_user_agent = self.get_user_agent_for_url(channel.url)
+        if new_user_agent is not None and new_user_agent != channel.user_agent:
+            channel.user_agent = new_user_agent
+            channel.extra_headers['User-Agent'] = new_user_agent
+            channel.update_extvlcopt_from_headers()
+            modified = True
+        
+        return modified
+    
+    def apply_rules_to_channels(self, channels: List[ChannelData]) -> int:
+        modified_count = 0
+        
+        for channel in channels:
+            if self.apply_rules_to_channel(channel):
+                modified_count += 1
+        
+        return modified_count
+
+
+class DomainUserAgentDialog(QDialog):
+    rules_updated = pyqtSignal()
+    
+    def __init__(self, manager: DomainUserAgentManager, parent=None):
+        super().__init__(parent)
+        self.manager = manager
+        self.setWindowTitle("Управление User-Agent для доменов")
+        self.resize(800, 500)
+        
+        self._setup_ui()
+        self._load_rules()
+    
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        
+        info_label = QLabel(
+            "Настройка автоматической установки User-Agent для каналов по домену.\n"
+            "Если поле User-Agent пустое, то User-Agent будет удалён для всех каналов с указанным доменом."
+        )
+        info_label.setWordWrap(True)
+        info_label.setStyleSheet("color: gray;")
+        layout.addWidget(info_label)
+        
+        self.rules_table = QTableWidget()
+        self.rules_table.setColumnCount(3)
+        self.rules_table.setHorizontalHeaderLabels(["Домен", "User-Agent", "Включено"])
+        
+        header = self.rules_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        
+        self.rules_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.rules_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        
+        layout.addWidget(self.rules_table)
+        
+        btn_layout = QHBoxLayout()
+        
+        self.add_btn = QPushButton("Добавить правило")
+        self.add_btn.clicked.connect(self._add_rule)
+        btn_layout.addWidget(self.add_btn)
+        
+        self.edit_btn = QPushButton("Редактировать")
+        self.edit_btn.clicked.connect(self._edit_rule)
+        btn_layout.addWidget(self.edit_btn)
+        
+        self.remove_btn = QPushButton("Удалить")
+        self.remove_btn.clicked.connect(self._remove_rule)
+        btn_layout.addWidget(self.remove_btn)
+        
+        self.apply_btn = QPushButton("Применить ко всем каналам")
+        self.apply_btn.clicked.connect(self._apply_to_all_channels)
+        btn_layout.addWidget(self.apply_btn)
+        
+        btn_layout.addStretch()
+        
+        layout.addLayout(btn_layout)
+        
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+    
+    def _load_rules(self):
+        rules = self.manager.get_all_rules()
+        self.rules_table.setRowCount(len(rules))
+        
+        for i, rule in enumerate(rules):
+            self.rules_table.setItem(i, 0, QTableWidgetItem(rule.domain))
             
-            if line.startswith('#EXTINF:'):
-                channel = ChannelData()
-                fixed_line = ChannelNameNormalizer.fix_encoding(line)
-                channel.extinf = fixed_line
-                channel.link_source = source_name
-                
-                if ',' in fixed_line:
-                    parts = fixed_line.split(',', 1)
-                    channel.name = ChannelNameNormalizer.fix_encoding(parts[1].strip())
-                
-                attrs_part = fixed_line.split(',')[0] if ',' in fixed_line else fixed_line
-                
-                tvg_id_match = re.search(r'tvg-id="([^"]*)"', attrs_part)
-                if tvg_id_match:
-                    channel.tvg_id = ChannelNameNormalizer.fix_encoding(tvg_id_match.group(1))
-                
-                logo_match = re.search(r'tvg-logo="([^"]*)"', attrs_part)
-                if logo_match:
-                    channel.tvg_logo = ChannelNameNormalizer.fix_encoding(logo_match.group(1))
-                
-                group_match = re.search(r'group-title="([^"]*)"', attrs_part)
-                if group_match:
-                    channel.group = ChannelNameNormalizer.fix_encoding(group_match.group(1))
-                else:
-                    channel.group = "Без группы"
-                
-                j = i + 1
-                while j < len(lines):
-                    next_line = lines[j].strip()
-                    if not next_line:
-                        j += 1
-                        continue
-                    
-                    if next_line.startswith('#EXTINF:'):
-                        break
-                    
-                    if next_line.startswith('#'):
-                        fixed_next_line = ChannelNameNormalizer.fix_encoding(next_line)
-                        channel.extvlcopt_lines.append(fixed_next_line)
-                    else:
-                        channel.url = ChannelNameNormalizer.fix_encoding(next_line.strip())
-                        channel.has_url = bool(channel.url)
-                        break
-                    
-                    j += 1
-                
-                channel.parse_extvlcopt_headers()
-                channels.append(channel)
-                i = j
+            ua_display = rule.user_agent[:50] + "..." if len(rule.user_agent) > 50 else rule.user_agent
+            ua_item = QTableWidgetItem(ua_display if rule.user_agent else "(удалить User-Agent)")
+            if not rule.user_agent:
+                ua_item.setForeground(QColor("orange"))
+            ua_item.setToolTip(rule.user_agent)
+            self.rules_table.setItem(i, 1, ua_item)
+            
+            enabled_item = QTableWidgetItem()
+            enabled_item.setCheckState(Qt.CheckState.Checked if rule.enabled else Qt.CheckState.Unchecked)
+            self.rules_table.setItem(i, 2, enabled_item)
+    
+    def _add_rule(self):
+        dialog = DomainUserAgentEditDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            domain, user_agent = dialog.get_rule()
+            if domain:
+                if self.manager.add_rule(domain, user_agent):
+                    self._load_rules()
+                    self.rules_updated.emit()
+    
+    def _edit_rule(self):
+        selected_row = self.rules_table.currentRow()
+        if selected_row < 0:
+            QMessageBox.warning(self, "Предупреждение", "Выберите правило для редактирования")
+            return
+        
+        domain_item = self.rules_table.item(selected_row, 0)
+        
+        if domain_item:
+            domain = domain_item.text()
+            rule = self.manager.get_rule(domain)
+            
+            if rule:
+                dialog = DomainUserAgentEditDialog(self, rule)
+                if dialog.exec() == QDialog.DialogCode.Accepted:
+                    new_domain, new_user_agent = dialog.get_rule()
+                    if new_domain:
+                        if new_domain != domain:
+                            self.manager.remove_rule(domain)
+                        self.manager.add_rule(new_domain, new_user_agent)
+                        self._load_rules()
+                        self.rules_updated.emit()
+    
+    def _remove_rule(self):
+        selected_row = self.rules_table.currentRow()
+        if selected_row < 0:
+            QMessageBox.warning(self, "Предупреждение", "Выберите правило для удаления")
+            return
+        
+        domain_item = self.rules_table.item(selected_row, 0)
+        if domain_item:
+            domain = domain_item.text()
+            
+            reply = QMessageBox.question(
+                self, "Подтверждение",
+                f"Удалить правило для домена '{domain}'?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            
+            if reply == QMessageBox.StandardButton.Yes:
+                if self.manager.remove_rule(domain):
+                    self._load_rules()
+                    self.rules_updated.emit()
+    
+    def _apply_to_all_channels(self):
+        parent = self.parent()
+        while parent and not hasattr(parent, 'current_tab'):
+            parent = parent.parent()
+        
+        if not parent or not parent.current_tab:
+            QMessageBox.warning(self, "Предупреждение", "Нет открытого плейлиста")
+            return
+        
+        tab = parent.current_tab
+        
+        reply = QMessageBox.question(
+            self, "Подтверждение",
+            "Применить правила User-Agent ко всем каналам в текущем плейлисте?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            modified_count = self.manager.apply_rules_to_channels(tab.all_channels)
+            
+            if modified_count > 0:
+                tab._save_state("Применение правил User-Agent для доменов")
+                tab._apply_filter()
+                tab.modified = True
+                tab._update_modified_status()
+                QMessageBox.information(self, "Успех", f"Обновлено {modified_count} каналов")
             else:
-                i += 1
-        
-        return channels
+                QMessageBox.information(self, "Информация", "Изменений не требуется")
     
-    def cache_links(self, source: LinkSource, channels: List[ChannelData]):
-        try:
-            cache_file = os.path.join(self.cache_dir, f"{hashlib.md5(source.name.encode()).hexdigest()}.json")
-            
-            cache_data = {
-                'channels': [ch.to_dict() for ch in channels],
-                'timestamp': datetime.now().isoformat()
-            }
-            
-            with open(cache_file, 'w', encoding='utf-8') as f:
-                json.dump(cache_data, f, ensure_ascii=False, indent=2)
-            
-            source.last_cache_update = datetime.now()
-            source.link_cache = {ch.name: [ch.url] for ch in channels if ch.url}
-            
-        except Exception as e:
-            logger.error(f"Ошибка кэширования ссылок: {e}")
+    def reject(self):
+        self.rules_updated.emit()
+        super().reject()
+
+
+class DomainUserAgentEditDialog(QDialog):
+    def __init__(self, parent=None, rule: DomainUserAgentRule = None):
+        super().__init__(parent)
+        self.rule = rule
+        self.setWindowTitle("Редактирование правила" if rule else "Добавление правила")
+        self.resize(500, 200)
+        
+        self._setup_ui()
+        if rule:
+            self._load_rule_data()
     
-    def load_cached_links(self, source: LinkSource) -> Optional[List[ChannelData]]:
-        try:
-            cache_file = os.path.join(self.cache_dir, f"{hashlib.md5(source.name.encode()).hexdigest()}.json")
-            
-            if os.path.exists(cache_file):
-                with open(cache_file, 'r', encoding='utf-8') as f:
-                    cache_data = json.load(f)
-                
-                channels = [ChannelData.from_dict(ch) for ch in cache_data.get('channels', [])]
-                return channels
-                
-        except Exception as e:
-            logger.error(f"Ошибка загрузки кэша: {e}")
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
         
-        return None
+        form_layout = QFormLayout()
+        
+        self.domain_edit = QLineEdit()
+        self.domain_edit.setPlaceholderText("https://zabava-htlive.cdn.ngenix.net")
+        self.domain_edit.setToolTip("Домен или часть URL для сопоставления")
+        form_layout.addRow("Домен:", self.domain_edit)
+        
+        self.user_agent_edit = QTextEdit()
+        self.user_agent_edit.setPlaceholderText(
+            '#EXTVLCOPT:http-user-agent="WINK/1.40.1 (AndroidTV/9) HlsWinkPlayer"\n\n'
+            "Оставьте поле пустым, чтобы удалить User-Agent для каналов с этим доменом"
+        )
+        self.user_agent_edit.setMaximumHeight(100)
+        form_layout.addRow("User-Agent:", self.user_agent_edit)
+        
+        info_label = QLabel(
+            "Примечание: Если поле User-Agent пустое, то User-Agent будет удалён\n"
+            "для всех каналов, URL которых содержит указанный домен."
+        )
+        info_label.setWordWrap(True)
+        info_label.setStyleSheet("color: gray; font-style: italic;")
+        form_layout.addRow(info_label)
+        
+        layout.addLayout(form_layout)
+        
+        button_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok |
+            QDialogButtonBox.StandardButton.Cancel
+        )
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
     
-    def search_channel(self, channel_name: str, settings: LinkReplacementSettings) -> List[ChannelData]:
-        results = []
-        enabled_sources = self.get_enabled_sources()
-        
-        if settings.ignore_special_chars_in_names:
-            normalized_search_name = ChannelNameNormalizer.normalize(
-                channel_name,
-                remove_parentheses=settings.remove_parentheses_in_names,
-                remove_brackets=settings.remove_brackets_in_names,
-                remove_emojis=settings.remove_emojis_in_names
-            )
-        else:
-            normalized_search_name = channel_name.lower()
-        
-        for source in enabled_sources:
-            cached_channels = self.load_cached_links(source)
-            if cached_channels is None:
-                cached_channels = self.load_links_from_source(source)
-                if cached_channels:
-                    self.cache_links(source, cached_channels)
-            
-            if not cached_channels:
-                continue
-            
-            for cached_channel in cached_channels:
-                if self._is_match(normalized_search_name, cached_channel.name, settings):
-                    results.append(cached_channel)
-        
-        results.sort(key=lambda x: (
-            -self._get_source_priority(x.link_source),
-            -self._get_match_score(channel_name, x.name, settings),
-            -settings.get_url_priority(x.url) if x.url else 0
-        ))
-        
-        return results[:settings.max_alternative_urls]
+    def _load_rule_data(self):
+        if self.rule:
+            self.domain_edit.setText(self.rule.domain)
+            self.user_agent_edit.setPlainText(self.rule.user_agent)
     
-    def _is_match(self, search_name: str, channel_name: str, settings: LinkReplacementSettings) -> bool:
-        if settings.ignore_special_chars_in_names:
-            normalized_channel = ChannelNameNormalizer.normalize(
-                channel_name,
-                remove_parentheses=settings.remove_parentheses_in_names,
-                remove_brackets=settings.remove_brackets_in_names,
-                remove_emojis=settings.remove_emojis_in_names
-            )
-        else:
-            normalized_channel = channel_name.lower()
-        
-        if settings.search_type == "exact":
-            return search_name == normalized_channel
-        
-        elif settings.search_type == "similar":
-            similarity = SequenceMatcher(None, search_name, normalized_channel).ratio()
-            return similarity >= settings.min_name_similarity
-        
-        elif settings.search_type == "fuzzy":
-            words1 = set(re.findall(r'\w+', search_name))
-            words2 = set(re.findall(r'\w+', normalized_channel))
-            
-            if not words1 or not words2:
-                return False
-            
-            common_words = words1.intersection(words2)
-            similarity = len(common_words) / max(len(words1), len(words2))
-            
-            return similarity >= settings.min_name_similarity
-        
-        return False
+    def get_rule(self) -> Tuple[str, str]:
+        domain = self.domain_edit.text().strip()
+        user_agent = self.user_agent_edit.toPlainText().strip()
+        return domain, user_agent
     
-    def _get_match_score(self, original_name: str, channel_name: str, settings: LinkReplacementSettings) -> float:
-        if settings.ignore_special_chars_in_names:
-            norm1 = ChannelNameNormalizer.normalize(
-                original_name,
-                remove_parentheses=settings.remove_parentheses_in_names,
-                remove_brackets=settings.remove_brackets_in_names,
-                remove_emojis=settings.remove_emojis_in_names
-            )
-            norm2 = ChannelNameNormalizer.normalize(
-                channel_name,
-                remove_parentheses=settings.remove_parentheses_in_names,
-                remove_brackets=settings.remove_brackets_in_names,
-                remove_emojis=settings.remove_emojis_in_names
-            )
-        else:
-            norm1 = original_name.lower()
-            norm2 = channel_name.lower()
+    def accept(self):
+        domain = self.domain_edit.text().strip()
+        if not domain:
+            QMessageBox.warning(self, "Предупреждение", "Введите домен")
+            self.domain_edit.setFocus()
+            return
         
-        return SequenceMatcher(None, norm1, norm2).ratio()
-    
-    def _get_source_priority(self, source_name: str) -> int:
-        source = self.get_source_by_name(source_name)
-        if source:
-            return source.priority
-        return 5
+        super().accept()
 
 
 class URLUtils:
@@ -1547,40 +1390,6 @@ class URLUtils:
                 return True
         
         return False
-
-
-class SafeWorker(QRunnable):
-    class WorkerSignals(QObject):
-        progress = pyqtSignal(int, int, str)
-        error = pyqtSignal(str)
-        finished = pyqtSignal()
-        result = pyqtSignal(object)
-    
-    def __init__(self, fn, *args, **kwargs):
-        super().__init__()
-        self.fn = fn
-        self.args = args
-        self.kwargs = kwargs
-        self.signals = self.WorkerSignals()
-        self._stop_requested = False
-    
-    def run(self):
-        try:
-            if self._stop_requested:
-                return
-            
-            result = self.fn(*self.args, **self.kwargs)
-            if not self._stop_requested:
-                self.signals.result.emit(result)
-                self.signals.finished.emit()
-                
-        except Exception as e:
-            if not self._stop_requested:
-                self.signals.error.emit(str(e))
-                logger.error(f"Ошибка в рабочем потоке: {e}")
-    
-    def stop(self):
-        self._stop_requested = True
 
 
 class BaseWorker(QThread):
@@ -1725,6 +1534,367 @@ class LinkReplacementWorker(BaseWorker):
         except Exception as e:
             logger.error(f"Ошибка поиска замены для {channel.name}: {e}")
             return None
+
+
+class LinkSourceManager:
+    def __init__(self, config_dir: str = None):
+        if config_dir is None:
+            config_dir = SystemThemeManager.get_config_dir()
+        
+        self.config_dir = config_dir
+        self.sources_file = os.path.join(config_dir, "link_sources.json")
+        self.sources: List[LinkSource] = []
+        self.cache_dir = os.path.join(config_dir, "link_cache")
+        
+        self._ensure_config_dir()
+        self._load_sources()
+    
+    def _ensure_config_dir(self):
+        try:
+            os.makedirs(self.config_dir, exist_ok=True)
+            os.makedirs(self.cache_dir, exist_ok=True)
+        except (OSError, PermissionError) as e:
+            logger.error(f"Ошибка создания директории: {e}")
+            raise
+    
+    def _load_sources(self):
+        try:
+            if os.path.exists(self.sources_file):
+                with open(self.sources_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    
+                if isinstance(data, list):
+                    self.sources = [LinkSource.from_dict(item) for item in data]
+                else:
+                    self.sources = []
+            else:
+                self.sources = []
+                self._save_sources()
+                
+        except (json.JSONDecodeError, IOError, OSError) as e:
+            logger.error(f"Ошибка загрузки источников: {e}")
+            self.sources = []
+    
+    def _save_sources(self):
+        try:
+            data = [source.to_dict() for source in self.sources]
+            with open(self.sources_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            return True
+        except (IOError, OSError) as e:
+            logger.error(f"Ошибка сохранения источников: {e}")
+            return False
+    
+    def add_source(self, source: LinkSource) -> bool:
+        self.sources.append(source)
+        return self._save_sources()
+    
+    def remove_source(self, source_name: str) -> bool:
+        self.sources = [s for s in self.sources if s.name != source_name]
+        return self._save_sources()
+    
+    def update_source(self, old_name: str, new_source: LinkSource) -> bool:
+        for i, source in enumerate(self.sources):
+            if source.name == old_name:
+                self.sources[i] = new_source
+                return self._save_sources()
+        return False
+    
+    def get_all_sources(self) -> List[LinkSource]:
+        return self.sources.copy()
+    
+    def get_enabled_sources(self) -> List[LinkSource]:
+        return [source for source in self.sources if source.enabled]
+    
+    def get_source_by_name(self, name: str) -> Optional[LinkSource]:
+        for source in self.sources:
+            if source.name == name:
+                return source
+        return None
+    
+    def _detect_encoding(self, content: bytes) -> str:
+        try:
+            content.decode('utf-8')
+            return 'utf-8'
+        except UnicodeDecodeError:
+            pass
+        
+        try:
+            content.decode('windows-1251')
+            return 'windows-1251'
+        except UnicodeDecodeError:
+            pass
+        
+        try:
+            content.decode('cp1251')
+            return 'cp1251'
+        except UnicodeDecodeError:
+            pass
+        
+        return 'utf-8'
+    
+    def load_links_from_source(self, source: LinkSource) -> List[ChannelData]:
+        channels = []
+        
+        try:
+            if source.source_type == "local":
+                if os.path.exists(source.path):
+                    with open(source.path, 'rb') as f:
+                        raw_content = f.read()
+                    
+                    detected_encoding = self._detect_encoding(raw_content)
+                    content = raw_content.decode(detected_encoding, errors='replace')
+                    channels = self._parse_content(content, source.name)
+                else:
+                    logger.warning(f"Локальный файл не найден: {source.path}")
+                    
+            elif source.source_type == "online":
+                try:
+                    response = requests.get(source.path, timeout=10, verify=False)
+                    if response.status_code == 200:
+                        content = response.text
+                        channels = self._parse_content(content, source.name)
+                except Exception as e:
+                    logger.error(f"Ошибка загрузки онлайн источника {source.name}: {e}")
+            
+            source.total_links = len(channels)
+            
+        except Exception as e:
+            logger.error(f"Ошибка загрузки источника {source.name}: {e}")
+            return []
+        
+        source.last_updated = datetime.now()
+        self._save_sources()
+        
+        return channels
+    
+    def _parse_content(self, content: str, source_name: str) -> List[ChannelData]:
+        channels = []
+        lines = content.split('\n')
+        
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            
+            if line.startswith('#EXTINF:'):
+                channel = ChannelData()
+                fixed_line = ChannelNameNormalizer.fix_encoding(line)
+                channel.extinf = fixed_line
+                channel.link_source = source_name
+                
+                if ',' in fixed_line:
+                    parts = fixed_line.split(',', 1)
+                    channel.name = ChannelNameNormalizer.fix_encoding(parts[1].strip())
+                
+                attrs_part = fixed_line.split(',')[0] if ',' in fixed_line else fixed_line
+                
+                tvg_id_match = re.search(r'tvg-id="([^"]*)"', attrs_part)
+                if tvg_id_match:
+                    channel.tvg_id = ChannelNameNormalizer.fix_encoding(tvg_id_match.group(1))
+                
+                logo_match = re.search(r'tvg-logo="([^"]*)"', attrs_part)
+                if logo_match:
+                    channel.tvg_logo = ChannelNameNormalizer.fix_encoding(logo_match.group(1))
+                
+                group_match = re.search(r'group-title="([^"]*)"', attrs_part)
+                if group_match:
+                    channel.group = ChannelNameNormalizer.fix_encoding(group_match.group(1))
+                else:
+                    channel.group = "Без группы"
+                
+                j = i + 1
+                has_url = False
+                url_lines = []
+                extvlcopt_lines = []
+                
+                while j < len(lines):
+                    next_line = lines[j].strip()
+                    if not next_line:
+                        j += 1
+                        continue
+                    
+                    if next_line.startswith('#EXTINF:'):
+                        break
+                    
+                    if next_line.startswith('#'):
+                        fixed_next_line = ChannelNameNormalizer.fix_encoding(next_line)
+                        extvlcopt_lines.append(fixed_next_line)
+                    else:
+                        url_lines.append(ChannelNameNormalizer.fix_encoding(next_line))
+                        has_url = True
+                        j += 1
+                        break
+                    
+                    j += 1
+                
+                if has_url:
+                    while j < len(lines):
+                        next_line = lines[j].strip()
+                        if not next_line:
+                            j += 1
+                            continue
+                        
+                        if next_line.startswith('#EXTINF:'):
+                            break
+                        
+                        if next_line.startswith('#'):
+                            fixed_next_line = ChannelNameNormalizer.fix_encoding(next_line)
+                            extvlcopt_lines.append(fixed_next_line)
+                        else:
+                            break
+                        
+                        j += 1
+                else:
+                    while j < len(lines) and not lines[j].strip():
+                        j += 1
+                
+                if url_lines:
+                    channel.url = '\n'.join(url_lines)
+                    channel.has_url = True
+                else:
+                    channel.url = ""
+                    channel.has_url = False
+                
+                channel.extvlcopt_lines = extvlcopt_lines
+                channel.parse_extvlcopt_headers()
+                if 'User-Agent' in channel.extra_headers:
+                    channel.user_agent = channel.extra_headers['User-Agent']
+                
+                channels.append(channel)
+                
+                i = j
+            else:
+                i += 1
+        
+        return channels
+    
+    def cache_links(self, source: LinkSource, channels: List[ChannelData]):
+        try:
+            cache_file = os.path.join(self.cache_dir, f"{hashlib.md5(source.name.encode()).hexdigest()}.json")
+            
+            cache_data = {
+                'channels': [ch.to_dict() for ch in channels],
+                'timestamp': datetime.now().isoformat()
+            }
+            
+            with open(cache_file, 'w', encoding='utf-8') as f:
+                json.dump(cache_data, f, ensure_ascii=False, indent=2)
+            
+            source.last_cache_update = datetime.now()
+            source.link_cache = {ch.name: [ch.url] for ch in channels if ch.url}
+            
+        except Exception as e:
+            logger.error(f"Ошибка кэширования ссылок: {e}")
+    
+    def load_cached_links(self, source: LinkSource) -> Optional[List[ChannelData]]:
+        try:
+            cache_file = os.path.join(self.cache_dir, f"{hashlib.md5(source.name.encode()).hexdigest()}.json")
+            
+            if os.path.exists(cache_file):
+                with open(cache_file, 'r', encoding='utf-8') as f:
+                    cache_data = json.load(f)
+                
+                channels = [ChannelData.from_dict(ch) for ch in cache_data.get('channels', [])]
+                return channels
+                
+        except Exception as e:
+            logger.error(f"Ошибка загрузки кэша: {e}")
+        
+        return None
+    
+    def search_channel(self, channel_name: str, settings: LinkReplacementSettings) -> List[ChannelData]:
+        results = []
+        enabled_sources = self.get_enabled_sources()
+        
+        if settings.ignore_special_chars_in_names:
+            normalized_search_name = ChannelNameNormalizer.normalize(
+                channel_name,
+                remove_parentheses=settings.remove_parentheses_in_names,
+                remove_brackets=settings.remove_brackets_in_names,
+                remove_emojis=settings.remove_emojis_in_names
+            )
+        else:
+            normalized_search_name = channel_name.lower()
+        
+        for source in enabled_sources:
+            cached_channels = self.load_cached_links(source)
+            if cached_channels is None:
+                cached_channels = self.load_links_from_source(source)
+                if cached_channels:
+                    self.cache_links(source, cached_channels)
+            
+            if not cached_channels:
+                continue
+            
+            for cached_channel in cached_channels:
+                if self._is_match(normalized_search_name, cached_channel.name, settings):
+                    results.append(cached_channel)
+        
+        results.sort(key=lambda x: (
+            -self._get_source_priority(x.link_source),
+            -self._get_match_score(channel_name, x.name, settings),
+            -settings.get_url_priority(x.url) if x.url else 0
+        ))
+        
+        return results[:settings.max_alternative_urls]
+    
+    def _is_match(self, search_name: str, channel_name: str, settings: LinkReplacementSettings) -> bool:
+        if settings.ignore_special_chars_in_names:
+            normalized_channel = ChannelNameNormalizer.normalize(
+                channel_name,
+                remove_parentheses=settings.remove_parentheses_in_names,
+                remove_brackets=settings.remove_brackets_in_names,
+                remove_emojis=settings.remove_emojis_in_names
+            )
+        else:
+            normalized_channel = channel_name.lower()
+        
+        if settings.search_type == "exact":
+            return search_name == normalized_channel
+        
+        elif settings.search_type == "similar":
+            similarity = SequenceMatcher(None, search_name, normalized_channel).ratio()
+            return similarity >= settings.min_name_similarity
+        
+        elif settings.search_type == "fuzzy":
+            words1 = set(re.findall(r'\w+', search_name))
+            words2 = set(re.findall(r'\w+', normalized_channel))
+            
+            if not words1 or not words2:
+                return False
+            
+            common_words = words1.intersection(words2)
+            similarity = len(common_words) / max(len(words1), len(words2))
+            
+            return similarity >= settings.min_name_similarity
+        
+        return False
+    
+    def _get_match_score(self, original_name: str, channel_name: str, settings: LinkReplacementSettings) -> float:
+        if settings.ignore_special_chars_in_names:
+            norm1 = ChannelNameNormalizer.normalize(
+                original_name,
+                remove_parentheses=settings.remove_parentheses_in_names,
+                remove_brackets=settings.remove_brackets_in_names,
+                remove_emojis=settings.remove_emojis_in_names
+            )
+            norm2 = ChannelNameNormalizer.normalize(
+                channel_name,
+                remove_parentheses=settings.remove_parentheses_in_names,
+                remove_brackets=settings.remove_brackets_in_names,
+                remove_emojis=settings.remove_emojis_in_names
+            )
+        else:
+            norm1 = original_name.lower()
+            norm2 = channel_name.lower()
+        
+        return SequenceMatcher(None, norm1, norm2).ratio()
+    
+    def _get_source_priority(self, source_name: str) -> int:
+        source = self.get_source_by_name(source_name)
+        if source:
+            return source.priority
+        return 5
 
 
 class PlaylistHeaderManager:
@@ -1872,6 +2042,9 @@ class BlacklistManager:
             return False
     
     def add_channel(self, name: str, tvg_id: str = ""):
+        if not name and not tvg_id:
+            return False
+            
         for item in self.blacklist:
             if (item.get('name', '').lower() == name.lower() and
                 item.get('tvg_id', '').lower() == tvg_id.lower()):
@@ -1909,11 +2082,11 @@ class BlacklistManager:
             should_remove = False
             
             for black_item in self.blacklist:
-                name_match = black_item.get('name', '').lower() in channel.name.lower()
+                name_match = black_item.get('name', '').lower() in channel.name.lower() if black_item.get('name', '') else False
                 tvg_id_match = (black_item.get('tvg_id', '') and 
                                black_item.get('tvg_id', '').lower() == channel.tvg_id.lower())
                 
-                if name_match or tvg_id_match:
+                if (black_item.get('name', '') and name_match) or (black_item.get('tvg_id', '') and tvg_id_match):
                     should_remove = True
                     break
             
@@ -2221,33 +2394,6 @@ class EnhancedTextEdit(QPlainTextEdit):
         menu.addAction(clear_action)
         
         menu.exec(self.mapToGlobal(position))
-    
-    def format_m3u(self):
-        text = self.toPlainText()
-        lines = text.split('\n')
-        
-        formatted_lines = []
-        for line in lines:
-            line = line.strip()
-            if line:
-                if line.startswith('#EXTINF'):
-                    if ',' in line:
-                        parts = line.split(',', 1)
-                        attrs = parts[0]
-                        name = parts[1].strip()
-                        attrs = re.sub(r'\s+', ' ', attrs)
-                        formatted_lines.append(f'{attrs},{name}')
-                    else:
-                        formatted_lines.append(line)
-                elif line.startswith('#EXTVLCOPT'):
-                    line = re.sub(r'\s+', ' ', line)
-                    formatted_lines.append(line)
-                elif not line.startswith('#'):
-                    formatted_lines.append(line.strip())
-                else:
-                    formatted_lines.append(line)
-        
-        self.setPlainText('\n'.join(formatted_lines))
 
 
 class LineEditWithContextMenu(QLineEdit):
@@ -3936,7 +4082,7 @@ class DuplicateManagerDialog(QDialog):
                 if j in processed:
                     continue
                 
-                similarity = channel1.get_similarity_score(channel2)
+                similarity = self._calculate_similarity(channel1, channel2)
                 if similarity >= threshold:
                     similar_channels.append((j, channel2))
                     processed.add(j)
@@ -3945,6 +4091,23 @@ class DuplicateManagerDialog(QDialog):
                 key = f"similar_{channel1.name[:20]}"
                 self.duplicates[key] = similar_channels
                 processed.add(i)
+    
+    def _calculate_similarity(self, channel1: ChannelData, channel2: ChannelData) -> float:
+        scores = []
+        
+        if channel1.name and channel2.name:
+            name_sim = SequenceMatcher(None, channel1.name.lower(), channel2.name.lower()).ratio()
+            scores.append(name_sim * 0.5)
+        
+        if channel1.group and channel2.group:
+            group_sim = SequenceMatcher(None, channel1.group.lower(), channel2.group.lower()).ratio()
+            scores.append(group_sim * 0.3)
+        
+        if channel1.url and channel2.url:
+            url_sim = 1.0 if channel1.url == channel2.url else 0.0
+            scores.append(url_sim * 0.2)
+        
+        return sum(scores) / len(scores) if scores else 0.0
     
     def _find_by_url_and_name(self):
         key_map = {}
@@ -5180,13 +5343,12 @@ class PlaylistTab(QWidget):
                         else:
                             url_lines.append(ChannelNameNormalizer.fix_encoding(next_line))
                             has_url = True
+                            j += 1
                             break
                         
                         j += 1
                     
                     if has_url:
-                        j += 1
-                        
                         while j < len(lines):
                             next_line = lines[j].strip()
                             if not next_line:
@@ -5621,52 +5783,6 @@ class PlaylistTab(QWidget):
         
         return True
     
-    def _merge_duplicates(self):
-        if not self.all_channels:
-            return
-        
-        duplicates = {}
-        for channel in self.all_channels:
-            key = (channel.name, channel.group)
-            if key not in duplicates:
-                duplicates[key] = []
-            duplicates[key].append(channel)
-        
-        dup_count = sum(len(channels) - 1 for channels in duplicates.values() if len(channels) > 1)
-        
-        if dup_count == 0:
-            return
-        
-        reply = QMessageBox.question(
-            self, "Подтверждение",
-            f"Найдено {dup_count} дубликатов. Удалить их?\n"
-            f"Будет оставлен только первый канал из каждой группы дубликатов.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-        
-        if reply == QMessageBox.StandardButton.Yes:
-            self._save_state("Объединение дубликатов")
-            
-            new_list = []
-            seen = set()
-            
-            for channel in self.all_channels:
-                key = (channel.name, channel.group)
-                if key not in seen:
-                    new_list.append(channel)
-                    seen.add(key)
-            
-            removed = len(self.all_channels) - len(new_list)
-            self.all_channels = new_list
-            
-            self._apply_filter()
-            
-            if self.parent_window and hasattr(self.parent_window, '_update_group_filter'):
-                self.parent_window._update_group_filter()
-            
-            self.modified = True
-            self._update_modified_status()
-    
     def edit_playlist_header(self):
         dialog = PlaylistHeaderDialog(self.header_manager, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
@@ -5913,6 +6029,233 @@ class PlaylistTab(QWidget):
             
             dialog.replacement_completed.connect(on_replacement_completed)
             dialog.exec()
+
+
+class LinkReplacementSettingsDialog(QDialog):
+    settings_changed = pyqtSignal(LinkReplacementSettings)
+    
+    def __init__(self, settings: LinkReplacementSettings, parent=None):
+        super().__init__(parent)
+        self.settings = settings
+        self.setWindowTitle("Настройки замены ссылок")
+        self.resize(700, 600)
+        
+        self._setup_ui()
+        self._load_settings()
+    
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        
+        tabs = QTabWidget()
+        
+        # Основные настройки
+        general_tab = QWidget()
+        general_layout = QFormLayout(general_tab)
+        
+        self.match_threshold_spin = QDoubleSpinBox()
+        self.match_threshold_spin.setRange(50, 100)
+        self.match_threshold_spin.setValue(80)
+        self.match_threshold_spin.setSuffix("%")
+        general_layout.addRow("Порог совпадения:", self.match_threshold_spin)
+        
+        self.min_similarity_spin = QDoubleSpinBox()
+        self.min_similarity_spin.setRange(0.5, 1.0)
+        self.min_similarity_spin.setValue(0.7)
+        self.min_similarity_spin.setSingleStep(0.05)
+        general_layout.addRow("Минимальная схожесть:", self.min_similarity_spin)
+        
+        self.search_type_combo = QComboBox()
+        self.search_type_combo.addItems(["Точное совпадение", "Похожие названия", "Нечеткое совпадение"])
+        general_layout.addRow("Тип поиска:", self.search_type_combo)
+        
+        self.use_fuzzy_check = QCheckBox("Использовать нечеткое сопоставление")
+        general_layout.addRow(self.use_fuzzy_check)
+        
+        tabs.addTab(general_tab, "Основные")
+        
+        # Настройки замены
+        replacement_tab = QWidget()
+        replacement_layout = QFormLayout(replacement_tab)
+        
+        self.auto_replace_broken_check = QCheckBox("Автоматически заменять битые ссылки")
+        replacement_layout.addRow(self.auto_replace_broken_check)
+        
+        self.auto_replace_missing_check = QCheckBox("Автоматически заменять отсутствующие ссылки")
+        replacement_layout.addRow(self.auto_replace_missing_check)
+        
+        self.keep_backup_check = QCheckBox("Сохранять резервные копии ссылок")
+        replacement_layout.addRow(self.keep_backup_check)
+        
+        self.max_alternatives_spin = QSpinBox()
+        self.max_alternatives_spin.setRange(1, 20)
+        self.max_alternatives_spin.setValue(5)
+        replacement_layout.addRow("Максимум альтернативных ссылок:", self.max_alternatives_spin)
+        
+        self.check_timeout_spin = QSpinBox()
+        self.check_timeout_spin.setRange(1, 30)
+        self.check_timeout_spin.setValue(5)
+        self.check_timeout_spin.setSuffix(" сек")
+        replacement_layout.addRow("Таймаут проверки:", self.check_timeout_spin)
+        
+        self.max_workers_spin = QSpinBox()
+        self.max_workers_spin.setRange(1, 10)
+        self.max_workers_spin.setValue(5)
+        replacement_layout.addRow("Максимум потоков:", self.max_workers_spin)
+        
+        tabs.addTab(replacement_tab, "Замена")
+        
+        # Фильтрация IP/доменов
+        filter_tab = QWidget()
+        filter_layout = QVBoxLayout(filter_tab)
+        
+        self.use_ip_filtering_check = QCheckBox("Использовать фильтрацию IP/доменов")
+        filter_layout.addWidget(self.use_ip_filtering_check)
+        
+        filter_form = QFormLayout()
+        
+        self.blacklist_ips_edit = QTextEdit()
+        self.blacklist_ips_edit.setPlaceholderText("Введите IP адреса для блокировки (каждый с новой строки)")
+        self.blacklist_ips_edit.setMaximumHeight(80)
+        filter_form.addRow("Чёрный список IP:", self.blacklist_ips_edit)
+        
+        self.blacklist_domains_edit = QTextEdit()
+        self.blacklist_domains_edit.setPlaceholderText("Введите домены для блокировки (каждый с новой строки)")
+        self.blacklist_domains_edit.setMaximumHeight(80)
+        filter_form.addRow("Чёрный список доменов:", self.blacklist_domains_edit)
+        
+        self.whitelist_ips_edit = QTextEdit()
+        self.whitelist_ips_edit.setPlaceholderText("Введите IP адреса для разрешения (каждый с новой строки)")
+        self.whitelist_ips_edit.setMaximumHeight(80)
+        filter_form.addRow("Белый список IP:", self.whitelist_ips_edit)
+        
+        self.whitelist_domains_edit = QTextEdit()
+        self.whitelist_domains_edit.setPlaceholderText("Введите домены для разрешения (каждый с новой строки)")
+        self.whitelist_domains_edit.setMaximumHeight(80)
+        filter_form.addRow("Белый список доменов:", self.whitelist_domains_edit)
+        
+        self.prioritize_whitelisted_check = QCheckBox("Приоритезировать белый список")
+        filter_form.addRow(self.prioritize_whitelisted_check)
+        
+        filter_layout.addLayout(filter_form)
+        
+        tabs.addTab(filter_tab, "Фильтрация")
+        
+        # Настройки нормализации имен
+        normalize_tab = QWidget()
+        normalize_layout = QVBoxLayout(normalize_tab)
+        
+        self.ignore_special_chars_check = QCheckBox("Игнорировать спецсимволы в названиях")
+        normalize_layout.addWidget(self.ignore_special_chars_check)
+        
+        self.remove_parentheses_check = QCheckBox("Удалять скобки из названий")
+        normalize_layout.addWidget(self.remove_parentheses_check)
+        
+        self.remove_brackets_check = QCheckBox("Удалять квадратные скобки из названий")
+        normalize_layout.addWidget(self.remove_brackets_check)
+        
+        self.remove_emojis_check = QCheckBox("Удалять эмодзи из названий")
+        normalize_layout.addWidget(self.remove_emojis_check)
+        
+        tabs.addTab(normalize_tab, "Нормализация")
+        
+        layout.addWidget(tabs)
+        
+        button_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok |
+            QDialogButtonBox.StandardButton.Cancel |
+            QDialogButtonBox.StandardButton.RestoreDefaults
+        )
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        button_box.button(QDialogButtonBox.StandardButton.RestoreDefaults).clicked.connect(self._restore_defaults)
+        layout.addWidget(button_box)
+    
+    def _load_settings(self):
+        self.match_threshold_spin.setValue(self.settings.match_threshold_percent)
+        self.min_similarity_spin.setValue(self.settings.min_name_similarity)
+        
+        search_type_map = {"exact": 0, "similar": 1, "fuzzy": 2}
+        self.search_type_combo.setCurrentIndex(search_type_map.get(self.settings.search_type, 0))
+        
+        self.use_fuzzy_check.setChecked(self.settings.use_fuzzy_matching)
+        
+        self.auto_replace_broken_check.setChecked(self.settings.auto_replace_broken)
+        self.auto_replace_missing_check.setChecked(self.settings.auto_replace_missing)
+        self.keep_backup_check.setChecked(self.settings.keep_backup_links)
+        self.max_alternatives_spin.setValue(self.settings.max_alternative_urls)
+        self.check_timeout_spin.setValue(self.settings.check_timeout)
+        self.max_workers_spin.setValue(self.settings.max_workers)
+        
+        self.use_ip_filtering_check.setChecked(self.settings.use_ip_filtering)
+        self.blacklist_ips_edit.setPlainText("\n".join(self.settings.blacklisted_ips))
+        self.blacklist_domains_edit.setPlainText("\n".join(self.settings.blacklisted_domains))
+        self.whitelist_ips_edit.setPlainText("\n".join(self.settings.whitelisted_ips))
+        self.whitelist_domains_edit.setPlainText("\n".join(self.settings.whitelisted_domains))
+        self.prioritize_whitelisted_check.setChecked(self.settings.prioritize_whitelisted)
+        
+        self.ignore_special_chars_check.setChecked(self.settings.ignore_special_chars_in_names)
+        self.remove_parentheses_check.setChecked(self.settings.remove_parentheses_in_names)
+        self.remove_brackets_check.setChecked(self.settings.remove_brackets_in_names)
+        self.remove_emojis_check.setChecked(self.settings.remove_emojis_in_names)
+    
+    def _restore_defaults(self):
+        default_settings = LinkReplacementSettings()
+        self.match_threshold_spin.setValue(default_settings.match_threshold_percent)
+        self.min_similarity_spin.setValue(default_settings.min_name_similarity)
+        self.search_type_combo.setCurrentIndex(0)
+        self.use_fuzzy_check.setChecked(default_settings.use_fuzzy_matching)
+        self.auto_replace_broken_check.setChecked(default_settings.auto_replace_broken)
+        self.auto_replace_missing_check.setChecked(default_settings.auto_replace_missing)
+        self.keep_backup_check.setChecked(default_settings.keep_backup_links)
+        self.max_alternatives_spin.setValue(default_settings.max_alternative_urls)
+        self.check_timeout_spin.setValue(default_settings.check_timeout)
+        self.max_workers_spin.setValue(default_settings.max_workers)
+        self.use_ip_filtering_check.setChecked(default_settings.use_ip_filtering)
+        self.blacklist_ips_edit.clear()
+        self.blacklist_domains_edit.clear()
+        self.whitelist_ips_edit.clear()
+        self.whitelist_domains_edit.clear()
+        self.prioritize_whitelisted_check.setChecked(default_settings.prioritize_whitelisted)
+        self.ignore_special_chars_check.setChecked(default_settings.ignore_special_chars_in_names)
+        self.remove_parentheses_check.setChecked(default_settings.remove_parentheses_in_names)
+        self.remove_brackets_check.setChecked(default_settings.remove_brackets_in_names)
+        self.remove_emojis_check.setChecked(default_settings.remove_emojis_in_names)
+    
+    def get_settings(self) -> LinkReplacementSettings:
+        settings = LinkReplacementSettings()
+        
+        settings.match_threshold_percent = self.match_threshold_spin.value()
+        settings.min_name_similarity = self.min_similarity_spin.value()
+        
+        search_type_map = {0: "exact", 1: "similar", 2: "fuzzy"}
+        settings.search_type = search_type_map.get(self.search_type_combo.currentIndex(), "exact")
+        
+        settings.use_fuzzy_matching = self.use_fuzzy_check.isChecked()
+        
+        settings.auto_replace_broken = self.auto_replace_broken_check.isChecked()
+        settings.auto_replace_missing = self.auto_replace_missing_check.isChecked()
+        settings.keep_backup_links = self.keep_backup_check.isChecked()
+        settings.max_alternative_urls = self.max_alternatives_spin.value()
+        settings.check_timeout = self.check_timeout_spin.value()
+        settings.max_workers = self.max_workers_spin.value()
+        
+        settings.use_ip_filtering = self.use_ip_filtering_check.isChecked()
+        settings.blacklisted_ips = [line.strip() for line in self.blacklist_ips_edit.toPlainText().splitlines() if line.strip()]
+        settings.blacklisted_domains = [line.strip() for line in self.blacklist_domains_edit.toPlainText().splitlines() if line.strip()]
+        settings.whitelisted_ips = [line.strip() for line in self.whitelist_ips_edit.toPlainText().splitlines() if line.strip()]
+        settings.whitelisted_domains = [line.strip() for line in self.whitelist_domains_edit.toPlainText().splitlines() if line.strip()]
+        settings.prioritize_whitelisted = self.prioritize_whitelisted_check.isChecked()
+        
+        settings.ignore_special_chars_in_names = self.ignore_special_chars_check.isChecked()
+        settings.remove_parentheses_in_names = self.remove_parentheses_check.isChecked()
+        settings.remove_brackets_in_names = self.remove_brackets_check.isChecked()
+        settings.remove_emojis_in_names = self.remove_emojis_check.isChecked()
+        
+        return settings
+    
+    def accept(self):
+        self.settings_changed.emit(self.get_settings())
+        super().accept()
 
 
 class MainWindow(QMainWindow):
@@ -6239,6 +6582,54 @@ class MainWindow(QMainWindow):
         toggle_statusbar_action.setChecked(True)
         toggle_statusbar_action.triggered.connect(self._toggle_statusbar)
         settings_menu.addAction(toggle_statusbar_action)
+        
+        help_menu = menu_bar.addMenu("Справка")
+        
+        help_action = QAction("Справка", self)
+        help_action.setShortcut("F1")
+        help_action.triggered.connect(self._show_help_dialog)
+        help_menu.addAction(help_action)
+        
+        license_action = QAction("Лицензия GPLv3", self)
+        license_action.triggered.connect(self._show_license)
+        help_menu.addAction(license_action)
+        
+        support_action = QAction("Поддержка проекта", self)
+        support_action.triggered.connect(self._show_support_dialog)
+        help_menu.addAction(support_action)
+        
+        help_menu.addSeparator()
+        
+        about_qt_action = QAction("О Qt", self)
+        about_qt_action.triggered.connect(lambda: QMessageBox.aboutQt(self))
+        help_menu.addAction(about_qt_action)
+    
+    # --- НОВЫЕ МЕТОДЫ ДЛЯ СПРАВКИ ---
+    def _show_help_dialog(self):
+        dialog = HelpDialog(self)
+        dialog.exec()
+    
+    def _show_license(self):
+        license_text = """GNU General Public License v3.0
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>."""
+        QMessageBox.about(self, "Лицензия GPLv3", license_text)
+    
+    def _show_support_dialog(self):
+        dialog = SupportDialog(self)
+        dialog.exec()
+    # --- КОНЕЦ НОВЫХ МЕТОДОВ ---
     
     def _setup_toolbar(self):
         self.toolbar = QToolBar("Основная панель")
@@ -6732,14 +7123,6 @@ class MainWindow(QMainWindow):
         if self.current_tab:
             self.current_tab._paste_channel()
     
-    def _delete(self):
-        if self.current_tab:
-            self.current_tab._delete_channel()
-    
-    def _select_all(self):
-        if self.current_tab:
-            self.current_tab._select_all_channels()
-    
     def _new_channel(self):
         if self.current_tab:
             self.current_tab._new_channel()
@@ -6911,6 +7294,7 @@ class MainWindow(QMainWindow):
         if self.current_tab:
             removed_count = self.current_tab.apply_blacklist()
             if removed_count > 0:
+                self.current_tab._update_info()
                 self.status_bar.showMessage(f"Удалено {removed_count} каналов по чёрному списку", 3000)
     
     def _manage_blacklist(self):
