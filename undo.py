@@ -20,6 +20,7 @@ class UndoRedoManager:
         self._last_snapshot: Dict[int, str] = {}
         self._last_data: Dict[int, Dict[str, Any]] = {}
         self._last_order: List[int] = []
+        self._initialized: bool = False
         self._lock = threading.RLock()
 
     @staticmethod
@@ -48,10 +49,11 @@ class UndoRedoManager:
         with self._lock:
             new_snap, new_order = self._current_snapshot(channels)
 
-            if not self._last_snapshot and not self._last_data:
+            if not self._initialized:
                 self._last_snapshot = new_snap
                 self._last_data = {ch.uid: ch.to_dict() for ch in channels}
                 self._last_order = new_order
+                self._initialized = True
                 return
 
             old_snap = self._last_snapshot
@@ -180,6 +182,7 @@ class UndoRedoManager:
             self._last_snapshot = snap
             self._last_data = {ch.uid: ch.to_dict() for ch in channels}
             self._last_order = order
+            self._initialized = True
             self._undo_stack.clear()
             self._redo_stack.clear()
 

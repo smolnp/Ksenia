@@ -68,7 +68,7 @@ def _is_gui_thread() -> bool:
     if app is None:
         return True
     try:
-        return QThread.currentThread() is app.thread()
+        return QThread.currentThread() == app.thread()
     except Exception:
         return True
 

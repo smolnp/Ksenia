@@ -1635,6 +1635,8 @@ class PlaylistTab(QWidget):
         self.all_channels = [ch for ch in self.all_channels
                              if ch.uid not in uids]
         self.sync_to_core()
+        self.selected_channels = []
+        self.current_channel = None
         with self._suppress_save():
             self.model.set_channels(self.all_channels)
 
@@ -1875,9 +1877,22 @@ class PlaylistTab(QWidget):
             w.copied_channel = self.current_channel.copy()
 
     def _cut_channel(self):
-        if self.current_channel:
-            self._copy_channel()
-            self._delete_channel()
+        if not self.current_channel:
+            return
+        target = self.current_channel
+        self._copy_channel()
+        # Удаляем ТОЛЬКО текущий канал, не selected_channels
+        uids = {target.uid}
+        if not confirm(self, f"Вырезать канал '{target.meta.name}'?"):
+            return
+        self.save_state("Вырезание канала")
+        self.all_channels = [ch for ch in self.all_channels
+                             if ch.uid not in uids]
+        self.sync_to_core()
+        self.selected_channels = []
+        self.current_channel = None
+        with self._suppress_save():
+            self.model.set_channels(self.all_channels)
 
     def _cut_selected_channels(self):
         if self.selected_channels:

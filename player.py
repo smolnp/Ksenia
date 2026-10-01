@@ -94,7 +94,7 @@ class EmbeddedVlcPlayer(QWidget):
             events = self._media_player.event_manager()
             events.event_attach(
                 vlc.EventType.MediaPlayerEndReached,
-                lambda *a: QTimer.singleShot(0, self.end_reached.emit))
+                lambda *a: self.end_reached.emit())
             self._event_attached = True
         except Exception:
             logger.exception("event_attach EndReached")

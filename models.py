@@ -108,9 +108,8 @@ class ChannelStatus:
         return s
 
 class ChannelData:
-    _uid_counter = itertools.count(1)
+    _uid_next: int = 1
     _uid_lock = threading.Lock()
-    _uid_max = 0
 
     _ATTR_MAP: Dict[str, Tuple[str, str]] = {}
     _ATTR_MAP_LOCK = threading.RLock()
@@ -143,14 +142,15 @@ class ChannelData:
     @classmethod
     def _next_uid(cls) -> int:
         with cls._uid_lock:
-            return next(cls._uid_counter)
+            uid = cls._uid_next
+            cls._uid_next += 1
+            return uid
 
     @classmethod
     def _reserve_uid(cls, uid: int):
         with cls._uid_lock:
-            if uid >= cls._uid_max:
-                cls._uid_max = uid
-                cls._uid_counter = itertools.count(uid + 1)
+            if uid >= cls._uid_next:
+                cls._uid_next = uid + 1
 
     def __init__(self, uid: Optional[int] = None):
         if not ChannelData._ATTR_MAP:
@@ -242,7 +242,7 @@ class ChannelData:
             parts.append(f'tvg-name="{self._escape(self.tvg_name)}"')
         if self.tvg_logo:
             parts.append(f'tvg-logo="{self._escape(self.tvg_logo)}"')
-        if self.group:
+        if self.group and self.group != DEFAULT_GROUP:
             parts.append(f'group-title="{self._escape(self.group)}"')
         if self.tvg_shift:
             parts.append(f'tvg-shift="{self._escape(self.tvg_shift)}"')
@@ -464,6 +464,7 @@ class ChannelData:
         with suppress(ValueError, TypeError):
             object.__setattr__(self, 'original_index',
                                int(data.get('original_index', -1)))
+        self._invalidate_caches()
 
 ChannelData._build_attr_map()
 

@@ -39,8 +39,8 @@ class BlacklistManager:
     def remove_channel(self, name: str, tvg_id: str = "") -> bool:
         with self._lock:
             for i, it in enumerate(self._store._data):
-                if (it.get('name', '').lower() == name.lower() and
-                        it.get('tvg_id', '').lower() == tvg_id.lower()):
+                if ((it.get('name') or '').lower() == (name or '').lower() and
+                        (it.get('tvg_id') or '').lower() == (tvg_id or '').lower()):
                     del self._store._data[i]
                     return self._store.save()
         return False
@@ -63,8 +63,8 @@ class BlacklistManager:
         bl_names: Set[str] = set()
         bl_tvgs: Set[str] = set()
         for bi in bl:
-            n = bi.get('name', '').strip().lower()
-            t = bi.get('tvg_id', '').strip().lower()
+            n = (bi.get('name') or '').strip().lower()
+            t = (bi.get('tvg_id') or '').strip().lower()
             if n:
                 bl_names.add(n)
             if t:
@@ -155,13 +155,13 @@ class DomainBlacklistManager:
         self._cache: "OrderedDict[str, bool]" = OrderedDict()
 
     def _persist_locked(self) -> bool:
-        snapshot = [r.to_dict() for r in self._rules]
-        self._store._data = snapshot
+        old_data = self._store._data
+        self._store._data = [r.to_dict() for r in self._rules]
         ok = self._store.save()
         if not ok:
-            # Пытаемся восстановить из уже загруженного _store._data
-            # (там лежит последняя успешно сохранённая версия).
-            logger.error("DomainBlacklist persist failed")
+            self._store._data = old_data
+            logger.error(
+                "DomainBlacklist persist failed, rolled back")
         return ok
 
     def _invalidate_cache_locked(self):

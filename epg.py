@@ -207,6 +207,9 @@ class EPGDatabase:
                 self.cache_manager.save_epg_entries(to_cache, source)
             if info_to_cache:
                 self.cache_manager.save_epg_channels(info_to_cache, source)
+        # Сбросить fuzzy-кэш: _channel_info обновилось
+        with self._fuzzy_cache_lock:
+            self._fuzzy_cache.clear()
         return count
 
     def load_from_urls(self, urls: List[str], timeout: int = EPG_SOURCE_TIMEOUT_SEC,
@@ -376,8 +379,11 @@ class EPGDatabase:
                 with self._channel_info_lock:
                     for t in target_tokens:
                         cid_set |= self._channel_info_by_token.get(t, set())
-                    snapshot = [(c, (self._channel_info[c].display_name or c))
-                                for c in cid_set if c in self._channel_info]
+                    snapshot = [
+                        (c, ChannelNameNormalizer.normalize(
+                            self._channel_info[c].display_name or c))
+                        for c in cid_set if c in self._channel_info
+                    ]
             else:
                 with self._channel_info_lock:
                     snapshot = [(cid, norm)

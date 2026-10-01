@@ -223,9 +223,25 @@ class LinkReplacementSettings:
     def is_filtered_domain(self, url: str) -> bool:
         if not url:
             return False
+        try:
+            from utils import URLUtils
+            host = URLUtils.extract_host(url) or ''
+        except Exception:
+            host = ''
+        if host:
+            for d in list(self.temporary_domains) + list(self.unsafe_domains):
+                dn = (d or '').strip().lower().strip('.')
+                if not dn:
+                    continue
+                if host == dn or host.endswith('.' + dn):
+                    return True
+            return False
+        # Fallback: если host не извлекли — старая логика
         u = url.lower()
-        return any(d.lower() in u for d in self.temporary_domains) or \
-               any(d.lower() in u for d in self.unsafe_domains)
+        return any((d or '').lower() in u
+                   for d in self.temporary_domains) or \
+               any((d or '').lower() in u
+                   for d in self.unsafe_domains)
 
     def get_replace_timeout(self) -> int:
         if self._config.get('fast_replacement_mode', True):

@@ -564,7 +564,7 @@ class SourceUrlCheckWorker(BaseWorker):
                 if self.is_stopped():
                     break
                 url = ch.link.url
-                hit = fresh.get((ch.meta.name, url))
+                hit = fresh.get((ch.meta.name.lower(), url))
                 if hit and (now - hit['last_check']) < self.trust_sec:
                     checked += 1
                     if hit['alive']:
