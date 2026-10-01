@@ -11,19 +11,17 @@ from datetime import datetime
 from typing import Optional, Dict, Any, Tuple, List
 from enum import Enum
 from PyQt6.QtGui import QColor
-from .constants import (DEFAULT_GROUP, StatusText, URL_FG_COLORS,
+from constants import (DEFAULT_GROUP, StatusText, URL_FG_COLORS,
     EPG_ALLOWED_META_FIELDS, EPG_FUZZY_MIN_LENGTH_DEFAULT,
     EPG_FUZZY_MIN_GAP_DEFAULT, EPG_FUZZY_CACHE_LIMIT)
-from .paths import logger, parse_datetime
-from .utils import ChannelNameNormalizer
-
+from paths import logger, parse_datetime
+from utils import ChannelNameNormalizer
 
 class LinkQuality(Enum):
     UNKNOWN = 0
     WORKING = 1
     NOT_WORKING = 2
     UNSUPPORTED = 3
-
 
 class ChannelMetadata:
     __slots__ = ('name', 'original_name', 'group', 'tvg_id', 'tvg_name',
@@ -57,7 +55,6 @@ class ChannelMetadata:
             setattr(m, s, getattr(self, s))
         return m
 
-
 class ChannelLink:
     __slots__ = ('url', 'extinf', 'user_agent', 'extvlcopt_lines',
                  'extra_headers', 'has_url', 'alternative_urls',
@@ -84,7 +81,6 @@ class ChannelLink:
             setattr(l, s, v)
         return l
 
-
 class ChannelStatus:
     __slots__ = ('url_status', 'url_check_time', 'link_quality',
                  'link_response_time', 'status_text', 'status_code')
@@ -110,7 +106,6 @@ class ChannelStatus:
         for sl in self.__slots__:
             setattr(s, sl, getattr(self, sl))
         return s
-
 
 class ChannelData:
     _uid_counter = itertools.count(1)
@@ -147,7 +142,6 @@ class ChannelData:
 
     @classmethod
     def _next_uid(cls) -> int:
-        # v0.9.4 fix: под lock, иначе race с _reserve_uid.
         with cls._uid_lock:
             return next(cls._uid_counter)
 
@@ -159,6 +153,8 @@ class ChannelData:
                 cls._uid_counter = itertools.count(uid + 1)
 
     def __init__(self, uid: Optional[int] = None):
+        if not ChannelData._ATTR_MAP:
+            ChannelData._build_attr_map()
         object.__setattr__(self, '_initialized', False)
         if uid is not None:
             object.__setattr__(self, 'uid', uid)
@@ -177,7 +173,6 @@ class ChannelData:
         object.__setattr__(self, '_initialized', True)
 
     def __getattr__(self, name: str):
-        # v0.9.4 fix: одна проверка на dunder (было две избыточных).
         if name.startswith('__') and name.endswith('__'):
             raise AttributeError(name)
         entry = ChannelData._ATTR_MAP.get(name)
@@ -185,6 +180,12 @@ class ChannelData:
             raise AttributeError(
                 f"{type(self).__name__!r} object has no attribute {name!r}")
         return getattr(object.__getattribute__(self, entry[0]), entry[1])
+
+    def _invalidate_caches(self):
+        object.__setattr__(self, '_cached_hash', None)
+        object.__setattr__(self, '_cached_hash_mod', None)
+        object.__setattr__(self, '_cached_norm_key', None)
+        object.__setattr__(self, '_cached_norm_mod', None)
 
     def __setattr__(self, name: str, value):
         if name in ChannelData._INTERNAL or name.startswith('_'):
@@ -195,6 +196,8 @@ class ChannelData:
             object.__setattr__(self, name, value)
             return
         setattr(object.__getattribute__(self, entry[0]), entry[1], value)
+        with suppress(Exception):
+            self._invalidate_caches()
 
     @property
     def has_valid_url(self) -> bool:
@@ -462,13 +465,7 @@ class ChannelData:
             object.__setattr__(self, 'original_index',
                                int(data.get('original_index', -1)))
 
-
-# v0.9.5 fix: без этого вызова _ATTR_MAP остаётся пустым, и
-# любой доступ к ch.tvg_id / ch.group / ch.url / ch.user_agent
-# падает с AttributeError (update_extinf, get_status_tooltip,
-# LinkSourceManager._post_process_channels и т.д.).
 ChannelData._build_attr_map()
-
 
 class EPGEntry:
     __slots__ = ('channel_id', 'start', 'stop', 'title', 'desc', 'category')
@@ -480,7 +477,6 @@ class EPGEntry:
         self.title: str = ""
         self.desc: str = ""
         self.category: str = ""
-
 
 class EPGChannelInfo:
     __slots__ = ('channel_id', 'display_name', 'icon', 'lcn')

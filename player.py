@@ -11,14 +11,13 @@ from PyQt6.QtGui import QKeySequence, QShortcut
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QComboBox, QSlider, QCheckBox,
     QTreeWidget, QTreeWidgetItem, QSizePolicy, QLayout)
-from .constants import (VLC_INSTANCE_USER_AGENT,
+from constants import (VLC_INSTANCE_USER_AGENT,
     VLC_PLAYER_DEFAULT_VOLUME, VLC_PLAYER_DEFAULT_WIDTH,
     VLC_PLAYER_DEFAULT_HEIGHT, STREAMING_PROTOCOLS)
-from .models import ChannelData
-from .paths import (logger, error_box, warn_box, info_box,
+from models import ChannelData
+from paths import (logger, error_box, warn_box, info_box,
     save_file_dialog)
-from .dialogs import BaseDialog, _is_qobject_valid
-
+from dialogs import BaseDialog, _is_qobject_valid
 
 try:
     import vlc
@@ -33,10 +32,8 @@ except Exception as e:
     _HAS_VLC_MODULE = False
     _VLC_IMPORT_ERROR = str(e)
 
-
 def is_vlc_available() -> bool:
     return _HAS_VLC_MODULE
-
 
 def get_vlc_error() -> str:
     if _HAS_VLC_MODULE:
@@ -44,7 +41,6 @@ def get_vlc_error() -> str:
     if _VLC_IMPORT_ERROR:
         return f"Не удалось импортировать python-vlc: {_VLC_IMPORT_ERROR}"
     return "Модуль python-vlc не установлен."
-
 
 class EmbeddedVlcPlayer(QWidget):
     playback_error = pyqtSignal(str)
@@ -260,7 +256,6 @@ class EmbeddedVlcPlayer(QWidget):
             self._vlc_instance = None
         super().closeEvent(event)
 
-
 class EmbeddedPlayerDialog(BaseDialog):
     def __init__(self, channel: ChannelData, parent=None,
                  playlist: Optional[List[ChannelData]] = None):
@@ -269,7 +264,7 @@ class EmbeddedPlayerDialog(BaseDialog):
             parent,
             size=(VLC_PLAYER_DEFAULT_WIDTH, VLC_PLAYER_DEFAULT_HEIGHT),
         )
-        from .ksenia_window import ApplicationCore
+        from ksenia_window import ApplicationCore
         self.core = ApplicationCore.instance()
 
         src = playlist if playlist else [channel]
@@ -550,8 +545,9 @@ class EmbeddedPlayerDialog(BaseDialog):
         if _is_qobject_valid(self):
             with suppress(Exception):
                 self.player.stop()
+            with suppress(Exception):
+                self.player.closeEvent(event)
         super().closeEvent(event)
-
 
 def _apply_player_patch():
     """Подменяет EmbeddedVlcPlayer и EmbeddedPlayerDialog на патченные."""
@@ -583,7 +579,7 @@ def _apply_player_patch():
     _BASE = g.get('BaseDialog')
     _OLD_PLAYER = g.get('EmbeddedVlcPlayer')
     try:
-        from .ksenia_window import ApplicationCore as _CORE_CLS
+        from ksenia_window import ApplicationCore as _CORE_CLS
     except Exception:
         _CORE_CLS = g.get('ApplicationCore')
     _ERR_BOX = g.get('error_box')
@@ -615,10 +611,6 @@ def _apply_player_patch():
             f /= 1024.0
         return f"{f:.1f} TB"
 
-    
-    
-    
-
     class PatchedVlcPlayer(_OLD_PLAYER):
 
         def play_url(self, url, user_agent="", extra_headers=None):
@@ -637,10 +629,8 @@ def _apply_player_patch():
                 self._current_url = url
                 self._current_user_agent = user_agent or ""
 
-                
                 media = self._vlc_instance.media_new(url)
 
-                
                 for opt in (":network-caching=800",
                             ":live-caching=800",
                             ":http-reconnect=true",
@@ -659,7 +649,6 @@ def _apply_player_patch():
                         else:
                             media.add_option(f":http-header={k}: {v}")
 
-                
                 self._media_player.set_media(media)
                 if sys.platform.startswith("linux"):
                     self._media_player.set_xwindow(int(self.winId()))
@@ -825,10 +814,6 @@ def _apply_player_patch():
 
             return info
 
-    
-    
-    
-
     class MediaInfoDialog(_BASE):
         GROUP_ORDER = (
             "Player", "Playback", "Media", "Stream",
@@ -951,10 +936,6 @@ def _apply_player_patch():
             self._timer.stop()
             super().closeEvent(event)
 
-    
-    
-    
-
     class PatchedPlayerDialog(_BASE):
 
         def __init__(self, channel, parent=None, playlist=None):
@@ -970,10 +951,7 @@ def _apply_player_patch():
             from PyQt6.QtCore import Qt as _Qt
             from PyQt6.QtGui import QKeySequence as _QKS, QShortcut as _QSC
 
-            # v0.1 fix: _CORE_CLS мог остаться None — патч применяется
-            # на уровне модуля player.py ДО определения ApplicationCore
-            # в ksenia_window. Импортируем лениво здесь.
-            from .ksenia_window import ApplicationCore
+            from ksenia_window import ApplicationCore
             self.core = ApplicationCore.instance()
 
             src = playlist if playlist else [channel]
@@ -985,7 +963,6 @@ def _apply_player_patch():
 
             self.setWindowModality(_Qt.WindowModality.NonModal)
 
-            
             self._normal_size = _QSize(_DEFAULT_W, _DEFAULT_H)
             self._resize_locked = False
             self.setSizeGripEnabled(False)
@@ -1080,8 +1057,6 @@ def _apply_player_patch():
             self._play_at(self.index)
             self._info_dialog = None
 
-        
-
         def resizeEvent(self, event):
             """Блокирует авторесайз во время смены канала."""
             if (getattr(self, '_resize_locked', False)
@@ -1102,8 +1077,6 @@ def _apply_player_patch():
         def _unlock_resize(self):
             self._resize_locked = False
             self._restore_size()
-
-        
 
         def _play_at(self, index):
             if not _VALID(self):
@@ -1267,6 +1240,5 @@ def _apply_player_patch():
 
     logger.info("[PATCH] Патч плеера применён (v2)")
     return True
-
 
 _apply_player_patch()

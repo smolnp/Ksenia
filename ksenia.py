@@ -17,18 +17,9 @@ from contextlib import suppress
 
 faulthandler.enable()
 
-if __package__ is None or __package__ == '':
-    sys.path.insert(
-        0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from ksenia.ksenia_window import (
-        parse_cli_args, run_cli, MainWindow,
-    )
-    from ksenia.constants import APP_VERSION
-    from ksenia.paths import logger
-else:
-    from .ksenia_window import parse_cli_args, run_cli, MainWindow
-    from .constants import APP_VERSION
-    from .paths import logger
+from ksenia_window import parse_cli_args, run_cli, MainWindow
+from constants import APP_VERSION
+from paths import logger
 
 
 def _install_signal_handlers(app):

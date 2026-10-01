@@ -10,12 +10,11 @@ from urllib.parse import urlparse
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 from collections import OrderedDict, defaultdict
-from .constants import DOMAIN_BL_CACHE_MAX, DOMAIN_UA_CACHE_MAX, StatusText
-from .models import ChannelData
-from .paths import logger, parse_datetime
-from .storage import BaseJsonStore
-from .utils import URLUtils
-
+from constants import DOMAIN_BL_CACHE_MAX, DOMAIN_UA_CACHE_MAX, StatusText
+from models import ChannelData
+from paths import logger, parse_datetime
+from storage import BaseJsonStore
+from utils import URLUtils
 
 class BlacklistManager:
     def __init__(self, config_dir: str):
@@ -83,7 +82,6 @@ class BlacklistManager:
                 filtered.append(ch)
         return filtered, removed
 
-
 class DomainBlacklistRule:
     __slots__ = ('value', 'is_ip', 'include_subdomains', 'note', 'added_date')
 
@@ -139,7 +137,6 @@ class DomainBlacklistRule:
             r.added_date = dt
         return r
 
-
 class DomainBlacklistManager:
     """
     ЧС домен/IP.
@@ -158,8 +155,14 @@ class DomainBlacklistManager:
         self._cache: "OrderedDict[str, bool]" = OrderedDict()
 
     def _persist_locked(self) -> bool:
-        self._store._data = [r.to_dict() for r in self._rules]
-        return self._store.save()
+        snapshot = [r.to_dict() for r in self._rules]
+        self._store._data = snapshot
+        ok = self._store.save()
+        if not ok:
+            # Пытаемся восстановить из уже загруженного _store._data
+            # (там лежит последняя успешно сохранённая версия).
+            logger.error("DomainBlacklist persist failed")
+        return ok
 
     def _invalidate_cache_locked(self):
         self._cache.clear()
@@ -264,8 +267,6 @@ class DomainBlacklistManager:
     def _matches_host(self, host: str) -> bool:
         if not host:
             return False
-        # v6.5: быстрый путь через кэш без захвата _lock —
-        # чтобы 32 воркера не сериализовались на проверке правил.
         with self._lock:
             cached = self._cache_get_locked(host)
             if cached is not None:
@@ -380,7 +381,6 @@ class DomainBlacklistManager:
             self._persist_locked()
         return processed
 
-
 class DomainUserAgentRule:
     __slots__ = ('domain', 'user_agent', 'enabled', 'created_date')
 
@@ -414,7 +414,6 @@ class DomainUserAgentRule:
             r.created_date = dt
         return r
 
-
 class DomainUserAgentManager:
     def __init__(self, config_dir: str):
         self._store = BaseJsonStore(
@@ -424,11 +423,6 @@ class DomainUserAgentManager:
             DomainUserAgentRule.from_dict(x) for x in self._store._data
             if isinstance(x, dict)
         ]
-        # v0.9.5 fix: кэш хранит (matched, ua), чтобы отличать
-        # "правило не найдено" от "правило с пустым UA".
-        # Раньше оба случая давали None — второй вызов
-        # should_remove_user_agent() ложно возвращал True
-        # и стирал UA у каналов без правил.
         self._cache: "OrderedDict[str, Tuple[bool, Optional[str]]]" = OrderedDict()
 
     def _persist_locked(self) -> bool:

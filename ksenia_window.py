@@ -33,22 +33,22 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget,
     QCheckBox, QRadioButton, QProgressBar, QFrame, QPlainTextEdit,
     QStyle, QSpinBox, QDoubleSpinBox, QTableView, QButtonGroup,
     QSlider)
-from .constants import *
-from .models import *
-from .paths import *
-from .utils import *
-from .config import Config, LinkReplacementSettings
-from .storage import CacheManager, StableStateManager
-from .blacklists import (BlacklistManager, DomainBlacklistManager,
+from constants import *
+from models import *
+from paths import *
+from utils import *
+from config import Config, LinkReplacementSettings
+from storage import CacheManager, StableStateManager
+from blacklists import (BlacklistManager, DomainBlacklistManager,
     DomainUserAgentManager, DomainUserAgentRule)
-from .sources import LinkSource, LinkSourceManager, HttpSessionFactory
-from .epg import EPGDatabase
-from .parsers import M3UParser, PlaylistHeaderManager
-from .undo import UndoRedoManager, SimpleDuplicateFinder
-from .workers import (URLCheckerWorker, LinkReplacementWorker,
+from sources import LinkSource, LinkSourceManager, HttpSessionFactory
+from epg import EPGDatabase
+from parsers import M3UParser, PlaylistHeaderManager
+from undo import UndoRedoManager, SimpleDuplicateFinder
+from workers import (URLCheckerWorker, LinkReplacementWorker,
     SourcesRefreshWorker, SourceUrlCheckWorker, EPGLoaderWorker,
     EPGMetadataApplyWorker)
-from .dialogs import (
+from dialogs import (
     BaseDialog, IconProvider, _is_qobject_valid, _is_gui_thread,
     make_table, make_action, fill_channels_table, make_form,
     json_import_dialog, json_export_dialog,
@@ -61,8 +61,22 @@ from .dialogs import (
     LinkSelectionDialog, BlacklistDialog,
     PlaylistFromSourcesDialog, GeneralSettingsDialog,
     CacheManagerDialog)
-from .player import (EmbeddedVlcPlayer, EmbeddedPlayerDialog,
+from player import (EmbeddedVlcPlayer, EmbeddedPlayerDialog,
     is_vlc_available, get_vlc_error)
+
+# Флаги VLC (могут отсутствовать на системе)
+try:
+    import vlc
+    _HAS_VLC_MODULE = True
+    _VLC_IMPORT_ERROR = ""
+except ImportError as _e:
+    vlc = None
+    _HAS_VLC_MODULE = False
+    _VLC_IMPORT_ERROR = str(_e)
+except Exception as _e:
+    vlc = None
+    _HAS_VLC_MODULE = False
+    _VLC_IMPORT_ERROR = str(_e)
 
 
 class ApplicationCore(QObject):
@@ -358,10 +372,6 @@ class ApplicationCore(QObject):
         return self.link_source_manager.search_channel(
             channel_name, s, config=self.config)
 
-    
-    
-    
-
     def add_to_blacklist(self, name: str, tvg_id: str = "") -> bool:
         r = self.blacklist_manager.add_channel(name, tvg_id)
         if r:
@@ -451,7 +461,6 @@ class ApplicationCore(QObject):
         ttl = int(self.config.get('check_result_cache_ttl_hours',
                                     CHECK_RESULT_CACHE_TTL_HOURS))
         return self.cache_manager.get_check_result(name, url, ttl)
-
 
 class ChannelTableModel(QAbstractTableModel):
     HEADERS = ["№", "Название", "Группа", "TVG-ID", "Логотип", "Catchup", "URL"]
@@ -677,6 +686,8 @@ class ChannelTableModel(QAbstractTableModel):
             ch.link.url = new_value
             ch.link.has_url = bool(ch.link.url)
             ch.link.link_source = ""
+            ch.link.user_agent = ""
+            ch.link.extra_headers.clear()
             ch.status.reset()
             core.domain_user_agent_manager.apply_rules_to_channel(ch)
         else:
@@ -699,7 +710,6 @@ class ChannelTableModel(QAbstractTableModel):
             bot = self.index(len(self._filtered) - 1, self.columnCount() - 1)
             self.dataChanged.emit(top, bot)
 
-
 class _NumericItem(QTableWidgetItem):
     def __init__(self, value: int):
         super().__init__(str(value))
@@ -707,8 +717,6 @@ class _NumericItem(QTableWidgetItem):
         self.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
 
     def __lt__(self, other):
-        # v6.5: сравниваем числа с числами, строки со строками.
-        # Раньше смешанное сравнение давало '32' > '100'.
         if isinstance(other, _NumericItem):
             return self._value < other._value
         try:
@@ -716,7 +724,6 @@ class _NumericItem(QTableWidgetItem):
             return self._value < other_val
         except (ValueError, AttributeError):
             return super().__lt__(other)
-
 
 _META_CHECKS = (
     ('tvg_id',      lambda ch: bool(ch.meta.tvg_id)),
@@ -726,7 +733,6 @@ _META_CHECKS = (
                                     ch.meta.group != DEFAULT_GROUP)),
     ('user_agent',  lambda ch: bool(ch.link.user_agent)),
 )
-
 
 class PlaylistTab(QWidget):
     """
@@ -835,8 +841,6 @@ class PlaylistTab(QWidget):
         self.table.setColumnWidth(4, 150)
         self.table.setColumnWidth(5, 100)
 
-        # v6.5: сначала подключаем сигнал, потом ставим индикатор —
-        # но т.к. модель может быть ещё пустой, блокируем сигнал.
         h.blockSignals(True)
         h.setSortIndicator(0, Qt.SortOrder.AscendingOrder)
         h.blockSignals(False)
@@ -963,10 +967,6 @@ class PlaylistTab(QWidget):
             self.model.refresh_all()
         self.update_info()
 
-    
-    
-    
-
     def _load_file(self, filepath: str):
         self._loading = True
         self._suppress_state_save = True
@@ -1001,15 +1001,12 @@ class PlaylistTab(QWidget):
             source_name = os.path.basename(filepath)
             parsed = M3UParser.parse(content, source_name)
             if not parsed and self.header_manager.has_extm3u:
-                # v6.5: синхронный emit — не плодим лишний цикл
-                # событий Qt.
                 self.info_changed.emit(
                     "Файл содержит только заголовок, каналов нет")
             if not parsed and not self.header_manager.has_extm3u:
                 warn_box(self, "Файл не похож на M3U/M3U8 плейлист.\n"
                                "Загружено 0 каналов.")
 
-            
             apply_filters = bool(self.core.config.get(
                 'apply_filters_on_file_open', True))
             removed_by_bl = 0
@@ -1042,7 +1039,6 @@ class PlaylistTab(QWidget):
             else:
                 self.all_channels = parsed
 
-            
             try:
                 if self.core.domain_user_agent_manager.get_all_rules():
                     modified = self.core.apply_domain_user_agent(self.all_channels)
@@ -1051,7 +1047,6 @@ class PlaylistTab(QWidget):
             except Exception:
                 logger.exception("UA rules error")
 
-            
             if apply_filters and (removed_by_bl or cleaned_by_domain_bl):
                 info_box(
                     self,
@@ -1070,6 +1065,7 @@ class PlaylistTab(QWidget):
         except Exception as e:
             logger.exception("Load file error")
             self.all_channels = []
+            self.modified = False
             self.refresh_view()
             error_box(self, f"Не удалось загрузить:\n{e}")
         finally:
@@ -1207,6 +1203,15 @@ class PlaylistTab(QWidget):
     def _on_model_data_changed(self, top_left, bottom_right, roles=None):
         if self._suppress_state_save or self._loading:
             return
+        if roles is not None and all(
+                r in (Qt.ItemDataRole.DisplayRole,
+                      Qt.ItemDataRole.ForegroundRole,
+                      Qt.ItemDataRole.BackgroundRole,
+                      Qt.ItemDataRole.ToolTipRole,
+                      Qt.ItemDataRole.TextAlignmentRole)
+                for r in roles):
+            self.update_info()
+            return
         self.save_state("Правка ячейки")
         self.sync_to_core()
         self.update_info()
@@ -1221,6 +1226,8 @@ class PlaylistTab(QWidget):
         self._state_save_timer.start()
 
     def flush_pending_state(self):
+        if self._suppress_state_save:
+            return
         if self._state_save_timer.isActive():
             self._state_save_timer.stop()
         self._do_save_state()
@@ -1334,10 +1341,6 @@ class PlaylistTab(QWidget):
         if w is not None and _is_qobject_valid(w):
             w.set_action(f"▶ Воспроизведение: {ch.meta.name}")
 
-    
-    
-    
-
     def _check_selected_urls(self):
         if not self.selected_channels:
             info_box(self, "Не выбрано ни одного канала")
@@ -1419,12 +1422,8 @@ class PlaylistTab(QWidget):
         for ch in to_check:
             url_to_channels[ch.link.url].append(ch)
 
-        
-        
         affected_sources: Set[str] = set()
 
-        # v6.5: батчинг сохранений в url_status_cache —
-        # один executemany вместо тысяч INSERT-ов.
         pending_saves: List[Tuple[str, str, bool, float, str, Optional[int]]] = []
         pending_lock = threading.Lock()
         BATCH_SIZE = 100
@@ -1484,7 +1483,6 @@ class PlaylistTab(QWidget):
                 w2.show_progress(processed, total, text)
 
         def on_finished():
-            # v6.5: сохраняем остаток батча
             flush_pending_saves()
             if not _is_qobject_valid(self):
                 return
@@ -1724,18 +1722,12 @@ class PlaylistTab(QWidget):
             return 0
         
         self.flush_pending_state()
-        # v0.9.5 fix: не форсим _do_save_state() ДО мутации —
-        # иначе _pending_state_desc сбрасывается в "", и таймер
-        # сохраняет diff с пустым описанием. Правильный порядок:
-        # save_state() → мутация → таймер сам зафиксирует diff.
         self.save_state("Очистка ссылок по ЧС домен/IP")
         _, cleaned = self.core.apply_domain_blacklist_clean(
             self.all_channels)
         self.sync_to_core()
         with self._suppress_save():
             self.model.refresh_all()
-        # v6.5: update_info вызывается в _on_domain_blacklist_updated
-        # после цикла — не дублируем.
         return cleaned
 
     def _add_to_blacklist(self, row: int = -1):
@@ -2202,7 +2194,6 @@ class PlaylistTab(QWidget):
             info_box(self, "Нет каналов для замены.")
             return
 
-        
         if not self.core.link_source_manager.has_alive_index():
             reply = confirm_three(
                 self,
@@ -2316,7 +2307,6 @@ class PlaylistTab(QWidget):
         dlg = PlaylistHeaderDialog(self.header_manager, self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        # v0.9.4 fix: применяем изменения сюда, а не в диалоге.
         hm = dlg.header_manager
         changed = (
             old_snapshot.header_lines != hm.header_lines
@@ -2843,10 +2833,7 @@ class PlaylistTab(QWidget):
         with suppress(TypeError, RuntimeError):
             self.model.dataChanged.disconnect(self._on_model_data_changed)
 
-
 class MainWindow(QMainWindow):
-    # v0.9.5 fix: прогресс/результат фоновых задач
-    # приходят в GUI-поток только через сигналы.
     _bg_progress = pyqtSignal(int, int, str)
     _bg_export_done = pyqtSignal(int, int)
     _bg_export_failed = pyqtSignal(str)
@@ -2875,7 +2862,6 @@ class MainWindow(QMainWindow):
         self._setup_menu()
         self._setup_toolbar()
         self._setup_statusbar()
-        # v0.9.5 fix: единая точка входа для фонового прогресса.
         self._bg_progress.connect(self.show_progress)
         self._bg_export_done.connect(self._on_stable_export_done)
         self._bg_export_failed.connect(self._on_stable_export_failed)
@@ -2910,8 +2896,6 @@ class MainWindow(QMainWindow):
             filtered, removed = self.core.apply_blacklist_to_channels(
                 tab.all_channels)
             if removed > 0:
-                # v0.9.5 fix: фиксируем undo-снимок ДО мутации,
-                # чтобы удаление по ЧС каналов откатывалось Ctrl+Z.
                 tab.flush_pending_state()
                 tab.save_state("Применение чёрного списка каналов")
                 tab.all_channels = filtered
@@ -3058,9 +3042,6 @@ class MainWindow(QMainWindow):
         cm.addSeparator()
         self._add_action(cm, "Удалить метаданные...", self._remove_metadata)
 
-        
-        
-        
         lm = mb.addMenu("Ссылки")
         self._add_action(lm, "Проверить все ссылки",
                          lambda: self._with_tab('check_all_urls'))
@@ -3413,7 +3394,6 @@ class MainWindow(QMainWindow):
 
         self.set_action("⏳ Загрузка из источников...")
         sources_to_load = sorted(sources, key=lambda s: s.priority)
-        # v0.9.4 fix: stop_token + weakref, чтобы не emit после close.
         _stop = _StopToken()
         self._playlist_creation_stop = _stop
         win_ref = weakref.ref(self)
@@ -3502,7 +3482,7 @@ class MainWindow(QMainWindow):
         tab = PlaylistTab(parent_window=self)
         tab.all_channels = channels
         tab.undo_manager.reset(tab.all_channels)
-        tab.modified = False
+        tab.modified = True
 
         idx = self.tab_widget.addTab(tab, "Из источников")
         self.tabs[tab] = tab
@@ -3572,7 +3552,7 @@ class MainWindow(QMainWindow):
             if not tab.modified:
                 continue
             if not tab.filepath:
-                default = "playlist.m3u"
+                default = f"playlist_{tab.tab_id[:6]}.m3u"
                 fp = save_file_dialog(self, f"Сохранить '{tab.filepath or 'Безымянный'}'",
                                       default, M3U_FILTER, ".m3u")
                 if not fp:
@@ -3595,10 +3575,6 @@ class MainWindow(QMainWindow):
             return
         tab = self.current_tab
 
-        # v0.9.5 fix: НИКАКИХ прямых вызовов GUI из фонового потока.
-        # Прогресс и результат — только через Qt-сигналы (Qt сам
-        # маршалит их в GUI-поток). QTimer.singleShot из чужого
-        # потока тоже небезопасен — используем сигналы.
         win_ref = weakref.ref(self)
         tab_ref = weakref.ref(tab)
 
@@ -3705,7 +3681,8 @@ class MainWindow(QMainWindow):
             if w in self.tabs:
                 self.current_tab = self.tabs[w]
                 self.current_tab.set_search_text(self.search_edit.text())
-                self.current_tab.set_group_filter(self.group_combo.currentText())
+                grp = self.group_combo.currentText() or GROUP_FILTER_ALL
+                self.current_tab.set_group_filter(grp)
                 self._update_window_title()
                 self._update_groups()
                 self.current_tab.update_info()
@@ -3939,8 +3916,8 @@ class MainWindow(QMainWindow):
         f.setPointSize(new_size)
         self.current_tab.table.setFont(f)
         self.core.config.set('cell_font_size', new_size)
-        self.core.config.save()
-        # v0.9.4 fix: применить ко всем открытым табам
+        if int(self.core.config.get('cell_font_size', 0)) != new_size:
+            self.core.config.save()
         self._apply_config()
 
     def _disconnect_app_signals(self):
@@ -3963,6 +3940,10 @@ class MainWindow(QMainWindow):
                 self._handle_playlist_creation_error)
 
     def closeEvent(self, event):
+        _stop = getattr(self, '_playlist_creation_stop', None)
+        if _stop is not None:
+            with suppress(Exception):
+                _stop.set()
         for ref in list(self._open_dialogs):
             dlg = ref()
             if dlg is None:
@@ -3971,7 +3952,6 @@ class MainWindow(QMainWindow):
                 if isinstance(dlg, LinkSourceManagerDialog):
                     if (dlg._refresh_worker
                             and dlg._refresh_worker.isRunning()):
-                        # v6.3: было 2000 — мало для 32 потоков
                         with suppress(Exception):
                             dlg._refresh_worker.stop()
                         dlg._refresh_worker.wait(10000)
@@ -4012,14 +3992,10 @@ class MainWindow(QMainWindow):
         self._save_settings()
         super().closeEvent(event)
 
-        # v6.3: принудительно завершаем QApplication —
-        # в v6.2 этот патч не применился (было 4 пустые
-        # строки вместо 2).
         with suppress(Exception):
             _app = QApplication.instance()
             if _app is not None:
                 _app.quit()
-
 
 def parse_cli_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
@@ -4045,14 +4021,12 @@ def parse_cli_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                    version=f"Ksenia {APP_VERSION}")
     return p.parse_args(argv)
 
-
 def run_cli(args: argparse.Namespace) -> int:
     """
     CLI-режим. Осознанное исключение из архитектуры «одна задача — одна
     утилита»: для headless-режима используется собственная логика проверки
     (find_url), т.к. GUI-воркеры недоступны.
     """
-    # v0.9.4 fix: headless-режим не должен требовать GUI.
     _qcore = QCoreApplication.instance() or QCoreApplication(sys.argv)
     core = ApplicationCore.instance()
 
@@ -4088,7 +4062,6 @@ def run_cli(args: argparse.Namespace) -> int:
                 sources.append(src)
             else:
                 skipped_sources += 1
-    # v0.9.4 fix: не молчим про отфильтрованные источники.
     if skipped_sources:
         print(f"[i] Пропущено источников (пустое имя или "
               f"enabled=false): {skipped_sources}", file=sys.stderr)
@@ -4200,9 +4173,7 @@ def run_cli(args: argparse.Namespace) -> int:
 
     return 0
 
-
 def main():
-    # v0.9.4 fix: определяем headless строго через argparse.
     import argparse as _argparse
     _parser = _argparse.ArgumentParser(add_help=False)
     _parser.add_argument('--headless', action='store_true')
@@ -4217,7 +4188,6 @@ def main():
             rc = 1
         sys.exit(rc)
 
-    # v0.9.4 fix: не пускаем CLI-аргументы в Qt
     app = QApplication([sys.argv[0]])
     app.setApplicationName(f"Ksenia M3U Editor {APP_VERSION}")
     app.setOrganizationName("Ksenia")
@@ -4226,12 +4196,8 @@ def main():
     window = MainWindow()
     window.show()
     rc = app.exec()
-    # v6.2: страховочный watchdog — если после возврата из exec()
-    # остались живые QThread-воркеры (фоновая проверка URL),
-    # интерпретатор повиснет. Даём 5 секунд и жёстко выходим.
     _install_exit_watchdog()
     sys.exit(rc)
-
 
 def _install_signal_handlers(app: QApplication):
     def handler(signum, frame):
@@ -4241,7 +4207,6 @@ def _install_signal_handlers(app: QApplication):
     for sig in (signal.SIGINT, signal.SIGTERM):
         with suppress(ValueError, OSError):
             signal.signal(sig, handler)
-
 
 def _install_exit_watchdog():
     """v6.3: если Qt не завершил QThread-воркеры за 3 секунды
@@ -4256,14 +4221,8 @@ def _install_exit_watchdog():
     def _watchdog():
         # Ждём 3 секунды; если главный поток ещё жив — выходим.
         _t.Event().wait(3.0)
-        logger.warning("[watchdog] Принудительное завершение (sys.exit)")
-        try:
-            sys.exit(1)
-        except SystemExit:
-            pass
-        # Если sys.exit не помог — даём ещё секунду и жёсткий exit.
-        _t.Event().wait(1.0)
-        logger.warning("[watchdog] os._exit(0) — жёсткий выход")
+        logger.warning(
+            "[watchdog] Принудительное завершение (os._exit)")
         os._exit(0)
 
     _t.Thread(target=_watchdog, daemon=True,

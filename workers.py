@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
-from .constants import (URL_CHECK_MAX_WORKERS, VLC_DEFAULT_CHECK_TIMEOUT,
+from constants import (URL_CHECK_MAX_WORKERS, VLC_DEFAULT_CHECK_TIMEOUT,
     StatusText, CHECK_RESULT_CACHE_TTL_HOURS, SOURCE_CHECK_WORKERS_DEFAULT,
     SOURCE_CHECK_TIMEOUT_DEFAULT, SOURCE_CHECK_TRUST_SEC_DEFAULT,
     SOURCE_CHECK_BATCH_SIZE_DEFAULT, REPLACEMENT_MAX_WORKERS_DEFAULT,
@@ -18,13 +18,12 @@ from .constants import (URL_CHECK_MAX_WORKERS, VLC_DEFAULT_CHECK_TIMEOUT,
     EPG_FUZZY_THRESHOLD_DEFAULT, EPG_FUZZY_MIN_LENGTH_DEFAULT,
     EPG_FUZZY_MIN_GAP_DEFAULT, STREAMING_PROTOCOLS,
     EPG_SOURCE_TIMEOUT_SEC)
-from .models import ChannelData, LinkQuality
-from .paths import logger
-from .utils import URLUtils, _StopToken, cancelled
-from .config import Config, LinkReplacementSettings
-from .sources import LinkSource, LinkSourceManager
-from .epg import EPGDatabase
-
+from models import ChannelData, LinkQuality
+from paths import logger
+from utils import URLUtils, _StopToken, cancelled
+from config import Config, LinkReplacementSettings
+from sources import LinkSource, LinkSourceManager
+from epg import EPGDatabase
 
 class BaseWorker(QThread):
     progress = pyqtSignal(int, int, str)
@@ -64,7 +63,6 @@ class BaseWorker(QThread):
                 except TypeError:
                     with suppress(Exception):
                         ex.shutdown(wait=False)
-
 
 class URLCheckerWorker(BaseWorker):
     """
@@ -174,7 +172,6 @@ class URLCheckerWorker(BaseWorker):
                     'quality': LinkQuality.NOT_WORKING,
                     'url': url, 'status_code': None}
 
-
 class LinkReplacementWorker(BaseWorker):
     """
     v0.9.4: автозамена РАБОТАЕТ ТОЛЬКО ИЗ КЭША.
@@ -198,7 +195,7 @@ class LinkReplacementWorker(BaseWorker):
         self.config = config
         self.max_workers = max(1, min(int(max_workers), 8))
         try:
-            from .ksenia_window import ApplicationCore
+            from ksenia_window import ApplicationCore
             self._core = ApplicationCore.instance()
         except Exception:
             self._core = None
@@ -323,6 +320,12 @@ class LinkReplacementWorker(BaseWorker):
     def _filter_urls_by_cache(self, urls: List[str],
                               name_lower: str
                               ) -> Tuple[List[str], List[str]]:
+        """
+        v0.1 fix: явная семантика.
+          trusted — свежие живые URL из кэша (0 сети).
+          unknown — всё остальное: нет кэша, кэш протух,
+                    или URL свежий но мёртвый (тоже не проверяем).
+        """
         trusted: List[str] = []
         unknown: List[str] = []
         trust_sec = 3600
@@ -335,16 +338,18 @@ class LinkReplacementWorker(BaseWorker):
                 unknown.append(u)
                 continue
             cached = core.get_cached_check_result(name_lower, u)
-            if cached:
-                age = now - float(cached.get('last_check') or 0)
-                if age < trust_sec:
-                    if cached.get('alive'):
-                        trusted.append(u)
-                        continue
-                    else:
-                        
-                        continue
-            unknown.append(u)
+            if not cached:
+                unknown.append(u)
+                continue
+            age = now - float(cached.get('last_check') or 0)
+            if age >= trust_sec:
+                unknown.append(u)
+                continue
+            # Кэш свежий.
+            if cached.get('alive'):
+                trusted.append(u)
+            # else: свежий мёртвый — молча пропускаем,
+            # в unknown не кладём, чтобы не проверять сетью.
         return trusted, unknown
 
     def _find_replacement(self, channel: ChannelData) -> Optional[str]:
@@ -359,7 +364,6 @@ class LinkReplacementWorker(BaseWorker):
             name_lower = channel.meta.name.lower()
             max_urls = s.get_max_urls_per_channel()
 
-            
             try:
                 alive_urls = self.source_manager.get_alive_urls(
                     channel.meta.name, s, limit=max_urls)
@@ -379,7 +383,6 @@ class LinkReplacementWorker(BaseWorker):
                         f"elapsed={time.perf_counter() - t0:.3f}s")
                     return url
 
-            
             alt_urls = [a for a in channel.link.alternative_urls
                         if a and a.strip()
                         and not s.is_blacklisted(a)
@@ -410,7 +413,6 @@ class LinkReplacementWorker(BaseWorker):
 
             all_urls = all_urls[:max_urls]
 
-            
             trusted, unknown = self._filter_urls_by_cache(
                 all_urls, name_lower)
 
@@ -424,7 +426,6 @@ class LinkReplacementWorker(BaseWorker):
                         f"elapsed={time.perf_counter() - t0:.3f}s")
                     return u
 
-            
             logger.info(
                 f"[REPL] {channel.meta.name}: urls={len(all_urls)}, "
                 f"trusted={len(trusted)}, unknown={len(unknown)}, "
@@ -434,7 +435,6 @@ class LinkReplacementWorker(BaseWorker):
         except Exception:
             logger.exception(f"Ошибка поиска замены {channel.meta.name}")
             return None
-
 
 class SourceUrlCheckWorker(BaseWorker):
     """
@@ -457,8 +457,6 @@ class SourceUrlCheckWorker(BaseWorker):
         stop_token: Optional['_StopToken'] = None,
     ):
         super().__init__()
-        # v6.2: пробрасываем внешний stop_token от родителя,
-        # чтобы SourcesRefreshWorker мог остановить вложенные воркеры.
         if stop_token is not None:
             self._stop_token = stop_token
         self.source_name = source_name
@@ -480,12 +478,14 @@ class SourceUrlCheckWorker(BaseWorker):
     def _prepare_filters(self):
         """Кэш ЧС каналов/доменов + is_filtered_domain."""
         try:
-            from .ksenia_window import ApplicationCore
+            from ksenia_window import ApplicationCore
             core = ApplicationCore.instance()
         except Exception:
             self._settings = None
             return
         self._settings = core.get_replacement_settings()
+        if self._settings is None:
+            self._settings = core.link_replacement_settings
         try:
             bl = core.blacklist_manager.get_all()
             for bi in bl:
@@ -528,10 +528,8 @@ class SourceUrlCheckWorker(BaseWorker):
                 self.source_check_done.emit(self.source_name, 0, 0)
                 return
 
-            
             self._prepare_filters()
 
-            
             fresh: Dict[Tuple[str, str], Dict[str, Any]] = {}
             pairs: List[Tuple[str, str]] = []
             passed: List[ChannelData] = []
@@ -581,10 +579,11 @@ class SourceUrlCheckWorker(BaseWorker):
                     self.source_name, working, total)
                 return
 
-            
             lock = threading.Lock()
             pending: List[Tuple[str, str, bool, float, str, Optional[int]]] = []
             pending_lock = threading.Lock()
+            last_channel_emit = [0]
+            CHANNEL_EMIT_EVERY = 3
 
             def flush_batch(items):
                 if not items:
@@ -621,16 +620,12 @@ class SourceUrlCheckWorker(BaseWorker):
                     logger.exception(
                         f"SourceUrlCheckWorker check {url[:80]}")
                     ok, rt, msg, code = False, 0.0, "exception", None
-                # v6.2: если нас остановили, пока шёл сетевой запрос —
-                # не пишем результат, не эмитим сигнал, выходим
                 if self.is_stopped():
                     return
                 with lock:
                     checked += 1
                     if ok is True:
                         working += 1
-                # v0.9.4 fix: пишем результат в объект канала,
-                
                 with suppress(Exception):
                     ch.status.url_status = ok
                     ch.status.url_check_time = datetime.now()
@@ -647,9 +642,6 @@ class SourceUrlCheckWorker(BaseWorker):
                         url, code, '' if ok else (msg or ''))
                     ch.status.status_text = st_txt
                     object.__setattr__(ch, 'modified_date', datetime.now())
-                # v6.6: ограничиваем частоту channel_checked —
-                # иначе очередь событий GUI-потока забивается
-                # (32 воркера × тысячи каналов).
                 _should_emit = False
                 with lock:
                     _cur = checked
@@ -680,10 +672,6 @@ class SourceUrlCheckWorker(BaseWorker):
                 if batch:
                     flush_batch(batch)
 
-            # v6.6: счётчик для ограничения частоты channel_checked
-            last_channel_emit = [0]
-            CHANNEL_EMIT_EVERY = 3
-
             executor = concurrent.futures.ThreadPoolExecutor(
                 max_workers=self.max_workers,
                 thread_name_prefix=f"srcchk-{self.source_name[:16]}",
@@ -691,7 +679,6 @@ class SourceUrlCheckWorker(BaseWorker):
             try:
                 futures = [executor.submit(check_one, ch)
                            for ch in to_check]
-                # v6.0: эмитим каждые 5 проверок — «живой» прогресс
                 last_emit_count = 0
                 for fut in concurrent.futures.as_completed(futures):
                     if self.is_stopped():
@@ -724,7 +711,6 @@ class SourceUrlCheckWorker(BaseWorker):
         finally:
             self.worker_done.emit()
 
-
 class SourcesRefreshWorker(BaseWorker):
     """
     v0.9.4: объединённое «Обновить всё».
@@ -742,11 +728,9 @@ class SourcesRefreshWorker(BaseWorker):
         self.manager = manager
         self.config = config
         self.check_urls = bool(check_urls)
-        # v6.2: список вложенных SourceUrlCheckWorker
         self._child_workers: List['SourceUrlCheckWorker'] = []
 
     def stop(self):
-        # v6.2: останавливаем и родителя, и вложенные воркеры
         super().stop()
         for w in getattr(self, '_child_workers', []):
             with suppress(Exception):
@@ -762,7 +746,6 @@ class SourcesRefreshWorker(BaseWorker):
                 self.all_done.emit(0, 0)
                 return
 
-            
             loaded: List[Tuple[LinkSource, List[ChannelData]]] = []
             for cnt, src, chs in self._run_in_pool(
                     self.sources, self._load_one,
@@ -782,7 +765,6 @@ class SourcesRefreshWorker(BaseWorker):
                 self.all_done.emit(success, total)
                 return
 
-            
             max_workers = int(self.config.get(
                 'source_check_workers', SOURCE_CHECK_WORKERS_DEFAULT))
             timeout = int(self.config.get(
@@ -806,18 +788,14 @@ class SourcesRefreshWorker(BaseWorker):
                     timeout=timeout,
                     trust_sec=trust_sec,
                     batch_size=batch_size,
-                    # v6.2: общий stop_token для мгновенной остановки
                     stop_token=self._stop_token,
                 )
                 w.source_check_done.connect(self._on_source_check_done)
-                # v6.6: DirectConnection — сигнал не копится
-                # в очереди GUI-потока, доставляется сразу.
                 w.channel_checked.connect(
                     lambda n, ok_, m, s=src.name:
                         self.channel_checked.emit(s, n, ok_, m),
                     Qt.ConnectionType.DirectConnection)
                 workers.append(w)
-            # v6.2: держим ссылку на воркеры для остановки извне
             self._child_workers = workers
 
             for w in workers:
@@ -825,7 +803,6 @@ class SourcesRefreshWorker(BaseWorker):
                     break
                 w.start()
 
-            
             while any(w.isRunning() for w in workers):
                 if self.is_stopped():
                     for w in workers:
@@ -838,7 +815,6 @@ class SourcesRefreshWorker(BaseWorker):
                 with suppress(Exception):
                     w.wait(5000)
 
-            
             for src, _chs in loaded:
                 if self.is_stopped():
                     break
@@ -855,6 +831,7 @@ class SourcesRefreshWorker(BaseWorker):
             with suppress(Exception):
                 self.all_done.emit(success, total)
         finally:
+            self._child_workers = []
             self.worker_done.emit()
 
     def _load_one(self, source: LinkSource):
@@ -876,7 +853,6 @@ class SourcesRefreshWorker(BaseWorker):
             logger.exception("update_source_health")
         with suppress(Exception):
             self.source_checked.emit(name, working, total)
-
 
 class EPGLoaderWorker(BaseWorker):
     epg_loaded = pyqtSignal(int, list)
@@ -901,7 +877,6 @@ class EPGLoaderWorker(BaseWorker):
             self.error.emit(f"Ошибка EPG: {e}")
         finally:
             self.worker_done.emit()
-
 
 class EPGMetadataApplyWorker(BaseWorker):
     applied = pyqtSignal(int, list)

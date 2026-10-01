@@ -8,7 +8,7 @@ import copy
 import threading
 from contextlib import suppress
 from typing import Any, Dict, Optional
-from .constants import (URL_CHECK_MAX_WORKERS, FALLBACK_DAYS_DEFAULT,
+from constants import (URL_CHECK_MAX_WORKERS, FALLBACK_DAYS_DEFAULT,
     EPG_CACHE_TTL_HOURS, CHECK_RESULT_CACHE_TTL_HOURS,
     EPG_FUZZY_ENABLED_DEFAULT, EPG_FUZZY_THRESHOLD_DEFAULT,
     EPG_FUZZY_MIN_LENGTH_DEFAULT, EPG_FUZZY_MIN_GAP_DEFAULT,
@@ -16,8 +16,7 @@ from .constants import (URL_CHECK_MAX_WORKERS, FALLBACK_DAYS_DEFAULT,
     SOURCE_CHECK_TRUST_SEC_DEFAULT, SOURCE_CHECK_WORKERS_DEFAULT,
     SOURCE_CHECK_TIMEOUT_DEFAULT, SOURCE_CHECK_BATCH_SIZE_DEFAULT,
     DEFAULT_TIMEOUT)
-from .paths import Paths, logger
-
+from paths import Paths, logger
 
 class Config:
     DEFAULT = {
@@ -93,9 +92,6 @@ class Config:
             os.makedirs(config_dir, exist_ok=True)
             config_path = os.path.join(config_dir, "editor_config.json")
         self.config_path = config_path
-        # v0.1: deepcopy — иначе мутабельные значения
-        # (temporary_domains, unsafe_domains) — общий объект
-        # с Config.DEFAULT.
         self.config: Dict[str, Any] = copy.deepcopy(self.DEFAULT)
         self._lock = threading.RLock()
         self._types: Dict[str, type] = _build_config_types(self.DEFAULT)
@@ -179,7 +175,6 @@ class Config:
         with self._lock:
             self.config.update(values)
 
-
 def _build_config_types(default: Dict[str, Any]) -> Dict[str, type]:
     types: Dict[str, type] = {}
     for k, v in default.items():
@@ -196,7 +191,6 @@ def _build_config_types(default: Dict[str, Any]) -> Dict[str, type]:
         else:
             types[k] = type(v)
     return types
-
 
 class LinkReplacementSettings:
     __slots__ = ('_config',)
@@ -220,7 +214,7 @@ class LinkReplacementSettings:
         if not self.use_ip_filtering or not url:
             return False
         try:
-            from .ksenia_window import ApplicationCore
+            from ksenia_window import ApplicationCore
             core = ApplicationCore.instance()
             return core.domain_blacklist_manager.matches_url(url)
         except Exception:

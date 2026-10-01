@@ -23,7 +23,7 @@ from PyQt6.QtWidgets import (QDialog, QDialogButtonBox, QVBoxLayout,
     QProgressBar, QFrame, QTextEdit, QPlainTextEdit, QInputDialog,
     QStyle, QMenu, QSlider, QApplication,
     QWidget, QTabWidget)
-from .constants import (OK_CANCEL_BB, CLOSE_BB, YES_NO, M3U_FILTER,
+from constants import (OK_CANCEL_BB, CLOSE_BB, YES_NO, M3U_FILTER,
     JSON_FILTER, CSV_FILTER, ALL_FILTER, DEFAULT_GROUP,
     GROUP_FILTER_ALL, THEME_ICON_NEGATIVE_TTL_SEC,
     DUPLICATE_DIALOG_MAX_ROWS, APP_VERSION, DONATION_WALLET,
@@ -34,29 +34,24 @@ from .constants import (OK_CANCEL_BB, CLOSE_BB, YES_NO, M3U_FILTER,
     CHECK_RESULT_CACHE_TTL_HOURS, EPG_CACHE_TTL_HOURS,
     REPLACEMENT_MAX_WORKERS_DEFAULT,
     URL_CHECK_MAX_WORKERS, VLC_DEFAULT_CHECK_TIMEOUT)
-from .models import ChannelData
-from .paths import (logger, error_box, warn_box, info_box, confirm,
+from models import ChannelData
+from paths import (logger, error_box, warn_box, info_box, confirm,
     confirm_three, open_file_dialog, save_file_dialog, open_dir_dialog,
     open_external)
-from .utils import URLUtils
-from .config import Config
-from .sources import LinkSource, LinkSourceManager
-from .blacklists import (DomainUserAgentManager, DomainBlacklistRule, DomainUserAgentRule)
-from .undo import SimpleDuplicateFinder
-from .parsers import M3UParser
-from .workers import SourcesRefreshWorker
+from utils import URLUtils
+from config import Config
+from sources import LinkSource, LinkSourceManager
+from blacklists import (DomainUserAgentManager, DomainBlacklistRule, DomainUserAgentRule)
+from undo import SimpleDuplicateFinder
+from parsers import M3UParser
+from workers import SourcesRefreshWorker
 
-
-# v0.9.5 fix: _HAS_SHIBOKEN использовался в _is_qobject_valid,
-# но нигде не определялся — первый же вызов с непустым obj
-# падал с NameError.
 try:
     import shiboken6
     _HAS_SHIBOKEN = True
 except ImportError:
     shiboken6 = None
     _HAS_SHIBOKEN = False
-
 
 def _is_qobject_valid(obj) -> bool:
     if obj is None:
@@ -68,7 +63,6 @@ def _is_qobject_valid(obj) -> bool:
     except Exception:
         return False
 
-
 def _is_gui_thread() -> bool:
     app = QApplication.instance()
     if app is None:
@@ -77,7 +71,6 @@ def _is_gui_thread() -> bool:
         return QThread.currentThread() is app.thread()
     except Exception:
         return True
-
 
 class IconProvider:
     _icons_enabled: bool = True
@@ -165,9 +158,8 @@ class IconProvider:
             cls._theme_available_cache.clear()
             cls._style = None
 
-
 class _NumericItem(QTableWidgetItem):
-    """Локальная копия — используется в LinkSourceManagerDialog."""
+    """QTableWidgetItem с числовым сравнением для сортировки."""
     def __init__(self, value: int):
         super().__init__(str(value))
         self._value = int(value)
@@ -207,7 +199,6 @@ class BaseDialog(QDialog):
         self.root.addWidget(bb)
         return bb
 
-
 def make_table(headers: List[str], parent=None, *,
                stretch_last: bool = True,
                select_rows: bool = True,
@@ -228,7 +219,6 @@ def make_table(headers: List[str], parent=None, *,
         t.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
     return t
 
-
 def make_action(parent, text: str, slot: Callable,
                 shortcut: str = "", icon: Optional[QIcon] = None,
                 tooltip: str = "") -> QAction:
@@ -243,7 +233,6 @@ def make_action(parent, text: str, slot: Callable,
     a.triggered.connect(lambda checked=False, _slot=slot: _slot())
     return a
 
-
 def fill_channels_table(table: QTableWidget,
                         channels: List['ChannelData'],
                         max_url: int = 120):
@@ -254,13 +243,11 @@ def fill_channels_table(table: QTableWidget,
         table.setItem(i, 2,
                       QTableWidgetItem((ch.link.url or "")[:max_url]))
 
-
 def make_form(rows: List[Tuple[str, QWidget]]) -> QFormLayout:
     f = QFormLayout()
     for label, widget in rows:
         f.addRow(label, widget)
     return f
-
 
 def json_import_dialog(parent, title: str,
                        on_items: Callable[[list], int]) -> Optional[int]:
@@ -285,7 +272,6 @@ def json_import_dialog(parent, title: str,
         error_box(parent, f"Ошибка при обработке:\n{e}")
         return None
 
-
 def json_export_dialog(parent, title: str, default_name: str,
                        items: list) -> bool:
     fp = save_file_dialog(parent, title, default_name, JSON_FILTER)
@@ -298,7 +284,6 @@ def json_export_dialog(parent, title: str, default_name: str,
     except Exception as e:
         error_box(parent, str(e))
         return False
-
 
 class SupportDialog(BaseDialog):
     def __init__(self, parent=None):
@@ -327,7 +312,6 @@ class SupportDialog(BaseDialog):
         wallet_label.setTextFormat(Qt.TextFormat.RichText)
         layout.addWidget(wallet_label)
         self.add_close()
-
 
 class HelpDialog(BaseDialog):
     def __init__(self, parent=None):
@@ -436,7 +420,6 @@ class HelpDialog(BaseDialog):
         lbl.setOpenExternalLinks(True)
         return lbl
 
-
 class M3USyntaxHighlighter(QSyntaxHighlighter):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -472,14 +455,12 @@ class M3USyntaxHighlighter(QSyntaxHighlighter):
             for m in pattern.finditer(text):
                 self.setFormat(m.start(), m.end() - m.start(), fmt)
 
-
 class EnhancedTextEdit(QPlainTextEdit):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFont(QFont("Courier New", 10))
         self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self.highlighter = M3USyntaxHighlighter(self.document())
-
 
 class PlaylistHeaderDialog(BaseDialog):
     def __init__(self, header_manager: 'PlaylistHeaderManager', parent=None):
@@ -523,8 +504,6 @@ class PlaylistHeaderDialog(BaseDialog):
         layout.addWidget(cg)
 
         pg = QGroupBox("Предпросмотр"); pl = QVBoxLayout(pg)
-        # v0.9.4 fix: подсветка #EXTINF здесь бессмысленна
-        
         self.preview_text = QPlainTextEdit()
         self.preview_text.setFont(QFont("Courier New", 10))
         self.preview_text.setMaximumHeight(100)
@@ -621,10 +600,7 @@ class PlaylistHeaderDialog(BaseDialog):
                for i in range(self.epg_list.count())]
         self.header_manager.update_epg_sources(epg)
         self.header_manager.set_playlist_name(self.playlist_name_edit.text())
-        # v6.5: не мутируем _original напрямую — вызывающий код
-        # сам скопирует нужные поля из header_manager.
         super().accept()
-
 
 class RemoveMetadataDialog(BaseDialog):
     def __init__(self, parent=None):
@@ -665,7 +641,6 @@ class RemoveMetadataDialog(BaseDialog):
     def get_scope(self) -> str:
         return {0: "current", 1: "selected", 2: "all"}.get(
             self._scope_group.checkedId(), "all")
-
 
 class MassEditDialog(BaseDialog):
     def __init__(self, count: int, parent=None):
@@ -715,7 +690,6 @@ class MassEditDialog(BaseDialog):
             warn_box(self, "Выберите хотя бы одно поле")
             return
         super().accept()
-
 
 class LinkReplacementSettingsDialog(BaseDialog):
     """
@@ -950,7 +924,7 @@ class LinkReplacementSettingsDialog(BaseDialog):
             w.setEnabled(bool(checked))
 
     def _open_domain_blacklist(self):
-        from .ksenia_window import ApplicationCore
+        from ksenia_window import ApplicationCore
         dlg = DomainBlacklistDialog(ApplicationCore.instance(), self)
         dlg.exec()
 
@@ -1071,7 +1045,6 @@ class LinkReplacementSettingsDialog(BaseDialog):
         self.config.save()
         super().accept()
 
-
 class DuplicateFinderDialog(BaseDialog):
     duplicates_removed = pyqtSignal(int)
 
@@ -1183,7 +1156,6 @@ class DuplicateFinderDialog(BaseDialog):
         self.duplicates_removed.emit(removed)
         self._update_stats()
         info_box(self, f"Удалено: {removed}", "Готово")
-
 
 class ComparePlaylistsDialog(BaseDialog):
     def __init__(self, current_channels: List[ChannelData], parent=None):
@@ -1330,7 +1302,6 @@ class ComparePlaylistsDialog(BaseDialog):
     def _fill_table(table: QTableWidget, channels: List[ChannelData]):
         fill_channels_table(table, channels, max_url=120)
 
-
 class BlockDomainDialog(BaseDialog):
     def __init__(self, value: str, all_channels: List[ChannelData],
                  parent=None):
@@ -1408,7 +1379,6 @@ class BlockDomainDialog(BaseDialog):
                 include,
                 self.note_edit.text().strip(),
                 list(self._current))
-
 
 class DomainBlacklistDialog(BaseDialog):
     def __init__(self, core: 'ApplicationCore', parent=None):
@@ -1539,7 +1509,6 @@ class DomainBlacklistDialog(BaseDialog):
         if json_export_dialog(self, "Экспорт ч.с. домен/IP",
                               "domain_blacklist.json", items):
             info_box(self, f"Сохранено правил: {len(items)}", "Экспорт")
-
 
 class LinkSourceEditDialog(BaseDialog):
     """
@@ -1673,7 +1642,6 @@ class LinkSourceEditDialog(BaseDialog):
         if self._validate():
             super().accept()
 
-
 class DomainUserAgentEditDialog(BaseDialog):
     def __init__(self, parent=None,
                  rule: Optional[DomainUserAgentRule] = None):
@@ -1714,7 +1682,6 @@ class DomainUserAgentEditDialog(BaseDialog):
             warn_box(self, "Введите домен")
             return
         super().accept()
-
 
 class DomainUserAgentDialog(BaseDialog):
     rules_updated = pyqtSignal()
@@ -1856,7 +1823,6 @@ class DomainUserAgentDialog(BaseDialog):
         else:
             info_box(self, "Изменений не требуется")
 
-
 class LinkSourceManagerDialog(BaseDialog):
     """
     v0.9.4: ОДНА кнопка «🔄 Обновить всё» вместо двух.
@@ -1969,7 +1935,6 @@ class LinkSourceManagerDialog(BaseDialog):
                       if s.last_updated else "Никогда")
                 self.sources_table.setItem(i, 6, QTableWidgetItem(dt))
 
-                # v6.5: столбцы «С URL» и «Без URL» удалены.
                 raw_total = (s.raw_total_links
                              if s.raw_total_links else s.total_links)
                 self.sources_table.setItem(i, 7, _NumericItem(raw_total))
@@ -2057,7 +2022,6 @@ class LinkSourceManagerDialog(BaseDialog):
             self._progress_bar.setFormat(f"{text} (%p%)")
             self._progress_bar.setVisible(True)
             self._progress_label.setText(text)
-            # v6.6: принудительная перерисовка прогресс-бара
             self._progress_bar.repaint()
             self._progress_label.repaint()
 
@@ -2065,19 +2029,15 @@ class LinkSourceManagerDialog(BaseDialog):
             self._progress_label.setText(
                 f"✓ Проверено [{name}]: {working}/{total}")
             self._progress_bar.setVisible(True)
-            # v6.6: force_redraw
             self._progress_label.repaint()
             self._progress_bar.repaint()
 
         def on_channel_checked(source, name, ok, msg):
-            # v6.6: «живой» прогресс по каналам
             mark = "✓" if ok else "✗"
             short = (name or "")[:60]
             self._progress_label.setText(
                 f"{mark} [{source[:20]}] {short}")
             self._channel_emit_counter += 1
-            if self._channel_emit_counter % 3 == 0:
-                QApplication.processEvents()
 
         def on_done(success, total):
             self._load_sources()
@@ -2100,11 +2060,7 @@ class LinkSourceManagerDialog(BaseDialog):
 
         self._refresh_worker.progress.connect(on_progress)
         self._refresh_worker.source_checked.connect(on_source_checked)
-        # v6.1: per-канальный прогресс
-        try:
-            self._refresh_worker.channel_checked.connect(on_channel_checked)
-        except AttributeError:
-            pass
+        self._refresh_worker.channel_checked.connect(on_channel_checked)
         self._refresh_worker.all_done.connect(on_done)
         self._refresh_worker.error.connect(on_error)
         self._progress_label.setText("⏳ Обновление...")
@@ -2138,16 +2094,12 @@ class LinkSourceManagerDialog(BaseDialog):
             info_box(self, f"Экспортировано {len(sources)}", "Успех")
 
     def closeEvent(self, event):
-        # v6.2: останавливаем родителя + вложенные воркеры,
-        # ждём до 10 секунд; даже если не завершились —
-        # MainWindow.closeEvent всё равно вызовет app.quit().
         if self._refresh_worker and self._refresh_worker.isRunning():
             with suppress(Exception):
                 self._refresh_worker.stop()
             self._refresh_worker.wait(10000)
         self._refresh_worker = None
         event.accept()
-
 
 class LinkSelectionDialog(BaseDialog):
     def __init__(self, channel_name: str, alts: List[ChannelData],
@@ -2170,7 +2122,7 @@ class LinkSelectionDialog(BaseDialog):
         h.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         h.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
         self.table.setRowCount(len(alts))
-        from .ksenia_window import ApplicationCore
+        from ksenia_window import ApplicationCore
         core = ApplicationCore.instance()
         for i, a in enumerate(alts):
             self.table.setItem(i, 0, QTableWidgetItem(a.link.link_source or "?"))
@@ -2206,7 +2158,6 @@ class LinkSelectionDialog(BaseDialog):
         if 0 <= self.selected_index < len(self.alts):
             return self.alts[self.selected_index]
         return None
-
 
 class BlacklistDialog(BaseDialog):
     def __init__(self, core: 'ApplicationCore', parent=None):
@@ -2285,7 +2236,6 @@ class BlacklistDialog(BaseDialog):
     def _export_bl(self):
         json_export_dialog(self, "Экспорт ч.с. каналов",
                            "blacklist.json", self.core.get_blacklist())
-
 
 class PlaylistFromSourcesDialog(BaseDialog):
     def __init__(self, core: 'ApplicationCore', parent=None):
@@ -2390,7 +2340,6 @@ class PlaylistFromSourcesDialog(BaseDialog):
             return
         super().accept()
 
-
 class GeneralSettingsDialog(BaseDialog):
     """
     v0.9.4: добавлен чекбокс apply_filters_on_file_open.
@@ -2430,7 +2379,6 @@ class GeneralSettingsDialog(BaseDialog):
             bool(c.get('dedup_by_name_use_tvg', False)))
         form.addRow(self.dedup_tvg_check)
 
-        
         self.apply_filters_on_open_check = QCheckBox(
             "Применять ЧС каналов и ЧС домен/IP при открытии файла")
         self.apply_filters_on_open_check.setChecked(
@@ -2518,7 +2466,6 @@ class GeneralSettingsDialog(BaseDialog):
         c.save()
         self.core.apply_auto_update_setting()
         self.core.settings_changed.emit()
-
 
 class CacheManagerDialog(BaseDialog):
     def __init__(self, core: 'ApplicationCore', parent=None):

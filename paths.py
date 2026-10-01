@@ -14,8 +14,7 @@ from typing import Optional, Callable
 from PyQt6.QtCore import QUrl
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import QFileDialog, QMessageBox
-from .constants import M3U_FILTER, JSON_FILTER, YES_NO
-
+from constants import M3U_FILTER, JSON_FILTER, YES_NO
 
 class Paths:
     @staticmethod
@@ -35,10 +34,8 @@ class Paths:
     def get_log_path() -> str:
         return os.path.join(Paths.get_config_dir(), "editor.log")
 
-
 _logging_initialized = False
 _logging_lock = threading.Lock()
-
 
 def _setup_logging():
     global _logging_initialized
@@ -66,26 +63,20 @@ def _setup_logging():
         _logging_initialized = True
     return logger_
 
-
 logger = _setup_logging()
-
 
 def error_box(parent, msg, title: str = "Ошибка"):
     QMessageBox.critical(parent, title, str(msg))
 
-
 def warn_box(parent, msg, title: str = "Предупреждение"):
     QMessageBox.warning(parent, title, str(msg))
-
 
 def info_box(parent, msg, title: str = "Информация"):
     QMessageBox.information(parent, title, str(msg))
 
-
 def confirm(parent, msg, title: str = "Подтверждение") -> bool:
     return QMessageBox.question(parent, title, msg, YES_NO) \
         == QMessageBox.StandardButton.Yes
-
 
 def confirm_three(parent, msg, title: str = "Подтверждение") -> str:
     r = QMessageBox.question(
@@ -97,13 +88,11 @@ def confirm_three(parent, msg, title: str = "Подтверждение") -> str
             QMessageBox.StandardButton.No: 'no',
             QMessageBox.StandardButton.Cancel: 'cancel'}.get(r, 'cancel')
 
-
 def open_file_dialog(parent, title: str = "Открыть",
                      filters: str = M3U_FILTER,
                      initial_dir: str = "") -> Optional[str]:
     fp, _ = QFileDialog.getOpenFileName(parent, title, initial_dir, filters)
     return fp or None
-
 
 def save_file_dialog(parent, title: str = "Сохранить",
                      default_name: str = "",
@@ -116,17 +105,14 @@ def save_file_dialog(parent, title: str = "Сохранить",
         fp += default_ext
     return fp
 
-
 def open_dir_dialog(parent, title: str = "Выбрать папку",
                     initial_dir: str = "") -> Optional[str]:
     d = QFileDialog.getExistingDirectory(parent, title, initial_dir)
     return d or None
 
-
 def open_external(url: str):
     if url:
         webbrowser.open(url)
-
 
 def open_in_os(path_or_url: str):
     if not path_or_url:
@@ -136,13 +122,16 @@ def open_in_os(path_or_url: str):
     else:
         QDesktopServices.openUrl(QUrl.fromLocalFile(path_or_url))
 
-
 def parse_datetime(s, fmt: str = "%Y-%m-%d %H:%M:%S") -> Optional[datetime]:
     if not s:
         return None
+    if isinstance(s, str):
+        iso = s[:-1] + "+00:00" if s.endswith("Z") else s
+    else:
+        return None
     for f in (fmt, None):
         try:
-            return datetime.strptime(s, f) if f else datetime.fromisoformat(s)
+            return datetime.strptime(s, f) if f else datetime.fromisoformat(iso)
         except (ValueError, TypeError):
             continue
     return None

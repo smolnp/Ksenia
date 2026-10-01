@@ -4,10 +4,9 @@
 from __future__ import annotations
 import re
 from typing import List, Dict, Optional
-from .constants import DEFAULT_GROUP
-from .models import ChannelData
-from .utils import ChannelNameNormalizer
-
+from constants import DEFAULT_GROUP
+from models import ChannelData
+from utils import ChannelNameNormalizer
 
 class M3UParser:
     _ATTR_RE = re.compile(
@@ -146,10 +145,6 @@ class M3UParser:
                 if nl.startswith('#'):
                     i += 1
                     continue
-                # v0.9.5 fix: URL не прогоняем через fix_encoding —
-                # процентное кодирование и UTF-8 в query могут
-                # пострадать. fix_encoding оставляем только для
-                # строк, не начинающихся со схемы.
                 if nl.startswith(('http://', 'https://', 'rtmp://',
                                    'rtsp://', 'udp://', 'tcp://',
                                    'rtp://', 'srt://', 'rist://')):
@@ -176,7 +171,6 @@ class M3UParser:
                 channels.append(channel)
 
         return channels
-
 
 class PlaylistHeaderManager:
     def __init__(self):

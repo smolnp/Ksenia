@@ -10,11 +10,10 @@ from difflib import SequenceMatcher
 from typing import Optional, Tuple, Set, Dict, Any
 from urllib.parse import urlparse
 import requests
-from .constants import (MAX_URL_LENGTH, STREAMING_PROTOCOLS, StatusText,
+from constants import (MAX_URL_LENGTH, STREAMING_PROTOCOLS, StatusText,
     ENABLE_HEAD_FOR_STREAMS, VLC_STREAM_CONTENT_TYPES,
     URL_CHECK_MAX_WORKERS, DEFAULT_TIMEOUT, VLC_DEFAULT_CHECK_TIMEOUT)
-from .paths import logger
-
+from paths import logger
 
 class ChannelNameNormalizer:
     QUALITY_PATTERNS = [
@@ -101,7 +100,6 @@ class ChannelNameNormalizer:
     def similarity(name1: str, name2: str) -> float:
         return SequenceMatcher(None, name1.lower(), name2.lower()).ratio()
 
-
 class _StopToken:
     __slots__ = ('_event',)
 
@@ -117,10 +115,8 @@ class _StopToken:
     def wait(self, timeout: float) -> bool:
         return self._event.wait(timeout)
 
-
 def cancelled(stop_token: Optional['_StopToken']) -> bool:
     return stop_token is not None and stop_token.is_set()
-
 
 class URLUtils:
     @staticmethod
@@ -221,7 +217,8 @@ class URLUtils:
         return f"⚠️ HTTP {status_code}", status_code
 
     @staticmethod
-    def _validate_url(url: str) -> Optional[str]:
+    def _url_error(url: str) -> Optional[str]:
+        """None = URL валиден. Строка = текст ошибки."""
         try:
             p = urlparse(url)
         except Exception as e:
@@ -234,6 +231,8 @@ class URLUtils:
             return f"Неподдерживаемый протокол: {p.scheme}"
         return None
 
+    _validate_url = _url_error
+
     @staticmethod
     def _is_stream_url(url: str) -> bool:
         if not url:
@@ -242,10 +241,7 @@ class URLUtils:
         return low.endswith(('.mpd', '.m3u8', '.m3u'))
 
     @staticmethod
-    def _read_first_chunk(response, chunk_size: int = 4096,
-                          wait: float = 0.15) -> bool:
-        # v6.0: НЕ ждём 1.5 сек — читаем один чанк сразу.
-        # Для IPTV-потоков достаточно факта «данные пошли».
+    def _read_first_chunk(response, chunk_size: int = 4096) -> bool:
         try:
             raw = response.raw
             if raw is None:
@@ -300,8 +296,6 @@ class URLUtils:
     def _vlc_get_request(session, url, timeout, verify, stop_token=None):
         if cancelled(stop_token):
             return False, None, "Отменено", None
-        # v6.3: HEAD не даёт проверить содержимое M3U8-плейлиста —
-        # для стримов идём сразу в GET, для остального — HEAD.
         if not ENABLE_HEAD_FOR_STREAMS and URLUtils._is_stream_url(url):
             head = None
         else:
@@ -334,7 +328,6 @@ class URLUtils:
                 if is_stream and ctype_is_stream:
                     return True, rt, f"HTTP {code} ({ctype.split(';')[0]})", code
 
-                # v6.1: параметр wait игнорируется, убран из вызова
                 got = URLUtils._read_first_chunk(
                     response, chunk_size=4096)
                 rt = time.time() - start
@@ -377,7 +370,7 @@ class URLUtils:
         if err:
             return False, None, err, None
 
-        from .sources import HttpSessionFactory
+        from sources import HttpSessionFactory
         session = HttpSessionFactory.get(verify_ssl=verify_ssl,
                                           pool_size=pool_size)
 
@@ -403,7 +396,6 @@ class URLUtils:
             return None, rt, msg, code
 
         return ok, rt, msg, code
-
 
 def link_score(channel: ChannelData, url: str,
                cached: Optional[Dict[str, Any]] = None) -> float:

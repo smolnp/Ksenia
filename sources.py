@@ -19,18 +19,17 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from difflib import SequenceMatcher
-from .config import Config, LinkReplacementSettings
-from .constants import (URL_CHECK_MAX_WORKERS, LOADED_CHANNELS_TTL_SEC,
+from config import Config, LinkReplacementSettings
+from constants import (URL_CHECK_MAX_WORKERS, LOADED_CHANNELS_TTL_SEC,
     MAX_LOADED_SOURCES, MAX_SOURCE_FILE_BYTES, SEARCH_WORKER_MAX,
     SOURCE_LOAD_TIMEOUT_SEC, FALLBACK_DAYS_DEFAULT, DEFAULT_TIMEOUT,
     CHECK_RESULT_CACHE_TTL_HOURS, ALIVE_INDEX_CACHE_MAX,
     VLC_USER_AGENT, StatusText)
-from .models import ChannelData
-from .parsers import M3UParser
-from .paths import logger, parse_datetime
-from .storage import BaseJsonStore
-from .utils import ChannelNameNormalizer, _StopToken, cancelled
-
+from models import ChannelData
+from parsers import M3UParser
+from paths import logger, parse_datetime
+from storage import BaseJsonStore
+from utils import ChannelNameNormalizer, _StopToken, cancelled
 
 class HttpSessionFactory:
     _local = threading.local()
@@ -82,8 +81,6 @@ class HttpSessionFactory:
             'Connection': 'keep-alive',
             'Icy-MetaData': '1',
         })
-        # v0.9.5 fix: собственный маркер размера пула.
-        # Публичного API для проверки pool_maxsize у HTTPAdapter нет.
         s._ksenia_pool_size = int(pool_size)
         return s
 
@@ -105,9 +102,6 @@ class HttpSessionFactory:
             with cls._all_sessions_lock:
                 cls._all_sessions.append(weakref.ref(s))
         else:
-            # v0.9.5 fix: используем собственный маркер
-            # _ksenia_pool_size вместо приватного HTTPAdapter._pool_maxsize
-            # (публичного API нет, между версиями requests меняется).
             cur_pool = int(getattr(s, '_ksenia_pool_size', 0) or 0)
             if int(pool_size) > cur_pool:
                 with suppress(Exception):
@@ -117,7 +111,6 @@ class HttpSessionFactory:
                 with cls._all_sessions_lock:
                     cls._all_sessions.append(weakref.ref(s))
         return s
-
 
 class LinkSource:
     """
@@ -240,7 +233,6 @@ class LinkSource:
                 data.get('raw_total_with_url', s.total_with_url) or 0)
         return s
 
-
 class LinkSourceManager:
     """
     P4': _name_index для search_type='exact'.
@@ -307,8 +299,6 @@ class LinkSourceManager:
                 if s.name == source.name:
                     return False
             self._sources.append(source)
-            # v6.5: сбрасываем кэш живых URL, иначе get_alive_urls
-            # не увидит новый источник.
             self._alive_index_cache.clear()
         return self._persist()
 
@@ -409,7 +399,7 @@ class LinkSourceManager:
     def _post_process_channels(channels: List[ChannelData],
                                source: LinkSource) -> List[ChannelData]:
         try:
-            from .ksenia_window import ApplicationCore
+            from ksenia_window import ApplicationCore
             core = ApplicationCore.instance()
         except Exception:
             core = None
@@ -439,9 +429,8 @@ class LinkSourceManager:
             if norm:
                 index[norm].append(ch)
 
-        
         try:
-            from .ksenia_window import ApplicationCore
+            from ksenia_window import ApplicationCore
             settings = ApplicationCore.instance().get_replacement_settings()
         except Exception:
             settings = None
@@ -491,10 +480,6 @@ class LinkSourceManager:
                 self._name_index.pop(old_name, None)
                 self._alive_index.pop(old_name, None)
 
-    
-    
-    
-
     def rebuild_alive_index(self, source_name: Optional[str] = None) -> int:
         """
         Перестроить _alive_index из url_status_cache без обращения к сети.
@@ -508,7 +493,7 @@ class LinkSourceManager:
         if self.cache_manager is None:
             return 0
         try:
-            from .ksenia_window import ApplicationCore
+            from ksenia_window import ApplicationCore
             settings = ApplicationCore.instance().get_replacement_settings()
         except Exception:
             settings = None
@@ -567,8 +552,6 @@ class LinkSourceManager:
                 self._alive_index_cache.clear()
             rebuilt += 1
 
-        
-        
         with self._lock:
             self._alive_index_cache.clear()
         logger.info(
@@ -722,7 +705,6 @@ class LinkSourceManager:
             if not channels and primary_error:
                 source.last_error = primary_error
 
-        
         source.raw_total_links = len(channels)
         source.raw_total_with_url = sum(
             1 for c in channels if c.has_valid_url)
@@ -868,6 +850,8 @@ class LinkSourceManager:
                        for s in enabled}
             for fut in concurrent.futures.as_completed(futures):
                 if cancelled(stop_token):
+                    for f in futures:
+                        f.cancel()
                     break
                 try:
                     channels = fut.result()

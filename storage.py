@@ -13,10 +13,9 @@ import threading
 from contextlib import suppress
 from typing import Any, Dict, List, Optional, Set, Tuple
 from collections import defaultdict
-from .constants import (STABLE_STATE_FILE, CACHE_SCHEMA_VERSION,
+from constants import (STABLE_STATE_FILE, CACHE_SCHEMA_VERSION,
     CHECK_RESULT_CACHE_TTL_HOURS, EPG_CACHE_TTL_HOURS)
-from .paths import Paths, logger
-
+from paths import Paths, logger
 
 class BaseJsonStore:
     def __init__(self, path: str, default: Any):
@@ -54,7 +53,6 @@ class BaseJsonStore:
             except Exception as e:
                 logger.exception(f"Save {self.path}: {e}")
                 return False
-
 
 class StableStateManager:
     def __init__(self, config_dir: str):
@@ -96,7 +94,6 @@ class StableStateManager:
     def set(self, key: str, url: str):
         with self._lock:
             self._data[key] = url
-
 
 class CacheManager:
     _all_connections: List[Any] = []
@@ -150,15 +147,18 @@ class CacheManager:
     @classmethod
     def _gc_connections(cls):
         with cls._all_connections_lock:
-            alive = []
-            for c in cls._all_connections:
-                try:
-                    _ = c.in_transaction
-                    alive.append(c)
-                except Exception:
-                    with suppress(Exception):
-                        c.close()
-            cls._all_connections = alive
+            cls._all_connections = [
+                c for c in cls._all_connections
+                if not cls._is_connection_dead(c)
+            ]
+
+    @staticmethod
+    def _is_connection_dead(c) -> bool:
+        try:
+            _ = c.in_transaction
+            return False
+        except Exception:
+            return True
 
     def _connect(self) -> sqlite3.Connection:
         with self._connect_lock:
@@ -180,7 +180,6 @@ class CacheManager:
     def _init_db(self):
         with self._init_lock:
             conn = self._connect()
-            conn.execute("DROP TABLE IF EXISTS source_health")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS epg_entries (
                     channel_id TEXT NOT NULL,
@@ -354,23 +353,28 @@ class CacheManager:
                 by_name[name.lower()].add(url)
         if not by_name:
             return {}
-        CHUNK = 500
-        names = list(by_name.keys())
+        unique_pairs = list({
+            (n.lower(), u) for n, u in pairs if n and u
+        })
+        if not unique_pairs:
+            return {}
+        CHUNK = 400  # SQLite лимит ~999 параметров
         try:
             conn = self._connect()
-            for i in range(0, len(names), CHUNK):
-                chunk = names[i:i + CHUNK]
-                ph = ",".join(["?"] * len(chunk))
+            for i in range(0, len(unique_pairs), CHUNK):
+                chunk = unique_pairs[i:i + CHUNK]
+                placeholders = ",".join(["(?,?)"] * len(chunk))
+                flat = [x for pair in chunk for x in pair]
+                flat.append(cutoff)
                 rows = conn.execute(f"""
                     SELECT name, url, alive, response_ms, last_check,
                            status_text, status_code, successes, failures
                     FROM url_status_cache
-                    WHERE name IN ({ph}) AND last_check >= ?
-                """, chunk + [cutoff]).fetchall()
+                    WHERE (name, url) IN ({placeholders})
+                      AND last_check >= ?
+                """, flat).fetchall()
                 for row in rows:
                     key = (row['name'], row['url'])
-                    if row['url'] not in by_name.get(row['name'], ()):
-                        continue
                     result[key] = {
                         'alive': bool(row['alive']),
                         'response_ms': float(row['response_ms'] or 0),

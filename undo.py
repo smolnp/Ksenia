@@ -8,8 +8,8 @@ import threading
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple
 from collections import defaultdict
-from .constants import UNDO_MAX_STATES
-from .models import ChannelData
+from constants import UNDO_MAX_STATES
+from models import ChannelData
 
 
 class UndoRedoManager:
