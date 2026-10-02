@@ -604,8 +604,8 @@ class ChannelTableModel(QAbstractTableModel):
         col = index.column()
         if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole):
             if col == 0:
-                if ch.original_index >= 0:
-                    return str(ch.original_index + 1)
+                # Показываем текущую позицию строки в таблице.
+                # При сортировке номера переупорядочиваются.
                 return str(index.row() + 1)
             if col == self.COL_NAME:
                 return ch.meta.name
@@ -848,6 +848,9 @@ class PlaylistTab(QWidget):
         h.setSortIndicator(0, Qt.SortOrder.AscendingOrder)
         h.blockSignals(False)
         h.sortIndicatorChanged.connect(self._on_sort_indicator_changed)
+        # Применить сортировку сразу — иначе таблица выглядит
+        # отсортированной, но модель не сортирована.
+        self.model.sort(0, Qt.SortOrder.AscendingOrder)
 
         self.table.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows)
@@ -4211,10 +4214,12 @@ def main():
     app.setOrganizationName("Ksenia")
     app.setQuitOnLastWindowClosed(True)
     _install_signal_handlers(app)
+    # v5: watchdog ДО app.exec() — если event loop зависнет,
+    # принудительно выйти через 3 секунды после возврата из exec().
+    _install_exit_watchdog()
     window = MainWindow()
     window.show()
     rc = app.exec()
-    _install_exit_watchdog()
     sys.exit(rc)
 
 def _install_signal_handlers(app: QApplication):
@@ -4226,22 +4231,4 @@ def _install_signal_handlers(app: QApplication):
         with suppress(ValueError, OSError):
             signal.signal(sig, handler)
 
-def _install_exit_watchdog():
-    """v6.3: если Qt не завершил QThread-воркеры за 3 секунды
-    после app.exec(), принудительно выходим.
-
-    Сначала пробуем sys.exit(1) — даёт Python шанс отработать
-    atexit-хуки (закрытие SQLite WAL, сессий requests).
-    Если и это не сработало — os._exit(0) как последний шанс.
-    """
-    import threading as _t
-
-    def _watchdog():
-        # Ждём 3 секунды; если главный поток ещё жив — выходим.
-        _t.Event().wait(3.0)
-        logger.warning(
-            "[watchdog] Принудительное завершение (os._exit)")
-        os._exit(0)
-
-    _t.Thread(target=_watchdog, daemon=True,
-              name="exit-watchdog").start()
+# v5: watchdog вынесен в ksenia_window.py — единая точка входа.

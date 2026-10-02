@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""fix_ksenia.py — единый ремонт проекта Ksenia (v5).
+"""fix_ksenia.py — единый ремонт проекта Ksenia (v6).
 
-Чинит регрессии R1-R13 из аудита v4.
+Чинит регрессии R1-R13 из аудита v4 + v6:
+  • сортировка по «№» (текущая позиция строки) при открытии,
+  • add_channel None-safe,
+  • дубль watchdog в ksenia.py.
+
 Идемпотентен. Каждая правка проверяется на синтаксис.
 
-Запуск из корня (где ksenia.py + ksenia_window.py):
+Запуск:
     py fix_ksenia.py             # применить
     py fix_ksenia.py --dry-run   # показать без записи
     py fix_ksenia.py --list      # список правок
@@ -184,7 +188,7 @@ def register(fname: str, desc: str, risk: str = "safe"):
 
 
 # ---------------------------------------------------------------------------
-# R13 + N1 — constants.py: APP_VERSION 0.1
+# constants.py: APP_VERSION 0.1
 # ---------------------------------------------------------------------------
 @register("constants.py", 'APP_VERSION → "0.1"', "safe")
 def fx_const_version(text: str) -> Tuple[str, bool]:
@@ -199,22 +203,17 @@ def fx_const_version(text: str) -> Tuple[str, bool]:
 
 
 # ---------------------------------------------------------------------------
-# N1 — ksenia.py: убрать битый shebang
+# ksenia.py: убрать битый shebang
 # ---------------------------------------------------------------------------
 @register("ksenia.py", "убрать битый shebang", "safe")
 def fx_ksenia_shebang(text: str) -> Tuple[str, bool]:
-    bad_shebangs = (
-        '#!usrbinenv python3\n',
-        '#!usr/bin/env python3',  # правильный — оставляем
-        '#!usrbinenv python\n',
-    )
     if text.startswith('#!usrbinenv python3\n'):
         return text[len('#!usrbinenv python3\n'):], True
     return text, False
 
 
 # ---------------------------------------------------------------------------
-# R6 — utils.py: MOJIBAKE_TRIGGERS расширить
+# utils.py: расширить MOJIBAKE_TRIGGERS
 # ---------------------------------------------------------------------------
 @register("utils.py",
           "fix_encoding: расширить MOJIBAKE_TRIGGERS", "safe")
@@ -240,7 +239,7 @@ def fx_utils_mojibake_triggers(text: str) -> Tuple[str, bool]:
 
 
 # ---------------------------------------------------------------------------
-# R7 — models.py: _reserve_uid race condition
+# models.py: _reserve_uid race condition
 # ---------------------------------------------------------------------------
 @register("models.py",
           "_reserve_uid: int+lock вместо itertools.count", "safe")
@@ -292,13 +291,12 @@ def fx_models_reserve_uid(text: str) -> Tuple[str, bool]:
 
 
 # ---------------------------------------------------------------------------
-# R8 — models.py: restore_from_dict — сброс кэшей
+# models.py: restore_from_dict — сброс кэшей
 # ---------------------------------------------------------------------------
 @register("models.py",
           "restore_from_dict: сброс _cached_hash/norm", "safe")
 def fx_models_restore_invalidate(text: str) -> Tuple[str, bool]:
-    if "_invalidate_caches()" in text and \
-       text.count("self._invalidate_caches()") >= 1:
+    if "self._invalidate_caches()" in text:
         return text, False
     old = (
         "        with suppress(ValueError, TypeError):\n"
@@ -315,7 +313,7 @@ def fx_models_restore_invalidate(text: str) -> Tuple[str, bool]:
 
 
 # ---------------------------------------------------------------------------
-# R5 — models.py: update_extinf — не писать DEFAULT_GROUP
+# models.py: update_extinf — не писать DEFAULT_GROUP
 # ---------------------------------------------------------------------------
 @register("models.py",
           "update_extinf: не писать group-title для DEFAULT_GROUP", "safe")
@@ -334,105 +332,107 @@ def fx_models_extinf_group(text: str) -> Tuple[str, bool]:
 
 
 # ---------------------------------------------------------------------------
-# R10 — blacklists.py: None-safe .lower() для tvg_id
+# blacklists.py: add_channel None-safe
 # ---------------------------------------------------------------------------
 @register("blacklists.py",
-          "None-safe .lower() для tvg_id/name", "safe")
-def fx_bl_none_safe(text: str) -> Tuple[str, bool]:
-    changed = False
-    old1 = (
+          "add_channel: None-safe .lower()", "safe")
+def fx_bl_add_channel_none_safe(text: str) -> Tuple[str, bool]:
+    old = (
         "        for it in self._store._data:\n"
         "            if (it.get('name', '').lower() == name.lower() and\n"
         "                    it.get('tvg_id', '').lower() == tvg_id.lower()):\n"
     )
-    new1 = (
+    new = (
         "        for it in self._store._data:\n"
         "            if ((it.get('name') or '').lower() == (name or '').lower() and\n"
         "                    (it.get('tvg_id') or '').lower() == (tvg_id or '').lower()):\n"
-    )
-    text, ok = _patch(text, old1, new1)
-    changed = changed or ok
-
-    old2 = (
-        "            for i, it in enumerate(self._store._data):\n"
-        "                if (it.get('name', '').lower() == name.lower() and\n"
-        "                        it.get('tvg_id', '').lower() == tvg_id.lower()):\n"
-    )
-    new2 = (
-        "            for i, it in enumerate(self._store._data):\n"
-        "                if ((it.get('name') or '').lower() == (name or '').lower() and\n"
-        "                        (it.get('tvg_id') or '').lower() == (tvg_id or '').lower()):\n"
-    )
-    text, ok = _patch(text, old2, new2)
-    changed = changed or ok
-
-    old3 = (
-        "        for bi in bl:\n"
-        "            n = bi.get('name', '').strip().lower()\n"
-        "            t = bi.get('tvg_id', '').strip().lower()\n"
-    )
-    new3 = (
-        "        for bi in bl:\n"
-        "            n = (bi.get('name') or '').strip().lower()\n"
-        "            t = (bi.get('tvg_id') or '').strip().lower()\n"
-    )
-    text, ok = _patch(text, old3, new3)
-    changed = changed or ok
-
-    return text, changed
-
-
-# ---------------------------------------------------------------------------
-# R9 — workers.py: fresh.get с .lower()
-# ---------------------------------------------------------------------------
-@register("workers.py",
-          "SourceUrlCheckWorker: fresh.get с .lower()", "safe")
-def fx_workers_fresh_lower(text: str) -> Tuple[str, bool]:
-    old = (
-        "                hit = fresh.get((ch.meta.name, url))\n"
-    )
-    new = (
-        "                hit = fresh.get((ch.meta.name.lower(), url))\n"
     )
     return _patch(text, old, new)
 
 
 # ---------------------------------------------------------------------------
-# R11 — epg.py: сброс _fuzzy_cache после load_from_xmltv
+# blacklists.py: remove_channel None-safe (страховка)
+# ---------------------------------------------------------------------------
+@register("blacklists.py",
+          "remove_channel: None-safe .lower()", "safe")
+def fx_bl_remove_channel_none_safe(text: str) -> Tuple[str, bool]:
+    old = (
+        "            for i, it in enumerate(self._store._data):\n"
+        "                if (it.get('name', '').lower() == name.lower() and\n"
+        "                        it.get('tvg_id', '').lower() == tvg_id.lower()):\n"
+    )
+    new = (
+        "            for i, it in enumerate(self._store._data):\n"
+        "                if ((it.get('name') or '').lower() == (name or '').lower() and\n"
+        "                        (it.get('tvg_id') or '').lower() == (tvg_id or '').lower()):\n"
+    )
+    return _patch(text, old, new)
+
+
+# ---------------------------------------------------------------------------
+# blacklists.py: filter_channels None-safe
+# ---------------------------------------------------------------------------
+@register("blacklists.py",
+          "filter_channels: None-safe .lower()", "safe")
+def fx_bl_filter_channels_none_safe(text: str) -> Tuple[str, bool]:
+    old = (
+        "        for bi in bl:\n"
+        "            n = bi.get('name', '').strip().lower()\n"
+        "            t = bi.get('tvg_id', '').strip().lower()\n"
+    )
+    new = (
+        "        for bi in bl:\n"
+        "            n = (bi.get('name') or '').strip().lower()\n"
+        "            t = (bi.get('tvg_id') or '').strip().lower()\n"
+    )
+    return _patch(text, old, new)
+
+
+# ---------------------------------------------------------------------------
+# workers.py: fresh.get с .lower()
+# ---------------------------------------------------------------------------
+@register("workers.py",
+          "SourceUrlCheckWorker: fresh.get с .lower()", "safe")
+def fx_workers_fresh_lower(text: str) -> Tuple[str, bool]:
+    if "fresh.get((ch.meta.name.lower(), url))" in text:
+        return text, False
+    old = "fresh.get((ch.meta.name, url))"
+    new = "fresh.get((ch.meta.name.lower(), url))"
+    return _patch_all(text, old, new)
+
+
+# ---------------------------------------------------------------------------
+# epg.py: сброс _fuzzy_cache после load_from_xmltv
 # ---------------------------------------------------------------------------
 @register("epg.py",
           "load_from_xmltv: сброс _fuzzy_cache", "safe")
 def fx_epg_fuzzy_cache_reset(text: str) -> Tuple[str, bool]:
-    if "self._fuzzy_cache.clear()" in text and \
-       "load_from_xmltv" in text:
-        marker = "        return count\n"
-        if "        # Сброс fuzzy-кэша" in text:
-            return text, False
-        old = (
-            "        if self.cache_manager:\n"
-            "            if to_cache:\n"
-            "                self.cache_manager.save_epg_entries(to_cache, source)\n"
-            "            if info_to_cache:\n"
-            "                self.cache_manager.save_epg_channels(info_to_cache, source)\n"
-            "        return count\n"
-        )
-        new = (
-            "        if self.cache_manager:\n"
-            "            if to_cache:\n"
-            "                self.cache_manager.save_epg_entries(to_cache, source)\n"
-            "            if info_to_cache:\n"
-            "                self.cache_manager.save_epg_channels(info_to_cache, source)\n"
-            "        # Сброс fuzzy-кэша: _channel_info обновилось\n"
-            "        with self._fuzzy_cache_lock:\n"
-            "            self._fuzzy_cache.clear()\n"
-            "        return count\n"
-        )
-        return _patch(text, old, new)
-    return text, False
+    if "        # Сброс fuzzy-кэша" in text:
+        return text, False
+    old = (
+        "        if self.cache_manager:\n"
+        "            if to_cache:\n"
+        "                self.cache_manager.save_epg_entries(to_cache, source)\n"
+        "            if info_to_cache:\n"
+        "                self.cache_manager.save_epg_channels(info_to_cache, source)\n"
+        "        return count\n"
+    )
+    new = (
+        "        if self.cache_manager:\n"
+        "            if to_cache:\n"
+        "                self.cache_manager.save_epg_entries(to_cache, source)\n"
+        "            if info_to_cache:\n"
+        "                self.cache_manager.save_epg_channels(info_to_cache, source)\n"
+        "        # Сброс fuzzy-кэша: _channel_info обновилось\n"
+        "        with self._fuzzy_cache_lock:\n"
+        "            self._fuzzy_cache.clear()\n"
+        "        return count\n"
+    )
+    return _patch(text, old, new)
 
 
 # ---------------------------------------------------------------------------
-# R12 — epg.py: _tokens_for LRU вместо clear()
+# epg.py: _tokens_for LRU
 # ---------------------------------------------------------------------------
 @register("epg.py",
           "_tokens_for: LRU вместо clear()", "safe")
@@ -458,7 +458,82 @@ def fx_epg_token_lru(text: str) -> Tuple[str, bool]:
 
 
 # ---------------------------------------------------------------------------
-# R2 — ksenia_window.py: apply_domain_user_agent → modified = True
+# epg.py: is_loaded — правильный лок
+# ---------------------------------------------------------------------------
+@register("epg.py",
+          "is_loaded: читать _channel_info под _channel_info_lock", "safe")
+def fx_epg_is_loaded_lock(text: str) -> Tuple[str, bool]:
+    if "has_entries = bool(self._entries)" in text:
+        return text, False
+    old = (
+        "    @property\n"
+        "    def is_loaded(self) -> bool:\n"
+        "        with self._lock:\n"
+        "            return bool(self._entries) or bool(self._channel_info)\n"
+    )
+    new = (
+        "    @property\n"
+        "    def is_loaded(self) -> bool:\n"
+        "        with self._lock:\n"
+        "            has_entries = bool(self._entries)\n"
+        "        if has_entries:\n"
+        "            return True\n"
+        "        with self._channel_info_lock:\n"
+        "            return bool(self._channel_info)\n"
+    )
+    return _patch(text, old, new)
+
+
+# ---------------------------------------------------------------------------
+# epg.py: find_channel_info — нормализация norm_key
+# ---------------------------------------------------------------------------
+@register("epg.py",
+          "find_channel_info: нормализовать norm_key", "safe")
+def fx_epg_find_norm_key(text: str) -> Tuple[str, bool]:
+    if "ChannelNameNormalizer.normalize(\n                            self._channel_info[c].display_name" in text:
+        return text, False
+    old = (
+        "                    snapshot = [(c, (self._channel_info[c].display_name or c))\n"
+        "                                for c in cid_set if c in self._channel_info]\n"
+    )
+    new = (
+        "                    snapshot = [\n"
+        "                        (c, ChannelNameNormalizer.normalize(\n"
+        "                            self._channel_info[c].display_name or c))\n"
+        "                        for c in cid_set if c in self._channel_info\n"
+        "                    ]\n"
+    )
+    return _patch(text, old, new)
+
+
+# ---------------------------------------------------------------------------
+# ksenia_window.py: _load_file через QTimer
+# ---------------------------------------------------------------------------
+@register("ksenia_window.py",
+          "PlaylistTab: отложить _load_file через QTimer", "safe")
+def fx_kw_defer_load(text: str) -> Tuple[str, bool]:
+    if "QTimer.singleShot(0, lambda: self._load_file(_fp))" in text:
+        return text, False
+    old = (
+        "        if filepath and os.path.exists(filepath):\n"
+        "            self._load_file(filepath)\n"
+        "        else:\n"
+        "            self.refresh_view()\n"
+    )
+    new = (
+        "        if filepath and os.path.exists(filepath):\n"
+        "            # Отложить загрузку — сигналы info_changed/undo_state_changed\n"
+        "            # будут подключены в MainWindow._create_tab до вызова.\n"
+        "            _fp = filepath\n"
+        "            QTimer.singleShot(0, lambda: self._load_file(_fp))\n"
+        "        else:\n"
+        "            self.refresh_view()\n"
+    )
+    return _patch(text, old, new)
+
+
+# ---------------------------------------------------------------------------
+# ksenia_window.py: UA-правила → modified = True
 # ---------------------------------------------------------------------------
 @register("ksenia_window.py",
           "_load_file: UA-правила → modified = True", "safe")
@@ -486,7 +561,7 @@ def fx_kw_ua_modified(text: str) -> Tuple[str, bool]:
 
 
 # ---------------------------------------------------------------------------
-# R3 — ksenia_window.py: _delete_channel очищает selected
+# ksenia_window.py: _delete_channel очищает selected
 # ---------------------------------------------------------------------------
 @register("ksenia_window.py",
           "_delete_channel: очистить selected/current", "safe")
@@ -513,7 +588,7 @@ def fx_kw_delete_clear_selected(text: str) -> Tuple[str, bool]:
 
 
 # ---------------------------------------------------------------------------
-# R4 — ksenia_window.py: _cut_channel удаляет только current
+# ksenia_window.py: _cut_channel только current
 # ---------------------------------------------------------------------------
 @register("ksenia_window.py",
           "_cut_channel: только current_channel", "safe")
@@ -546,33 +621,7 @@ def fx_kw_cut_channel(text: str) -> Tuple[str, bool]:
 
 
 # ---------------------------------------------------------------------------
-# R1 — ksenia_window.py: отложить _load_file в PlaylistTab.__init__
-# ---------------------------------------------------------------------------
-@register("ksenia_window.py",
-          "PlaylistTab: отложить _load_file через QTimer", "safe")
-def fx_kw_defer_load(text: str) -> Tuple[str, bool]:
-    if "QTimer.singleShot(0, lambda: self._load_file(filepath))" in text:
-        return text, False
-    old = (
-        "        if filepath and os.path.exists(filepath):\n"
-        "            self._load_file(filepath)\n"
-        "        else:\n"
-        "            self.refresh_view()\n"
-    )
-    new = (
-        "        if filepath and os.path.exists(filepath):\n"
-        "            # Отложить загрузку — сигналы info_changed/undo_state_changed\n"
-        "            # будут подключены в MainWindow._create_tab до вызова.\n"
-        "            _fp = filepath\n"
-        "            QTimer.singleShot(0, lambda: self._load_file(_fp))\n"
-        "        else:\n"
-        "            self.refresh_view()\n"
-    )
-    return _patch(text, old, new)
-
-
-# ---------------------------------------------------------------------------
-# N3 — ksenia_window.py: _on_model_data_changed — шорткат для UI-ролей
+# ksenia_window.py: _on_model_data_changed шорткат
 # ---------------------------------------------------------------------------
 @register("ksenia_window.py",
           "_on_model_data_changed: шорткат для UI-ролей", "safe")
@@ -607,19 +656,70 @@ def fx_kw_data_changed_shortcut(text: str) -> Tuple[str, bool]:
 
 
 # ---------------------------------------------------------------------------
-# N5 + N4 — ksenia_window.py: watchdog после exec() → до exec()
+# ksenia_window.py: V6 FIX #1 — сортировка по умолчанию
+# ---------------------------------------------------------------------------
+@register("ksenia_window.py",
+          "таблица: применить сортировку по № сразу", "safe")
+def fx_kw_initial_sort(text: str) -> Tuple[str, bool]:
+    if "self.model.sort(0, Qt.SortOrder.AscendingOrder)" in text:
+        return text, False
+    old = (
+        "        h.blockSignals(True)\n"
+        "        h.setSortIndicator(0, Qt.SortOrder.AscendingOrder)\n"
+        "        h.blockSignals(False)\n"
+        "        h.sortIndicatorChanged.connect(self._on_sort_indicator_changed)\n"
+    )
+    new = (
+        "        h.blockSignals(True)\n"
+        "        h.setSortIndicator(0, Qt.SortOrder.AscendingOrder)\n"
+        "        h.blockSignals(False)\n"
+        "        h.sortIndicatorChanged.connect(self._on_sort_indicator_changed)\n"
+        "        # Применить сортировку сразу — иначе таблица выглядит\n"
+        "        # отсортированной, но модель не сортирована.\n"
+        "        self.model.sort(0, Qt.SortOrder.AscendingOrder)\n"
+    )
+    return _patch(text, old, new)
+
+
+# ---------------------------------------------------------------------------
+# ksenia_window.py: V6 FIX #2 — колонка № = текущая позиция
+# ---------------------------------------------------------------------------
+@register("ksenia_window.py",
+          "data(): колонка № = текущая позиция в таблице", "safe")
+def fx_kw_col0_current_row(text: str) -> Tuple[str, bool]:
+    if ("        if col == 0:\n"
+        "            return str(index.row() + 1)\n") in text:
+        return text, False
+    old = (
+        "        if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole):\n"
+        "            if col == 0:\n"
+        "                if ch.original_index >= 0:\n"
+        "                    return str(ch.original_index + 1)\n"
+        "                return str(index.row() + 1)\n"
+    )
+    new = (
+        "        if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole):\n"
+        "            if col == 0:\n"
+        "                # Показываем текущую позицию строки в таблице.\n"
+        "                # При сортировке номера переупорядочиваются.\n"
+        "                return str(index.row() + 1)\n"
+    )
+    return _patch(text, old, new)
+
+
+# ---------------------------------------------------------------------------
+# ksenia_window.py: watchdog до exec (страховка)
 # ---------------------------------------------------------------------------
 @register("ksenia_window.py",
           "watchdog: запускать до app.exec()", "safe")
 def fx_kw_watchdog_before_exec(text: str) -> Tuple[str, bool]:
+    if "    # v5: watchdog ДО app.exec()" in text:
+        return text, False
     old = (
         "    _install_signal_handlers(app)\n"
         "    window = MainWindow()\n"
         "    window.show()\n"
         "    rc = app.exec()\n"
-        "    # v6.2: страховочный watchdog — если после возврата из exec()\n"
-        "    # остались живые QThread-воркеры (фоновая проверка URL),\n"
-        "    # интерпретатор повиснет. Даём 5 секунд и жёстко выходим.\n"
         "    _install_exit_watchdog()\n"
         "    sys.exit(rc)\n"
     )
@@ -637,13 +737,15 @@ def fx_kw_watchdog_before_exec(text: str) -> Tuple[str, bool]:
 
 
 # ---------------------------------------------------------------------------
-# N4 — ksenia.py: убрать дублирующийся watchdog
+# ksenia_window.py: V6 FIX #3 — убрать дубль watchdog
 # ---------------------------------------------------------------------------
-@register("ksenia.py", "убрать дублирующийся watchdog", "safe")
-def fx_ksenia_remove_dup_watchdog(text: str) -> Tuple[str, bool]:
-    if "def _install_exit_watchdog" not in text:
+@register("ksenia_window.py",
+          "main(): убрать дубль _install_exit_watchdog", "safe")
+def fx_kw_remove_dup_watchdog(text: str) -> Tuple[str, bool]:
+    """Удаляем _install_exit_watchdog из ksenia_window.py,
+    оставляя только его вызов в main()."""
+    if "# v5: watchdog вынесен в ksenia_window.py" in text:
         return text, False
-    # Убираем блок определения целиком (до конца функции)
     old = (
         "def _install_exit_watchdog():\n"
         "    \"\"\"v6.3: если Qt не завершил QThread-воркеры за 3 секунды\n"
@@ -658,12 +760,38 @@ def fx_ksenia_remove_dup_watchdog(text: str) -> Tuple[str, bool]:
         "    def _watchdog():\n"
         "        # Ждём 3 секунды; если главный поток ещё жив — выходим.\n"
         "        _t.Event().wait(3.0)\n"
+        "        logger.warning(\n"
+        "            \"[watchdog] Принудительное завершение (os._exit)\")\n"
+        "        os._exit(0)\n"
+        "\n"
+        "    _t.Thread(target=_watchdog, daemon=True,\n"
+        "              name=\"exit-watchdog\").start()\n"
+    )
+    new = (
+        "# v5: watchdog вынесен в ksenia_window.py — единая точка входа.\n"
+    )
+    return _patch(text, old, new)
+
+
+# ---------------------------------------------------------------------------
+# ksenia_window.py: V6 FIX #4 — убрать дубль _install_exit_watchdog
+# ---------------------------------------------------------------------------
+@register("ksenia.py",
+          "убрать дублирующийся watchdog", "safe")
+def fx_ksenia_remove_dup_watchdog(text: str) -> Tuple[str, bool]:
+    if "def _install_exit_watchdog" not in text:
+        return text, False
+    old = (
+        "def _install_exit_watchdog():\n"
+        "    import threading as _t\n"
+        "\n"
+        "    def _watchdog():\n"
+        "        _t.Event().wait(3.0)\n"
         "        logger.warning(\"[watchdog] Принудительное завершение (sys.exit)\")\n"
         "        try:\n"
         "            sys.exit(1)\n"
         "        except SystemExit:\n"
         "            pass\n"
-        "        # Если sys.exit не помог — даём ещё секунду и жёсткий exit.\n"
         "        _t.Event().wait(1.0)\n"
         "        logger.warning(\"[watchdog] os._exit(0) — жёсткий выход\")\n"
         "        os._exit(0)\n"
@@ -673,74 +801,6 @@ def fx_ksenia_remove_dup_watchdog(text: str) -> Tuple[str, bool]:
     )
     new = (
         "# v5: watchdog перенесён в ksenia_window.py (единая точка входа).\n"
-    )
-    return _patch(text, old, new)
-
-
-# ---------------------------------------------------------------------------
-# N1 — ksenia.py: убрать битый shebang
-# ---------------------------------------------------------------------------
-@register("ksenia.py", "убрать битый shebang", "safe")
-def fx_ksenia_shebang(text: str) -> Tuple[str, bool]:
-    if text.startswith('#!usrbinenv python3\n'):
-        return text[len('#!usrbinenv python3\n'):], True
-    return text, False
-
-
-# ---------------------------------------------------------------------------
-# R9 — workers.py: я уже добавил. Перепроверка на всякий случай.
-# ---------------------------------------------------------------------------
-@register("workers.py",
-          "SourceUrlCheckWorker: fresh.get с .lower() (дубль-проверка)",
-          "safe")
-def fx_workers_fresh_lower_verify(text: str) -> Tuple[str, bool]:
-    if "fresh.get((ch.meta.name.lower(), url))" in text:
-        return text, False
-    old = "fresh.get((ch.meta.name, url))"
-    new = "fresh.get((ch.meta.name.lower(), url))"
-    return _patch_all(text, old, new)
-
-
-# ---------------------------------------------------------------------------
-# N2 — M3UParser.parse: не применять fix_encoding к URL
-# ---------------------------------------------------------------------------
-@register("models.py",
-          "M3UParser: URL без fix_encoding", "safe")
-def fx_parser_url_no_fix(text: str) -> Tuple[str, bool]:
-    old = (
-        "                channel.link.url = ChannelNameNormalizer.fix_encoding(nl)\n"
-        "                channel.link.has_url = True\n"
-    )
-    new = (
-        "                # URL не прогоняем через fix_encoding —\n"
-        "                # percent-encoding и ASCII-строки могут быть искажены.\n"
-        "                channel.link.url = nl\n"
-        "                channel.link.has_url = True\n"
-    )
-    return _patch(text, old, new)
-
-
-# ---------------------------------------------------------------------------
-# R11 — epg.py: is_loaded — правильный лок
-# ---------------------------------------------------------------------------
-@register("epg.py",
-          "is_loaded: читать _channel_info под _channel_info_lock", "safe")
-def fx_epg_is_loaded_lock(text: str) -> Tuple[str, bool]:
-    old = (
-        "    @property\n"
-        "    def is_loaded(self) -> bool:\n"
-        "        with self._lock:\n"
-        "            return bool(self._entries) or bool(self._channel_info)\n"
-    )
-    new = (
-        "    @property\n"
-        "    def is_loaded(self) -> bool:\n"
-        "        with self._lock:\n"
-        "            has_entries = bool(self._entries)\n"
-        "        if has_entries:\n"
-        "            return True\n"
-        "        with self._channel_info_lock:\n"
-        "            return bool(self._channel_info)\n"
     )
     return _patch(text, old, new)
 
@@ -760,7 +820,7 @@ def find_root(base: Path):
 
 def print_fixes_list():
     print("=" * 78)
-    print("  Список правок fix_ksenia.py v5")
+    print("  Список правок fix_ksenia.py v6")
     print("=" * 78)
     by_file: dict = {}
     for fname, desc, risk, _fn in FIXES:
@@ -776,7 +836,7 @@ def print_fixes_list():
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="fix_ksenia",
-        description="Ksenia — автофиксер проекта (v5)")
+        description="Ksenia — автофиксер проекта (v6)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Не писать файлы, только показать")
     parser.add_argument("--list", action="store_true",
@@ -788,7 +848,7 @@ def main() -> int:
         return 0
 
     print("=" * 78)
-    print("  Ksenia — fix_ksenia.py (v5)")
+    print("  Ksenia — fix_ksenia.py (v6)")
     if args.dry_run:
         print("  [DRY-RUN] Файлы не будут изменены")
     print("=" * 78)
@@ -953,14 +1013,18 @@ def main() -> int:
          "restore_from_dict без сброса кэша"),
         ("models.py", "if self.group and self.group != DEFAULT_GROUP:",
          "update_extinf пишет DEFAULT_GROUP"),
-        ("blacklists.py", "(it.get('tvg_id') or '')",
-         "None-safe .lower() не применён"),
+        ("blacklists.py", "(it.get('name') or '').lower()",
+         "add_channel не None-safe"),
         ("workers.py", "fresh.get((ch.meta.name.lower(), url))",
          "fresh.get без .lower()"),
         ("ksenia_window.py", "self.modified = True",
          "UA-правила не помечают modified"),
         ("ksenia_window.py", "self.selected_channels = []\n        self.current_channel = None",
          "_delete_channel не очищает selected"),
+        ("ksenia_window.py", "self.model.sort(0, Qt.SortOrder.AscendingOrder)",
+         "сортировка при старте не добавлена"),
+        ("ksenia_window.py", "return str(index.row() + 1)",
+         "колонка № не показывает текущую позицию"),
     ]
     all_ok = True
     for fname, marker, consequence in checks:
@@ -971,9 +1035,9 @@ def main() -> int:
             continue
         text = fp.read_text(encoding="utf-8")
         if marker in text:
-            print(f"  [✓] {fname}: {marker[:50]}")
+            print(f"  [✓] {fname}: {marker[:60]}")
         else:
-            print(f"  [!] {fname}: нет '{marker[:50]}' — {consequence}")
+            print(f"  [!] {fname}: нет '{marker[:60]}' — {consequence}")
             all_ok = False
 
     print()

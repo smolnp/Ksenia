@@ -32,22 +32,7 @@ def _install_signal_handlers(app):
             signal.signal(sig, handler)
 
 
-def _install_exit_watchdog():
-    import threading as _t
-
-    def _watchdog():
-        _t.Event().wait(3.0)
-        logger.warning("[watchdog] Принудительное завершение (sys.exit)")
-        try:
-            sys.exit(1)
-        except SystemExit:
-            pass
-        _t.Event().wait(1.0)
-        logger.warning("[watchdog] os._exit(0) — жёсткий выход")
-        os._exit(0)
-
-    _t.Thread(target=_watchdog, daemon=True,
-              name="exit-watchdog").start()
+# v5: watchdog перенесён в ksenia_window.py (единая точка входа).
 
 
 def main():
