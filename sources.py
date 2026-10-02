@@ -122,7 +122,6 @@ class LinkSource:
                  'update_interval_hours', 'encoding',
                  'last_error', 'last_attempt', 'consecutive_errors',
                  'apply_blacklist', 'apply_domain_blacklist',
-                 # v0.9.2
                  'total_working', 'working_checked_at',
                  
                  'raw_total_links', 'raw_total_with_url')
@@ -144,7 +143,6 @@ class LinkSource:
         self.consecutive_errors: int = 0
         self.apply_blacklist: bool = True
         self.apply_domain_blacklist: bool = True
-        # v0.9.2
         self.total_working: int = 0
         self.working_checked_at: Optional[float] = None
         

@@ -795,7 +795,10 @@ class PlaylistTab(QWidget):
         self.core.channels_updated.connect(self._on_core_channels_updated)
 
         if filepath and os.path.exists(filepath):
-            self._load_file(filepath)
+            # Отложить загрузку — сигналы info_changed/undo_state_changed
+            # будут подключены в MainWindow._create_tab до вызова.
+            _fp = filepath
+            QTimer.singleShot(0, lambda: self._load_file(_fp))
         else:
             self.refresh_view()
 

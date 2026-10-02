@@ -67,7 +67,11 @@ class EPGDatabase:
     @property
     def is_loaded(self) -> bool:
         with self._lock:
-            return bool(self._entries) or bool(self._channel_info)
+            has_entries = bool(self._entries)
+        if has_entries:
+            return True
+        with self._channel_info_lock:
+            return bool(self._channel_info)
 
     @property
     def has_channel_info(self) -> bool:
