@@ -78,6 +78,8 @@ CSV_FILTER = "CSV (*.csv);;Все файлы (*.*)"
 ALL_FILTER = "Все файлы (*.*)"
 EXE_FILTER = "Исполняемые файлы (*.exe);;Все файлы (*.*)"
 GROUP_FILTER_ALL = "Все группы"
+# >>> ДОБАВЛЕНО: метка для кнопки-переключателя дубликатов
+GROUP_FILTER_DUPLICATES = "🔁 Дубликаты"
 DEFAULT_GROUP = "Без группы"
 YES_NO = QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
 OK_CANCEL = QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
@@ -110,3 +112,8 @@ URL_FG_COLORS: Dict[str, QColor] = {
     'neutral': QColor(80, 80, 80),
     'orphan_bg': QColor(255, 250, 200),
 }
+
+# >>> ДОБАВЛЕНО: цвета подсветки дубликатов
+DUP_NAME_BG = QColor(255, 235, 205)   # персиковый — дубли по имени
+DUP_URL_BG = QColor(215, 235, 255)    # голубой   — дубли по URL
+DUP_BOTH_BG = QColor(230, 220, 250)   # сиреневый — дубли и по имени, и по URL

@@ -484,6 +484,10 @@ class ChannelTableModel(QAbstractTableModel):
         self._group_filter = GROUP_FILTER_ALL
         self._sort_column = 0
         self._sort_order = Qt.SortOrder.AscendingOrder
+        # >>> ДОБАВЛЕНО: поля для режима дубликатов
+        self._duplicate_mode = False
+        self._dup_uids_name: Set[int] = set()
+        self._dup_uids_url: Set[int] = set()
 
     def _reset_with_filter(self):
         self.beginResetModel()
@@ -494,6 +498,10 @@ class ChannelTableModel(QAbstractTableModel):
 
     def set_channels(self, channels: List[ChannelData]):
         self._channels = channels
+        # При смене списка каналов пересчитываем дубликаты,
+        # если режим активен.
+        if self._duplicate_mode:
+            self._recompute_duplicates()
         self._reset_with_filter()
 
     def set_search_text(self, text: str):
@@ -504,6 +512,37 @@ class ChannelTableModel(QAbstractTableModel):
         self._group_filter = group
         self._reset_with_filter()
 
+    # >>> ДОБАВЛЕНО: включение/выключение режима дубликатов
+    def set_duplicate_mode(self, enabled: bool):
+        self._duplicate_mode = bool(enabled)
+        if self._duplicate_mode:
+            self._recompute_duplicates()
+        else:
+            self._dup_uids_name = set()
+            self._dup_uids_url = set()
+        self._reset_with_filter()
+
+    def _recompute_duplicates(self):
+        try:
+            core = ApplicationCore.instance()
+            use_tvg = bool(core.config.get(
+                'dedup_by_name_use_tvg', False))
+        except Exception:
+            use_tvg = False
+        self._dup_uids_name, self._dup_uids_url = \
+            SimpleDuplicateFinder.find_duplicate_uids(
+                self._channels, use_tvg_id=use_tvg)
+
+    def is_duplicate_mode(self) -> bool:
+        return self._duplicate_mode
+
+    def duplicate_counts(self) -> Tuple[int, int, int]:
+        """(only_name, only_url, both)."""
+        only_name = len(self._dup_uids_name - self._dup_uids_url)
+        only_url = len(self._dup_uids_url - self._dup_uids_name)
+        both = len(self._dup_uids_name & self._dup_uids_url)
+        return only_name, only_url, both
+
     @staticmethod
     def _has_any_metadata(ch: ChannelData) -> bool:
         return bool(
@@ -513,6 +552,12 @@ class ChannelTableModel(QAbstractTableModel):
 
     def _apply_filter_internal(self):
         filtered = list(self._channels)
+
+        # >>> ДОБАВЛЕНО: приоритетный фильтр дубликатов
+        if self._duplicate_mode:
+            dup_uids = self._dup_uids_name | self._dup_uids_url
+            filtered = [ch for ch in filtered if ch.uid in dup_uids]
+
         if self._group_filter != GROUP_FILTER_ALL:
             filtered = [ch for ch in filtered
                         if ch.meta.group == self._group_filter]
@@ -627,10 +672,33 @@ class ChannelTableModel(QAbstractTableModel):
         if role == Qt.ItemDataRole.UserRole:
             return ch.uid
 
+        # >>> ИЗМЕНЕНО: подсветка дубликатов имеет приоритет
         if col == self.COL_NAME and role == Qt.ItemDataRole.BackgroundRole:
+            if self._duplicate_mode:
+                uid = ch.uid
+                in_name = uid in self._dup_uids_name
+                in_url = uid in self._dup_uids_url
+                if in_name and in_url:
+                    return DUP_BOTH_BG
+                if in_name:
+                    return DUP_NAME_BG
+                if in_url:
+                    return DUP_URL_BG
             if not ch.has_valid_url and self._has_any_metadata(ch):
                 return URL_FG_COLORS['orphan_bg']
             return None
+
+        # >>> ДОБАВЛЕНО: подсветка URL-колонки цветом дубликатов по URL
+        if col == self.URL_COLUMN and \
+                role == Qt.ItemDataRole.BackgroundRole and \
+                self._duplicate_mode:
+            uid = ch.uid
+            in_name = uid in self._dup_uids_name
+            in_url = uid in self._dup_uids_url
+            if in_name and in_url:
+                return DUP_BOTH_BG
+            if in_url:
+                return DUP_URL_BG
 
         if col == self.URL_COLUMN:
             if role == Qt.ItemDataRole.ForegroundRole:
@@ -709,26 +777,32 @@ class ChannelTableModel(QAbstractTableModel):
         ch = self._filtered[index.row()]
         col = index.column()
         new_value = str(value).strip()
+        changed = False
         if col == self.COL_NAME:
             if ch.meta.name == new_value:
                 return False
             ch.meta.name = new_value
+            changed = True
         elif col == self.COL_GROUP:
             if ch.meta.group == new_value:
                 return False
             ch.meta.group = new_value or DEFAULT_GROUP
+            changed = True
         elif col == self.COL_TVG_ID:
             if ch.meta.tvg_id == new_value:
                 return False
             ch.meta.tvg_id = new_value
+            changed = True
         elif col == self.COL_TVG_LOGO:
             if ch.meta.tvg_logo == new_value:
                 return False
             ch.meta.tvg_logo = new_value
+            changed = True
         elif col == self.COL_CATCHUP:
             if ch.meta.catchup == new_value:
                 return False
             ch.meta.catchup = new_value
+            changed = True
         elif col == self.URL_COLUMN:
             if ch.link.url == new_value:
                 return False
@@ -746,11 +820,15 @@ class ChannelTableModel(QAbstractTableModel):
             ch.link.extra_headers.clear()
             ch.status.reset()
             core.domain_user_agent_manager.apply_rules_to_channel(ch)
+            changed = True
         else:
             return False
         if col != self.URL_COLUMN:
             ch.update_extinf()
         object.__setattr__(ch, 'modified_date', datetime.now())
+        # >>> ДОБАВЛЕНО: пересчёт дубликатов при правке в режиме дубликатов
+        if self._duplicate_mode and changed:
+            self._recompute_duplicates()
         self.dataChanged.emit(index, index)
         return True
 
@@ -783,6 +861,9 @@ class PlaylistTab(QWidget):
 
     undo_state_changed = pyqtSignal(bool, bool)
     info_changed = pyqtSignal(str)
+    # >>> ДОБАВЛЕНО: сигнал «список групп изменился» — MainWindow
+    # пересобирает комбобокс «Все группы».
+    groups_changed = pyqtSignal()
 
     def __init__(self, filepath: Optional[str] = None, parent=None,
                  parent_window=None):
@@ -837,6 +918,9 @@ class PlaylistTab(QWidget):
             QTimer.singleShot(0, lambda: self._load_file(_fp))
         else:
             self.refresh_view()
+            # >>> ДОБАВЛЕНО: пустая вкладка тоже должна сообщить
+            # окну о (пустом) списке групп
+            QTimer.singleShot(0, self.groups_changed.emit)
 
     @property
     def parent_window(self):
@@ -940,6 +1024,11 @@ class PlaylistTab(QWidget):
         self.model.set_group_filter(group)
         self.update_info()
 
+    # >>> ДОБАВЛЕНО: управление режимом дубликатов
+    def set_duplicate_filter(self, enabled: bool):
+        self.model.set_duplicate_mode(enabled)
+        self.update_info()
+
     def _on_core_channels_updated(self, tab_id: str):
         if not _is_qobject_valid(self):
             return
@@ -997,6 +1086,8 @@ class PlaylistTab(QWidget):
         self.selected_channels = []
         self.current_channel = None
         self.update_info()
+        # >>> ДОБАВЛЕНО: список групп мог измениться
+        self.groups_changed.emit()
 
     def find_channel_by_ref(self, channel: ChannelData
                              ) -> Optional[ChannelData]:
@@ -1037,6 +1128,8 @@ class PlaylistTab(QWidget):
         else:
             self.model.refresh_all()
         self.update_info()
+        # >>> ДОБАВЛЕНО: список групп мог измениться
+        self.groups_changed.emit()
 
     def _load_file(self, filepath: str):
         self._loading = True
@@ -1226,6 +1319,8 @@ class PlaylistTab(QWidget):
                 with self._suppress_save():
                     self.model.refresh_all()
                 self.update_info()
+                # >>> ДОБАВЛЕНО: EPG может изменить группу
+                self.groups_changed.emit()
                 logger.info(
                     f"EPG-метаданные применены к {modified} каналам")
                 if not silent:
@@ -1258,6 +1353,11 @@ class PlaylistTab(QWidget):
                 f"?: {st['unknown']} | Групп: {st['groups']}")
         if st.get('unsupported'):
             info += f" | N/A: {st['unsupported']}"
+        # >>> ДОБАВЛЕНО: индикатор режима дубликатов
+        if self.model.is_duplicate_mode():
+            only_name, only_url, both = self.model.duplicate_counts()
+            info += (f" | 🔁 дубли: имя {only_name}, "
+                     f"URL {only_url}, оба {both}")
         self.info_changed.emit(info)
 
     def channel_for_row(self, row: int) -> Optional[ChannelData]:
@@ -1294,6 +1394,11 @@ class PlaylistTab(QWidget):
         self.save_state("Правка ячейки")
         self.sync_to_core()
         self.update_info()
+        # >>> ДОБАВЛЕНО: если режим дубликатов активен, перестроить вид
+        if self.model.is_duplicate_mode():
+            self.model.set_duplicate_mode(True)
+        # >>> ДОБАВЛЕНО: правка ячейки группы могла изменить список групп
+        self.groups_changed.emit()
 
     def save_state(self, description: str = ""):
         if self._suppress_state_save:
@@ -1377,9 +1482,6 @@ class PlaylistTab(QWidget):
                 seen.add(ch.uid)
 
         self.all_channels = new_list
-        # Принудительно переиндексируем original_index по восстановленному
-        # порядку, чтобы модель сортировала корректно и diff для
-        # последующего undo/redo был осмысленным.
         self._normalize_order()
         self.modified = True
         self.sync_to_core()
@@ -1659,6 +1761,7 @@ class PlaylistTab(QWidget):
         if row >= 0:
             self.table.setCurrentIndex(self.model.index(row, 1))
             self.table.edit(self.model.index(row, 1))
+        self.groups_changed.emit()
 
     def _delete_channel(self, row: int = -1):
         if row == -1:
@@ -1693,6 +1796,7 @@ class PlaylistTab(QWidget):
         self.current_channel = None
         with self._suppress_save():
             self.model.set_channels(self.all_channels)
+        self.groups_changed.emit()
 
     def _delete_selected_channels(self):
         if self.selected_channels:
@@ -1823,6 +1927,7 @@ class PlaylistTab(QWidget):
                 self.sync_to_core()
                 with self._suppress_save():
                     self.model.set_channels(self.all_channels)
+                self.groups_changed.emit()
 
     def _add_selected_to_blacklist(self):
         if not self.selected_channels:
@@ -1875,6 +1980,7 @@ class PlaylistTab(QWidget):
             self.sync_to_core()
             with self._suppress_save():
                 self.model.set_channels(self.all_channels)
+            self.groups_changed.emit()
             info_box(self, f"Добавлено: {added}", "Успех")
 
     def _edit_user_agent(self, row: int):
@@ -1933,6 +2039,7 @@ class PlaylistTab(QWidget):
         self.sync_to_core()
         with self._suppress_save():
             self.model.refresh_all()
+        self.groups_changed.emit()
         info_box(self, f"Обновлено {len(self.selected_channels)} каналов",
                  "Готово")
 
@@ -1958,6 +2065,7 @@ class PlaylistTab(QWidget):
         self.current_channel = None
         with self._suppress_save():
             self.model.set_channels(self.all_channels)
+        self.groups_changed.emit()
 
     def _cut_selected_channels(self):
         if self.selected_channels:
@@ -1994,6 +2102,7 @@ class PlaylistTab(QWidget):
         self.sync_to_core()
         with self._suppress_save():
             self.model.set_channels(self.all_channels)
+        self.groups_changed.emit()
 
     def _paste_selected_channels(self, row: int = -1):
         w = self.parent_window
@@ -2021,6 +2130,7 @@ class PlaylistTab(QWidget):
         self.sync_to_core()
         with self._suppress_save():
             self.model.set_channels(self.all_channels)
+        self.groups_changed.emit()
 
     def _on_model_request_move(self, uids: List[int],
                                 ref_uid: Optional[int]):
@@ -2032,7 +2142,6 @@ class PlaylistTab(QWidget):
         if not moving:
             return
 
-        # Если перетаскиваем на себя — ничего не делаем
         if ref_uid is not None and ref_uid in moving_set:
             return
 
@@ -2041,8 +2150,6 @@ class PlaylistTab(QWidget):
             ref_channel = next(
                 (ch for ch in self.all_channels if ch.uid == ref_uid), None)
 
-        # Фиксируем всё, что накопилось в debounce-очереди undo,
-        # чтобы предыдущая операция не потерялась.
         if self._state_save_timer.isActive():
             self._state_save_timer.stop()
             self._do_save_state()
@@ -2052,7 +2159,6 @@ class PlaylistTab(QWidget):
 
         if ref_channel is not None:
             if ref_channel not in remaining:
-                # ref был среди перемещаемых — не двигаем
                 return
             insert_idx = remaining.index(ref_channel)
         else:
@@ -2063,7 +2169,6 @@ class PlaylistTab(QWidget):
                     remaining[insert_idx:])
         self.all_channels = new_list
 
-        # Сброс сортировки на колонку 0, чтобы drop был виден
         h = self.table.horizontalHeader()
         if h.sortIndicatorSection() != 0:
             h.blockSignals(True)
@@ -2077,8 +2182,6 @@ class PlaylistTab(QWidget):
         with self._suppress_save():
             self.model.set_channels(self.all_channels)
 
-        # Немедленно фиксируем diff в undo — не через debounce,
-        # иначе повторные drag & drop могут «съесть» друг друга.
         self._pending_state_desc = "Перемещение каналов (drag & drop)"
         self._do_save_state()
 
@@ -2875,6 +2978,7 @@ class PlaylistTab(QWidget):
         self.sync_to_core()
         with self._suppress_save():
             self.model.set_channels(self.all_channels)
+        self.groups_changed.emit()
 
     @staticmethod
     def _has_meta_to_remove(ch: ChannelData,
@@ -2883,6 +2987,11 @@ class PlaylistTab(QWidget):
                    for k, check in _META_CHECKS)
 
     def show_duplicate_finder(self):
+        """Диалог удаления дубликатов (отдельная утилита).
+
+        Фильтр-кнопка «🔁 Дубликаты» только ПОКАЗЫВАЕТ дубликаты —
+        этот диалог используется для их удаления.
+        """
         if not self.all_channels:
             info_box(self, "Нет каналов")
             return
@@ -2901,6 +3010,7 @@ class PlaylistTab(QWidget):
                 with self._suppress_save():
                     self.model.set_channels(self.all_channels)
                 self.update_info()
+                self.groups_changed.emit()
 
         dlg.duplicates_removed.connect(on_duplicates_removed)
         dlg.exec()
@@ -3071,7 +3181,7 @@ class PlaylistTab(QWidget):
         menu.addAction(self._act("Пакетное переименование групп",
                                  self._rename_groups, menu))
         menu.addSeparator()
-        menu.addAction(self._act("Поиск дубликатов...",
+        menu.addAction(self._act("Удалить дубликаты...",
                                  self.show_duplicate_finder, menu))
         menu.addAction(self._act("Сравнить плейлисты...",
                                  self.show_compare, menu))
@@ -3283,9 +3393,20 @@ class MainWindow(QMainWindow):
 
         self.group_combo = QComboBox()
         self.group_combo.addItem(GROUP_FILTER_ALL)
-        self.group_combo.setFixedWidth(150)
+        self.group_combo.setMinimumWidth(180)
         self.group_combo.currentTextChanged.connect(self._on_group_changed)
         fl.addWidget(self.group_combo, 0)
+
+        # >>> Кнопка-переключатель режима дубликатов
+        self.duplicates_btn = QPushButton(GROUP_FILTER_DUPLICATES)
+        self.duplicates_btn.setCheckable(True)
+        self.duplicates_btn.setToolTip(
+            "Показать только дубликаты.\n"
+            "Персиковый — совпадение по имени,\n"
+            "голубой — совпадение по URL,\n"
+            "сиреневый — совпадение по обоим критериям.")
+        self.duplicates_btn.toggled.connect(self._on_duplicates_toggled)
+        fl.addWidget(self.duplicates_btn, 0)
 
         layout.addLayout(fl)
 
@@ -3337,8 +3458,6 @@ class MainWindow(QMainWindow):
                          lambda: self._with_tab(
                              'delete_channels_without_metadata'))
         cm.addSeparator()
-        self._add_action(cm, "Поиск дубликатов...",
-                         self._show_duplicates)
         self._add_action(cm, "Сравнить плейлисты...", self._show_compare)
         cm.addSeparator()
         self._add_action(cm, "Удалить метаданные...",
@@ -3402,6 +3521,9 @@ class MainWindow(QMainWindow):
         tm.addSeparator()
         self._add_action(tm, "User-Agent по доменам",
                          self._manage_ua_rules)
+        tm.addSeparator()
+        self._add_action(tm, "Удалить дубликаты...",
+                         self._show_duplicates)
         tm.addSeparator()
         self._add_action(tm, "Показать лог", self._show_log)
 
@@ -3675,12 +3797,18 @@ class MainWindow(QMainWindow):
         self.tab_widget.setCurrentIndex(idx)
         tab.undo_state_changed.connect(self._on_undo_state)
         tab.info_changed.connect(self._on_info)
+        # >>> ДОБАВЛЕНО: синхронизация комбобокса групп с вкладкой
+        tab.groups_changed.connect(self._on_groups_changed)
         self.current_tab = tab
         tab.set_search_text(self.search_edit.text())
-        tab.set_group_filter(self.group_combo.currentText())
+        # Новая вкладка всегда стартует в обычном режиме (без дубликатов)
+        self.duplicates_btn.blockSignals(True)
+        self.duplicates_btn.setChecked(False)
+        self.duplicates_btn.blockSignals(False)
         self._apply_config()
         self._update_window_title()
         self._update_groups()
+        tab.set_group_filter(self.group_combo.currentText())
         return tab
 
     def _new_file(self):
@@ -3804,13 +3932,21 @@ class MainWindow(QMainWindow):
         self.tab_widget.setCurrentIndex(idx)
         tab.undo_state_changed.connect(self._on_undo_state)
         tab.info_changed.connect(self._on_info)
+        # >>> ДОБАВЛЕНО
+        tab.groups_changed.connect(self._on_groups_changed)
         self.current_tab = tab
         tab.sync_to_core()
         tab.refresh_view()
         tab.update_modified_status()
         self._apply_config()
+        # Сбрасываем кнопку дубликатов на новой вкладке
+        self.duplicates_btn.blockSignals(True)
+        self.duplicates_btn.setChecked(False)
+        self.duplicates_btn.blockSignals(False)
         self._update_window_title()
         self._update_groups()
+        tab.set_group_filter(self.group_combo.currentText()
+                             or GROUP_FILTER_ALL)
         self.set_action(f"✓ Создан плейлист: {len(channels)} каналов")
 
     def _handle_playlist_creation_error(self, error_message: str):
@@ -3987,6 +4123,9 @@ class MainWindow(QMainWindow):
             tab.undo_state_changed.disconnect(self._on_undo_state)
         with suppress(TypeError, RuntimeError):
             tab.info_changed.disconnect(self._on_info)
+        # >>> ДОБАВЛЕНО
+        with suppress(TypeError, RuntimeError):
+            tab.groups_changed.disconnect(self._on_groups_changed)
         tab.disconnect_signals()
         self.core.unregister_tab(tab.tab_id)
         del self.tabs[w]
@@ -3994,6 +4133,9 @@ class MainWindow(QMainWindow):
         tab.deleteLater()
         if self.tab_widget.count() == 0:
             self.current_tab = None
+            self.duplicates_btn.blockSignals(True)
+            self.duplicates_btn.setChecked(False)
+            self.duplicates_btn.blockSignals(False)
             self._update_window_title()
             self._update_groups()
             self._on_info("Готов")
@@ -4007,16 +4149,28 @@ class MainWindow(QMainWindow):
                 self.current_tab = self.tabs[w]
                 self.current_tab.set_search_text(
                     self.search_edit.text())
-                grp = self.group_combo.currentText() or GROUP_FILTER_ALL
-                self.current_tab.set_group_filter(grp)
-                self._update_window_title()
+                # Сначала обновляем список групп для новой вкладки
                 self._update_groups()
+                # Синхронизируем кнопку дубликатов с состоянием вкладки
+                in_dup = self.current_tab.model.is_duplicate_mode()
+                self.duplicates_btn.blockSignals(True)
+                self.duplicates_btn.setChecked(in_dup)
+                self.duplicates_btn.blockSignals(False)
+                if in_dup:
+                    self.current_tab.set_duplicate_filter(True)
+                else:
+                    self.current_tab.set_group_filter(
+                        self.group_combo.currentText() or GROUP_FILTER_ALL)
+                self._update_window_title()
                 self.current_tab.update_info()
                 self._on_undo_state(
                     self.current_tab.undo_manager.can_undo(),
                     self.current_tab.undo_manager.can_redo())
                 return
         self.current_tab = None
+        self.duplicates_btn.blockSignals(True)
+        self.duplicates_btn.setChecked(False)
+        self.duplicates_btn.blockSignals(False)
         self._update_window_title()
         self._update_groups()
         self._on_info("Готов")
@@ -4028,25 +4182,77 @@ class MainWindow(QMainWindow):
             self.current_tab.set_search_text(text)
 
     def _on_group_changed(self, group: str):
+        # Выбор группы в комбо автоматически выключает режим дубликатов —
+        # это два взаимоисключающих состояния.
+        if self.duplicates_btn.isChecked():
+            self.duplicates_btn.blockSignals(True)
+            self.duplicates_btn.setChecked(False)
+            self.duplicates_btn.blockSignals(False)
         if self.current_tab:
+            self.current_tab.set_duplicate_filter(False)
             self.current_tab.set_group_filter(group)
 
+    def _on_duplicates_toggled(self, checked: bool):
+        if not self.current_tab:
+            self.duplicates_btn.blockSignals(True)
+            self.duplicates_btn.setChecked(False)
+            self.duplicates_btn.blockSignals(False)
+            return
+        if checked:
+            self.current_tab.set_duplicate_filter(True)
+        else:
+            self.current_tab.set_duplicate_filter(False)
+            self.current_tab.set_group_filter(
+                self.group_combo.currentText() or GROUP_FILTER_ALL)
+
+    def _on_groups_changed(self):
+        """Пересобрать комбобокс групп для активной вкладки.
+
+        Вызывается, когда PlaylistTab изменил состав групп
+        (загрузка файла, импорт, переименование, undo/redo, ЧС и т.д.).
+        Комбо читает группы напрямую из all_channels вкладки, поэтому
+        не зависит от асинхронного debounce _sync_timer.
+        """
+        if not _is_qobject_valid(self):
+            return
+        sender = self.sender()
+        if sender is not None and sender is not self.current_tab:
+            return
+        self._update_groups()
+        # Повторно применяем текущий фильтр: выбранная группа могла
+        # исчезнуть → сбрасываем на «Все группы».
+        if not self.duplicates_btn.isChecked() and self.current_tab:
+            self.current_tab.set_group_filter(
+                self.group_combo.currentText() or GROUP_FILTER_ALL)
+
     def _update_groups(self):
-        cur_group = self.group_combo.currentText()
+        """Пересобрать список групп из активной вкладки.
+
+        Начинается с «Все группы», затем — уникальные группы плейлиста
+        (отсортированные). Текущий выбор сохраняется, если группа ещё
+        существует. Читаем группы НАПРЯМУЮ из all_channels вкладки —
+        так же, как в монолите, где listComboBox заполнялся из
+        all_channels. Раньше брали из core.get_all_groups(tab_id),
+        который обновляется асинхронно через debounce, из-за чего
+        при открытии файла список групп был пуст.
+        """
+        cur = self.group_combo.currentText()
         self.group_combo.blockSignals(True)
         self.group_combo.clear()
         self.group_combo.addItem(GROUP_FILTER_ALL)
         if self.current_tab:
-            for g in self.core.get_all_groups(self.current_tab.tab_id):
+            groups = sorted({
+                ch.meta.group
+                for ch in self.current_tab.all_channels
+                if ch.meta.group
+            })
+            for g in groups:
                 self.group_combo.addItem(g)
-        idx = self.group_combo.findText(cur_group)
+        idx = self.group_combo.findText(cur)
         if idx < 0:
             idx = 0
         self.group_combo.setCurrentIndex(idx)
         self.group_combo.blockSignals(False)
-        if self.current_tab:
-            self.current_tab.set_group_filter(
-                self.group_combo.currentText())
 
     def _on_undo_state(self, cu: bool, cr: bool):
         sender = self.sender()
@@ -4105,6 +4311,7 @@ class MainWindow(QMainWindow):
             self.current_tab.remove_metadata(opts, scope=dlg.get_scope())
 
     def _show_duplicates(self):
+        """Открыть диалог удаления дубликатов (не путать с фильтром)."""
         if self.current_tab:
             self.current_tab.show_duplicate_finder()
 

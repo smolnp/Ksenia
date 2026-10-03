@@ -258,3 +258,33 @@ class SimpleDuplicateFinder:
             seen.add(key)
             result.append(ch)
         return result, removed
+
+    # >>> ДОБАВЛЕНО: быстрый поиск дубликатов по UID для фильтра-подсветки
+    @staticmethod
+    def find_duplicate_uids(channels: List[ChannelData],
+                            use_tvg_id: bool = False
+                            ) -> Tuple[Set[int], Set[int]]:
+        """Вернуть (uids_by_name, uids_by_url).
+
+        Включает ВСЕ uid из групп, где больше одного канала.
+        """
+        by_name: Dict[str, List[int]] = defaultdict(list)
+        by_url: Dict[str, List[int]] = defaultdict(list)
+        for ch in channels:
+            key = ch.normalized_name()
+            if key:
+                if use_tvg_id and ch.meta.tvg_id:
+                    key = f"{key}|{ch.meta.tvg_id.lower()}"
+                by_name[key].append(ch.uid)
+            if ch.has_valid_url:
+                by_url[ch.link.url.strip()].append(ch.uid)
+
+        uids_name: Set[int] = set()
+        uids_url: Set[int] = set()
+        for uids in by_name.values():
+            if len(uids) > 1:
+                uids_name.update(uids)
+        for uids in by_url.values():
+            if len(uids) > 1:
+                uids_url.update(uids)
+        return uids_name, uids_url
