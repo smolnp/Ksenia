@@ -5,15 +5,16 @@ from __future__ import annotations
 import os
 import re
 import json
-import csv
 import time
 import threading
 import weakref
 from contextlib import suppress
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple, Callable
+from urllib.parse import urlparse
+
 from PyQt6.QtCore import Qt, QPoint, pyqtSignal, QThread
-from PyQt6.QtGui import (QAction, QKeySequence, QColor, QFont,
+from PyQt6.QtGui import (QAction, QKeySequence, QColor, QFont, QBrush,
     QTextCharFormat, QSyntaxHighlighter, QIcon)
 from PyQt6.QtWidgets import (QDialog, QDialogButtonBox, QVBoxLayout,
     QHBoxLayout, QFormLayout, QLabel, QLineEdit, QPushButton,
@@ -23,6 +24,7 @@ from PyQt6.QtWidgets import (QDialog, QDialogButtonBox, QVBoxLayout,
     QProgressBar, QFrame, QTextEdit, QPlainTextEdit, QInputDialog,
     QStyle, QMenu, QSlider, QApplication,
     QWidget, QTabWidget)
+
 from constants import (OK_CANCEL_BB, CLOSE_BB, YES_NO, M3U_FILTER,
     JSON_FILTER, CSV_FILTER, ALL_FILTER, DEFAULT_GROUP,
     GROUP_FILTER_ALL, THEME_ICON_NEGATIVE_TTL_SEC,
@@ -40,14 +42,14 @@ from paths import (logger, error_box, warn_box, info_box, confirm,
     confirm_three, open_file_dialog, save_file_dialog, open_dir_dialog,
     open_external)
 from utils import URLUtils
-from urllib.parse import urlparse
 from config import Config
 from sources import LinkSource, LinkSourceManager
 from blacklists import (DomainUserAgentManager, DomainBlacklistRule,
     DomainUserAgentRule)
 from undo import SimpleDuplicateFinder
-from parsers import M3UParser
 from workers import SourcesRefreshWorker
+from diff_utils import (DiffOp, DiffLine, diff_lines, diff_stats,
+    to_unified_diff, normalize_lines, channels_only)
 
 try:
     import shiboken6
@@ -55,6 +57,15 @@ try:
 except ImportError:
     shiboken6 = None
     _HAS_SHIBOKEN = False
+
+
+# ---------------------------------------------------------------------
+# Цвета подсветки diff
+# ---------------------------------------------------------------------
+_COLOR_ADD_BG = QColor(220, 255, 220)
+_COLOR_DEL_BG = QColor(255, 220, 220)
+_COLOR_REPL_BG = QColor(255, 250, 200)
+_COLOR_LINENO_FG = QColor(120, 120, 120)
 
 
 def _is_qobject_valid(obj) -> bool:
@@ -1229,45 +1240,88 @@ class DuplicateFinderDialog(BaseDialog):
 
 
 class ComparePlaylistsDialog(BaseDialog):
-    def __init__(self, current_channels: List[ChannelData], parent=None):
-        super().__init__("Сравнение плейлистов", parent, size=(1000, 650))
-        self.current_channels = list(current_channels)
-        self.other_channels: List[ChannelData] = []
+    """Построчный diff двух плейлистов (как git diff)."""
+
+    def __init__(self, current_text: str,
+                 current_label: str = "current", parent=None):
+        super().__init__("Сравнение плейлистов", parent, size=(1100, 700))
+        self._current_text = current_text
+        self._current_label = current_label
+        self._other_text = ""
+        self._other_label = "other"
+        self._diff: List[DiffLine] = []
         self._setup_ui()
+        self._update_stats()
 
     def _setup_ui(self):
         l = self.root
+
         top = QHBoxLayout()
-        self.load_btn = QPushButton("Загрузить второй плейлист...")
+        self.load_btn = QPushButton("Загрузить второй плейлист…")
         self.load_btn.clicked.connect(self._load_other)
         top.addWidget(self.load_btn)
-        self.file_label = QLabel("Не загружен")
+
+        self.file_label = QLabel("Второй файл не загружен")
+        self.file_label.setStyleSheet("color: #666;")
         top.addWidget(self.file_label, 1)
-        self.export_btn = QPushButton("Экспорт результата...")
-        self.export_btn.clicked.connect(self._export_result)
+
+        top.addWidget(QLabel("Режим:"))
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItem("Построчный (как git)", "lines")
+        self.mode_combo.addItem("По каналам", "channels")
+        self.mode_combo.currentIndexChanged.connect(self._recompute)
+        top.addWidget(self.mode_combo)
+
+        self.ignore_ws_check = QCheckBox("Игнорировать пробелы")
+        self.ignore_ws_check.toggled.connect(self._recompute)
+        top.addWidget(self.ignore_ws_check)
+
+        self.export_btn = QPushButton("Экспорт diff…")
+        self.export_btn.clicked.connect(self._export_diff)
         self.export_btn.setEnabled(False)
         top.addWidget(self.export_btn)
+
         l.addLayout(top)
 
         self.stats_label = QLabel("")
         self.stats_label.setTextFormat(Qt.TextFormat.RichText)
         l.addWidget(self.stats_label)
 
-        tabs = QTabWidget()
-        self.only_a_table = make_table(["Название", "Группа", "URL"])
-        self.only_b_table = make_table(["Название", "Группа", "URL"])
-        self.both_table = make_table(["Название", "Группа", "URL"])
-        self.diff_url_table = make_table(["Название", "Группа", "URL"])
+        self.unified_check = QCheckBox("Показать unified diff (текстом)")
+        self.unified_check.toggled.connect(self._on_unified_toggled)
+        l.addWidget(self.unified_check)
 
-        for t, name in ((self.only_a_table, "Только в текущем"),
-                        (self.only_b_table, "Только во втором"),
-                        (self.both_table, "В обоих"),
-                        (self.diff_url_table, "Разные URL")):
-            w = QWidget()
-            wl = QVBoxLayout(w)
-            wl.addWidget(t)
-            tabs.addTab(w, name)
-        l.addWidget(tabs)
+        self.table = QTableWidget()
+        self.table.setColumnCount(4)
+        self.table.setHorizontalHeaderLabels(
+            ["№", self._current_label, "№", self._other_label])
+        self.table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setShowGrid(False)
+        self.table.verticalHeader().setVisible(False)
+
+        h = self.table.horizontalHeader()
+        h.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        h.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        h.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        h.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        self.table.setColumnWidth(0, 55)
+        self.table.setColumnWidth(2, 55)
+
+        mono = QFont("Courier New", 10)
+        mono.setStyleHint(QFont.StyleHint.Monospace)
+        self.table.setFont(mono)
+        l.addWidget(self.table, 1)
+
+        self.unified_view = QPlainTextEdit()
+        self.unified_view.setReadOnly(True)
+        self.unified_view.setFont(mono)
+        self.unified_view.setLineWrapMode(
+            QPlainTextEdit.LineWrapMode.NoWrap)
+        self.unified_view.setVisible(False)
+        l.addWidget(self.unified_view, 1)
 
         self.add_close()
 
@@ -1277,115 +1331,131 @@ class ComparePlaylistsDialog(BaseDialog):
             return
         try:
             with open(fp, 'r', encoding='utf-8', errors='replace') as f:
-                content = f.read()
-            self.other_channels = M3UParser.parse(
-                content, os.path.basename(fp))
-            self.file_label.setText(
-                f"Загружен: {os.path.basename(fp)} "
-                f"({len(self.other_channels)} каналов)")
-            self._compute_diff()
-            self.export_btn.setEnabled(True)
+                self._other_text = f.read()
         except Exception as e:
             error_box(self, str(e))
+            return
+        self._other_label = os.path.basename(fp)
+        self.file_label.setText(f"Второй файл: {self._other_label}")
+        self.table.setHorizontalHeaderLabels(
+            ["№", self._current_label, "№", self._other_label])
+        self.export_btn.setEnabled(True)
+        self._recompute()
 
-    def _compute_diff(self):
-        cur_map: Dict[str, ChannelData] = {}
-        for ch in self.current_channels:
-            key = ch.normalized_name()
-            if key and key not in cur_map:
-                cur_map[key] = ch
-        other_map: Dict[str, ChannelData] = {}
-        for ch in self.other_channels:
-            key = ch.normalized_name()
-            if key and key not in other_map:
-                other_map[key] = ch
+    def _prepare_lines(self, text: str) -> List[str]:
+        lines = normalize_lines(text, self.ignore_ws_check.isChecked())
+        if self.mode_combo.currentData() == "channels":
+            lines = channels_only(lines)
+        return lines
 
-        only_a = [cur_map[k] for k in cur_map if k not in other_map]
-        only_b = [other_map[k] for k in other_map if k not in cur_map]
-        both_keys = [k for k in cur_map if k in other_map]
-        diff_url = [cur_map[k] for k in both_keys
-                    if (cur_map[k].link.url or "")
-                    != (other_map[k].link.url or "")]
+    def _recompute(self):
+        if not self._other_text:
+            self._diff = []
+            self.table.setRowCount(0)
+            self._update_stats()
+            return
+        left = self._prepare_lines(self._current_text)
+        right = self._prepare_lines(self._other_text)
+        self._diff = diff_lines(left, right)
+        self._fill_table()
+        self._update_stats()
+        if self.unified_check.isChecked():
+            self._fill_unified()
 
+    def _fill_table(self):
+        self.table.setRowCount(len(self._diff))
+        mono = self.table.font()
+        for row, d in enumerate(self._diff):
+            self._set_row(row, d, mono)
+
+    def _set_row(self, row: int, d: DiffLine, font: QFont):
+        left_no = QTableWidgetItem(str(d.left_no) if d.left_no else "")
+        left_no.setForeground(_COLOR_LINENO_FG)
+        left_no.setTextAlignment(Qt.AlignmentFlag.AlignRight |
+                                 Qt.AlignmentFlag.AlignVCenter)
+        self.table.setItem(row, 0, left_no)
+
+        left_item = QTableWidgetItem(d.left)
+        left_item.setFont(font)
+        self.table.setItem(row, 1, left_item)
+
+        right_no = QTableWidgetItem(str(d.right_no) if d.right_no else "")
+        right_no.setForeground(_COLOR_LINENO_FG)
+        right_no.setTextAlignment(Qt.AlignmentFlag.AlignRight |
+                                  Qt.AlignmentFlag.AlignVCenter)
+        self.table.setItem(row, 2, right_no)
+
+        right_item = QTableWidgetItem(d.right)
+        right_item.setFont(font)
+        self.table.setItem(row, 3, right_item)
+
+        bg_left = None
+        bg_right = None
+        if d.op == DiffOp.DELETE:
+            bg_left = _COLOR_DEL_BG
+        elif d.op == DiffOp.INSERT:
+            bg_right = _COLOR_ADD_BG
+        elif d.op == DiffOp.REPLACE:
+            bg_left = _COLOR_REPL_BG
+            bg_right = _COLOR_REPL_BG
+
+        if bg_left is not None:
+            left_item.setBackground(QBrush(bg_left))
+            left_no.setBackground(QBrush(bg_left))
+        if bg_right is not None:
+            right_item.setBackground(QBrush(bg_right))
+            right_no.setBackground(QBrush(bg_right))
+
+    def _fill_unified(self):
+        left = self._prepare_lines(self._current_text)
+        right = self._prepare_lines(self._other_text)
+        text = to_unified_diff(left, right,
+                               left_label=self._current_label,
+                               right_label=self._other_label)
+        self.unified_view.setPlainText(text or "(нет различий)")
+
+    def _on_unified_toggled(self, checked: bool):
+        self.table.setVisible(not checked)
+        self.unified_view.setVisible(checked)
+        if checked and self._other_text:
+            self._fill_unified()
+
+    def _update_stats(self):
+        if self._diff:
+            st = diff_stats(self._diff)
+        else:
+            st = {'added': 0, 'removed': 0, 'changed': 0,
+                  'equal': 0, 'total': 0}
         self.stats_label.setText(
-            f"<b>Текущий:</b> {len(self.current_channels)} | "
-            f"<b>Второй:</b> {len(self.other_channels)} | "
-            f"<b>Только в текущем:</b> {len(only_a)} | "
-            f"<b>Только во втором:</b> {len(only_b)} | "
-            f"<b>В обоих:</b> {len(both_keys)} | "
-            f"<b>Разные URL:</b> {len(diff_url)}")
+            f"<b>Добавлено:</b> <span style='color:#1b7e1b'>"
+            f"+{st['added']}</span> | "
+            f"<b>Удалено:</b> <span style='color:#b02020'>"
+            f"-{st['removed']}</span> | "
+            f"<b>Изменено:</b> <span style='color:#b08000'>"
+            f"~{st['changed']}</span> | "
+            f"<b>Без изменений:</b> {st['equal']} | "
+            f"<b>Строк diff:</b> {st['total']}")
 
-        self._fill_table(self.only_a_table, only_a)
-        self._fill_table(self.only_b_table, only_b)
-        self._fill_table(self.both_table, [cur_map[k] for k in both_keys])
-        self._fill_table(self.diff_url_table, diff_url)
-
-    def _export_result(self):
-        fp = save_file_dialog(self, "Экспорт сравнения", "comparison.csv",
-                              "CSV (*.csv);;JSON (*.json)")
+    def _export_diff(self):
+        if not self._diff:
+            warn_box(self, "Нет данных для экспорта")
+            return
+        fp = save_file_dialog(
+            self, "Экспорт diff", "playlists.diff",
+            "Diff (*.diff *.patch);;Все файлы (*.*)")
         if not fp:
             return
         try:
-            if fp.lower().endswith('.json'):
-                data = {
-                    'only_in_current': [
-                        ch.to_dict() for ch in
-                        self._table_to_channels(self.only_a_table)],
-                    'only_in_other': [
-                        ch.to_dict() for ch in
-                        self._table_to_channels(self.only_b_table)],
-                    'in_both': [
-                        ch.to_dict() for ch in
-                        self._table_to_channels(self.both_table)],
-                    'different_urls': [
-                        ch.to_dict() for ch in
-                        self._table_to_channels(self.diff_url_table)],
-                }
-                with open(fp, 'w', encoding='utf-8') as f:
-                    json.dump(data, f, ensure_ascii=False, indent=2)
-            else:
-                if not fp.lower().endswith('.csv'):
-                    fp += '.csv'
-                with open(fp, 'w', encoding='utf-8', newline='') as f:
-                    writer = csv.writer(f)
-                    writer.writerow(['category', 'name', 'group', 'url'])
-                    for cat, table in (
-                        ('only_in_current', self.only_a_table),
-                        ('only_in_other', self.only_b_table),
-                        ('in_both', self.both_table),
-                        ('different_urls', self.diff_url_table),
-                    ):
-                        for row in range(table.rowCount()):
-                            writer.writerow([
-                                cat,
-                                table.item(row, 0).text()
-                                if table.item(row, 0) else '',
-                                table.item(row, 1).text()
-                                if table.item(row, 1) else '',
-                                table.item(row, 2).text()
-                                if table.item(row, 2) else '',
-                            ])
-            info_box(self, "Экспортировано", "Готово")
+            left = self._prepare_lines(self._current_text)
+            right = self._prepare_lines(self._other_text)
+            text = to_unified_diff(left, right,
+                                   left_label=self._current_label,
+                                   right_label=self._other_label)
+            with open(fp, 'w', encoding='utf-8') as f:
+                f.write(text or "")
+            info_box(self, f"Diff сохранён:\n{fp}", "Экспорт")
         except Exception as e:
             error_box(self, str(e))
-
-    @staticmethod
-    def _table_to_channels(table: QTableWidget) -> List[ChannelData]:
-        result = []
-        for row in range(table.rowCount()):
-            ch = ChannelData()
-            ch.meta.name = (table.item(row, 0).text()
-                            if table.item(row, 0) else '')
-            ch.meta.group = (table.item(row, 1).text()
-                             if table.item(row, 1) else '')
-            ch.link.url = (table.item(row, 2).text()
-                           if table.item(row, 2) else '')
-            result.append(ch)
-        return result
-
-    @staticmethod
-    def _fill_table(table: QTableWidget, channels: List[ChannelData]):
-        fill_channels_table(table, channels, max_url=120)
 
 
 class BlockDomainDialog(BaseDialog):
@@ -1993,7 +2063,6 @@ class LinkSourceManagerDialog(BaseDialog):
         layout.addWidget(self._progress_label)
 
         self._progress_bar = QProgressBar()
-        # ВСЕГДА 0..100 — SourcesRefreshWorker эмитит проценты
         self._progress_bar.setRange(0, 100)
         self._progress_bar.setValue(0)
         self._progress_bar.setVisible(False)
@@ -2124,7 +2193,6 @@ class LinkSourceManagerDialog(BaseDialog):
             check_urls=True)
 
         def on_progress(value, total, text):
-            # Всегда 0..100 — воркер эмитит проценты
             if self._progress_bar.maximum() != 100:
                 self._progress_bar.setRange(0, 100)
             v = max(0, min(100, int(value)))
@@ -2136,7 +2204,6 @@ class LinkSourceManagerDialog(BaseDialog):
             self._progress_label.repaint()
 
         def on_source_checked(name, working, total):
-            # Дополнительная строка статуса по завершении источника
             self._progress_label.setText(
                 f"✓ Проверено [{name}]: {working}/{total}")
             self._progress_label.repaint()

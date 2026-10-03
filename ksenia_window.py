@@ -768,22 +768,6 @@ class ChannelTableModel(QAbstractTableModel):
             self.dataChanged.emit(top, bot)
 
 
-class _NumericItem(QTableWidgetItem):
-    def __init__(self, value: int):
-        super().__init__(str(value))
-        self._value = int(value)
-        self.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-
-    def __lt__(self, other):
-        if isinstance(other, _NumericItem):
-            return self._value < other._value
-        try:
-            other_val = int(other.text())
-            return self._value < other_val
-        except (ValueError, AttributeError):
-            return super().__lt__(other)
-
-
 _META_CHECKS = (
     ('tvg_id',      lambda ch: bool(ch.meta.tvg_id)),
     ('tvg_logo',    lambda ch: bool(ch.meta.tvg_logo)),
@@ -2633,6 +2617,38 @@ class PlaylistTab(QWidget):
                 self.filepath = fp
             self.save_to_file()
 
+    def _render_playlist_text(self) -> str:
+        """Собрать M3U-текст из текущего состояния (для diff/экспорта)."""
+        parts: List[str] = []
+        ht = self.header_manager.get_header_text()
+        if ht:
+            parts.append(ht.rstrip('\n'))
+            parts.append('')
+        save_extvlcopt = self.core.config.get('save_extvlcopt', True)
+        for ch in self.all_channels:
+            parts.append(ch.link.extinf)
+            if save_extvlcopt:
+                for line in ch.link.extvlcopt_lines:
+                    parts.append(line)
+            else:
+                if ch.link.user_agent:
+                    parts.append(
+                        f'#EXTVLCOPT:http-user-agent='
+                        f'"{ch._escape(ch.link.user_agent)}"')
+                for k, v in ch.link.extra_headers.items():
+                    if k.lower() == 'user-agent':
+                        continue
+                    if k.lower() == 'referer':
+                        parts.append(
+                            f'#EXTVLCOPT:http-referrer='
+                            f'"{ch._escape(v)}"')
+                    else:
+                        parts.append(
+                            f'#EXTVLCOPT:http-header='
+                            f'"{k}: {ch._escape(v)}"')
+            parts.append(ch.link.url or '')
+        return '\n'.join(parts)
+
     def save_to_file(self, filepath: Optional[str] = None) -> bool:
         if filepath:
             self.filepath = filepath
@@ -2893,7 +2909,10 @@ class PlaylistTab(QWidget):
         if not self.all_channels:
             info_box(self, "Нет каналов")
             return
-        dlg = ComparePlaylistsDialog(self.all_channels, self)
+        text = self._render_playlist_text()
+        label = (os.path.basename(self.filepath)
+                 if self.filepath else "Текущий")
+        dlg = ComparePlaylistsDialog(text, current_label=label, parent=self)
         dlg.exec()
 
     @staticmethod
