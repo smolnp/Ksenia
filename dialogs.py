@@ -321,45 +321,84 @@ class HelpBrowser(QDialog):
     Стиль DEFAULT_CSS применяется ко всем документам через
     document().setDefaultStyleSheet(). Файлы справки НЕ должны
     содержать собственных <style>.
+
+    Цвета взяты из светлой темы проекта (theme-light):
+      --body-background: #fbfbfe
+      --font-color:      #222222
+      --color-a:         #00538a
+      --color-ahover:    #001066
+      --color-avisited:  #551a8b
+      --box-background:  rgba(51, 56, 71, 0.1)
+      --box-border:      #bbcaff
+      --kbd-background:  #dcdcd5
+      --border-table:    #6cc0ff
+      --box-important:   #fec8c8
+      --header-background: #5198cc
+
+    Qt QTextBrowser не поддерживает CSS-переменные и ::selection,
+    поэтому:
+      • значения var(...) подставлены как константы;
+      • цвета выделения задаются через setStyleSheet виджета
+        с автоподбором контраста по системной палитре.
     """
 
     DEFAULT_CSS = """
-        html, body, div, h1, h2, h3, h4, h5, h6, p, pre,
-        ol, ul, li, table, thead, tbody, tr, th, td,
-        blockquote, code, kbd, span, a, hr {
+        html, body, address, blockquote, div, dl, form, h1, h2, h3, h4,
+        h5, h6, ol, p, pre, table, ul, dd, dt, li, tbody, td, tfoot,
+        th, thead, tr, button, del, ins, map, object, a, abbr, acronym,
+        b, bdo, big, br, cite, code, dfn, em, i, img, kbd, q, samp,
+        small, span, strong, sub, sup, tt, var, legend, fieldset {
             margin: 0;
             padding: 0;
         }
+        img, fieldset { border: 0; }
+        img { max-width: 90%; height: auto; }
+
         body {
             background-color: #fbfbfe;
             color: #222222;
-            font-family: "Open Sans", "Segoe UI", "Noto Sans", Arial, sans-serif;
+            font-family: "Open Sans", "Segoe UI", "Noto Sans",
+                         Arial, sans-serif;
+            font-stretch: normal;
             font-size: 15px;
             line-height: 1.55;
             margin: 28px 36px;
         }
-        a { color: #00538a; text-decoration: none; }
-        a:hover { color: #001066; text-decoration: underline; }
+
+        a {
+            color: #00538a;
+            text-decoration: none;
+            outline: none;
+        }
+        a:hover { text-decoration: underline; color: #001066; }
+        a:visited { outline: none; color: #551a8b; }
+        a:active { font-weight: bold; }
+
         p { margin: 0 0 1.2em 0; padding-top: 0.4em; }
 
         kbd {
             font-family: "Consolas", "Menlo", "Courier New", monospace;
             font-weight: bold;
-            background-color: #dcdcd5;
-            padding: 2px 5px;
+            border-radius: 0.188em;
+            background: #dcdcd5;
             color: #222222;
+            padding: 0.188em 0.25em;
         }
-        span.code {
+        span.code, span {
             font-family: "Consolas", "Menlo", "Courier New", monospace;
             font-size: 13px;
-            background-color: #dcdcd5;
-            padding: 2px 5px;
+            background: #dcdcd5;
             color: #222222;
+            padding: 0.188em 0.25em;
+            border-radius: 0.27em;
         }
-        ul, ol { margin: 1em 0 1.4em 1.5em; padding: 0; line-height: 140%; }
+
+        ul, ol { margin: 1em 0 1.4em 1.5em; padding: 0;
+                 line-height: 140%; }
         li { margin: 0 0 0.5em 0; padding: 0; }
 
         h1, h2, h3, h4, h5, h6 {
+            display: block;
             margin: 0.93em 0 0.2em 0;
             color: #0a2a5c;
             font-weight: bold;
@@ -367,62 +406,88 @@ class HelpBrowser(QDialog):
         h1 {
             font-weight: normal;
             font-size: 1.8em;
-            padding: 4px 0 8px 0;
-            border-bottom: 2px solid #5198cc;
+            padding: 0.225em 2.188em 0.225em 0.313em;
+            border-bottom: 2px solid #6cc0ff;
             margin-bottom: 12px;
         }
         h2 {
-            font-size: 1.5em;
-            padding: 4px 0 6px 0;
+            font-size: 1.6em;
+            text-align: center;
+            padding-left: 0.4em;
+            line-height: 1.6em;
             border-bottom: 1px solid rgba(53, 86, 129, 0.3);
             margin-top: 34px;
         }
-        h3 { font-weight: 600; font-size: 1.25em; margin-top: 22px; }
-        h4 { font-size: 1.1em; font-style: italic; margin-top: 16px; }
-        h5 { font-size: 1.02em; font-style: italic; margin-top: 12px; }
+        h3 { font-weight: 600; font-size: 1.4em; margin-top: 22px; }
+        h4 { font-size: 1.18em; font-style: italic;
+             padding: 0.7em 0 0 1em; }
+        h5 { font-size: 1.059em; font-style: italic;
+             padding: 0.33em 0 0 2.33em; }
         h6 { font-size: 0.85em; text-transform: uppercase; }
 
+        /* --- Блоки кода ---
+           Светлый фон + тёмный текст. Гарантирует читаемость
+           при любом системном выделении. */
         pre {
-            font-family: "Consolas", "Menlo", "Liberation Mono", monospace;
+            font-family: "Consolas", "Menlo", "Liberation Mono",
+                         monospace;
             font-size: 13px;
-            background-color: #10131e;
-            color: #e6e6e6;
+            background-color: #eef0f3;
+            color: #1a1a1a;
             padding: 12px 14px;
             margin: 10px 0 16px 0;
             white-space: pre-wrap;
-            border: 1px solid #303030;
+            border: 1px solid #bbcaff;
         }
-        pre code { background: none; color: inherit; padding: 0; font-size: 13px; }
+        pre code {
+            background: none;
+            color: inherit;
+            padding: 0;
+            font-size: 13px;
+        }
         code {
-            font-family: "Consolas", "Menlo", "Liberation Mono", monospace;
+            font-family: "Consolas", "Menlo", "Liberation Mono",
+                         monospace;
             font-size: 13px;
             background-color: #eef0f3;
-            color: #222222;
+            color: #1a1a1a;
             padding: 1px 5px;
         }
 
+        /* --- Информационные блоки --- */
         blockquote, .box-text {
             background-color: rgba(51, 56, 71, 0.08);
             border-left: 4px solid #5198cc;
+            color: #222222;
             padding: 10px 14px;
             margin: 12px 0;
+            text-indent: 0;
         }
         blockquote p { margin: 0; }
+
         .important {
             background-color: #fec8c8;
             border-left: 4px solid #b30000;
+            color: #222222;
             padding: 10px 14px;
             margin: 12px 0;
+            text-indent: 0;
         }
         .important p { margin: 0; }
+
         .note {
             background-color: #dde6f4;
             border-left: 4px solid #5198cc;
+            color: #222222;
             padding: 10px 14px;
             margin: 12px 0;
+            text-indent: 0;
         }
         .note p { margin: 0; }
 
+        /* --- Таблицы ---
+           Светлые фоны, тёмный текст — контрастно при любом
+           системном выделении. */
         table {
             border-collapse: collapse;
             width: 100%;
@@ -434,15 +499,31 @@ class HelpBrowser(QDialog):
             padding: 6px 10px;
             text-align: left;
             vertical-align: top;
+            color: #222222;
         }
         th {
-            background-color: #10131e;
-            color: #f0f0f0;
+            background-color: #e4edf8;
+            color: #0a2a5c;
             font-weight: bold;
         }
-        hr { border: none; border-top: 1px solid #bbcaff; margin: 28px 0; }
-        .meta { color: #57606a; font-size: 13px; margin: 4px 0 20px 0; }
+        td { background-color: #fbfbfe; }
+        tr:nth-child(even) td { background-color: #f4f8fd; }
+
+        hr { border: none; border-top: 1px solid #bbcaff;
+             margin: 28px 0; }
+
+        .meta { color: #57606a; font-size: 13px;
+                margin: 4px 0 20px 0; }
         .meta strong { color: #222222; }
+
+        .front-text {
+            line-height: 1.375em;
+            margin: 0 0 0.938em 0;
+            font-weight: 300;
+            text-align: center;
+            letter-spacing: 0.1em;
+            color: #222222;
+        }
     """
 
     def __init__(self, index_path: str, parent=None):
@@ -519,10 +600,59 @@ class HelpBrowser(QDialog):
 
         self._fill_toc()
         self._go_home()
+        self._apply_selection_style()
+
+        # Следим за сменой системной палитры (светлая/тёмная тема ОС)
+        app = QApplication.instance()
+        if app is not None:
+            app.paletteChanged.connect(self._on_palette_changed)
 
         bb = QDialogButtonBox(CLOSE_BB)
         bb.rejected.connect(self.reject)
         self.root.addWidget(bb)
+
+    def _on_palette_changed(self, *_args):
+        self._apply_selection_style()
+
+    def _apply_selection_style(self):
+        """Подобрать контрастные цвета выделения под текущую палитру.
+
+        Qt QTextBrowser не поддерживает ::selection в CSS, поэтому
+        цвета выделения задаются через styleSheet виджета
+        (selection-background-color / selection-color).
+
+        Если системное выделение тёмное — текст выделения светлый,
+        и наоборот. Это гарантирует читаемость в любой теме.
+        """
+        try:
+            pal = self.viewer.palette()
+            hl = pal.color(pal.ColorRole.Highlight)
+            hl_text = pal.color(pal.ColorRole.HighlightedText)
+            # Яркость фона выделения и текста выделения (0..255)
+            luma = (0.299 * hl.red() + 0.587 * hl.green()
+                    + 0.114 * hl.blue())
+            hl_luma = (0.299 * hl_text.red() + 0.587 * hl_text.green()
+                       + 0.114 * hl_text.blue())
+            # Если контраст между фоном и текстом выделения < 80 —
+            # подбираем текст принудительно.
+            if abs(luma - hl_luma) < 80:
+                text_color = "#ffffff" if luma < 128 else "#000000"
+            else:
+                text_color = hl_text.name()
+            self.viewer.setStyleSheet(
+                "QTextBrowser {"
+                f"  selection-background-color: {hl.name()};"
+                f"  selection-color: {text_color};"
+                "}"
+            )
+        except Exception:
+            # Безопасный дефолт — светлая тема проекта
+            self.viewer.setStyleSheet(
+                "QTextBrowser {"
+                "  selection-background-color: #dde6f4;"
+                "  selection-color: #222222;"
+                "}"
+            )
 
     # --- Навигация ---
     def _go_home(self):
