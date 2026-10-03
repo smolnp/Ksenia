@@ -544,7 +544,17 @@ class SourceUrlCheckWorker(BaseWorker):
 
 
 class SourcesRefreshWorker(BaseWorker):
-    """Объединённое «Обновить всё»: загрузка + проверка URL + rebuild."""
+    """Объединённое «Обновить всё»: загрузка + проверка URL + rebuild.
+
+    Трёхфазная шкала прогресса (0..100):
+      • Фаза 1 (0..40%)  — загрузка источников
+      • Фаза 2 (40..90%) — проверка URL (агрегируется по всем источникам)
+      • Фаза 3 (90..100%) — rebuild_alive_index
+    """
+
+    PHASE1_END = 40
+    PHASE2_END = 90
+    PHASE3_END = 100
 
     all_done = pyqtSignal(int, int)
     source_checked = pyqtSignal(str, int, int)
@@ -559,6 +569,13 @@ class SourcesRefreshWorker(BaseWorker):
         self.config = config
         self.check_urls = bool(check_urls)
         self._child_workers: List['SourceUrlCheckWorker'] = []
+
+        # Агрегация прогресса фазы 2
+        self._phase2_lock = threading.Lock()
+        self._phase2_weights: Dict[str, int] = {}
+        self._phase2_checked: Dict[str, int] = {}
+        self._phase2_total: int = 0
+        self._last_phase2_pct: int = self.PHASE1_END
 
     def stop(self):
         super().stop()
@@ -615,6 +632,26 @@ class SourcesRefreshWorker(BaseWorker):
         with suppress(Exception):
             self.source_checked.emit(name, working, total)
 
+    def _on_child_progress(self, name: str, cur: int, tot: int):
+        """Агрегирует прогресс дочерних воркеров в общий диапазон 40..90%."""
+        with self._phase2_lock:
+            weight = self._phase2_weights.get(name, tot)
+            self._phase2_checked[name] = min(int(cur), int(weight))
+            checked_sum = sum(self._phase2_checked.values())
+            total_sum = self._phase2_total or 1
+
+        span = self.PHASE2_END - self.PHASE1_END
+        pct = self.PHASE1_END + int(checked_sum / total_sum * span)
+        if pct > self.PHASE2_END:
+            pct = self.PHASE2_END
+        # Дросселирование: не эмитим, если процент не изменился
+        if pct <= self._last_phase2_pct:
+            return
+        self._last_phase2_pct = pct
+        self.progress.emit(
+            pct, self.PHASE3_END,
+            f"[2/3] Проверка URL: {checked_sum}/{total_sum}")
+
     def run(self):
         processed = 0
         total = len(self.sources)
@@ -624,22 +661,29 @@ class SourcesRefreshWorker(BaseWorker):
                 self.all_done.emit(0, 0)
                 return
 
+            # === ФАЗА 1: загрузка источников (0..40%) ===
             loaded: List[Tuple[LinkSource, List[ChannelData]]] = []
+            span1 = self.PHASE1_END
             for cnt, src, chs in self._run_in_pool(
                     self.sources, self._load_one,
                     max_workers=min(URL_CHECK_MAX_WORKERS, total)):
                 processed += 1
                 if cnt:
                     success += 1
+                pct = int(processed / total * span1)
                 self.progress.emit(
-                    processed, total,
-                    f"Загружено: {processed}/{total}")
+                    pct, self.PHASE3_END,
+                    f"[1/3] Загрузка источников: {processed}/{total}")
                 if src is not None:
                     loaded.append((src, chs or []))
 
+            if self.is_stopped():
+                self.all_done.emit(success, total)
+                return
+
             if not self.check_urls:
-                for src, _chs in loaded:
-                    self.manager.rebuild_alive_index(src.name)
+                # Без проверки URL — сразу к фазе 3
+                self._phase3_rebuild(loaded)
                 self.all_done.emit(success, total)
                 return
 
@@ -652,6 +696,7 @@ class SourcesRefreshWorker(BaseWorker):
             batch_size = int(self.config.get(
                 'source_check_batch_size', SOURCE_CHECK_BATCH_SIZE_DEFAULT))
 
+            # === ФАЗА 2: проверка URL (40..90%) ===
             workers: List[SourceUrlCheckWorker] = []
             for src, chs in loaded:
                 if self.is_stopped():
@@ -669,17 +714,40 @@ class SourcesRefreshWorker(BaseWorker):
                     stop_token=self._stop_token,
                 )
                 w.source_check_done.connect(self._on_source_check_done)
+                w.source_check_progress.connect(self._on_child_progress)
                 w.channel_checked.connect(
                     lambda n, ok_, m, s=src.name:
                         self.channel_checked.emit(s, n, ok_, m))
                 workers.append(w)
             self._child_workers = workers
 
+            # Настраиваем веса и общий знаменатель для агрегации
+            with self._phase2_lock:
+                self._phase2_weights = {}
+                self._phase2_checked = {}
+                for src, chs in loaded:
+                    if chs:
+                        self._phase2_weights[src.name] = len(chs)
+                self._phase2_total = sum(self._phase2_weights.values())
+                self._last_phase2_pct = self.PHASE1_END
+
+            # Если проверять нечего — сразу к фазе 3
+            if not workers or self._phase2_total == 0:
+                self._phase3_rebuild(loaded)
+                self.all_done.emit(success, total)
+                return
+
+            # Эмитим стартовое значение фазы 2
+            self.progress.emit(
+                self.PHASE1_END, self.PHASE3_END,
+                f"[2/3] Проверка URL: 0/{self._phase2_total}")
+
             for w in workers:
                 if self.is_stopped():
                     break
                 w.start()
 
+            # Ожидание завершения дочерних воркеров
             while any(w.isRunning() for w in workers):
                 if self.is_stopped():
                     for w in workers:
@@ -692,14 +760,18 @@ class SourcesRefreshWorker(BaseWorker):
                 with suppress(Exception):
                     w.wait(5000)
 
-            for src, _chs in loaded:
-                if self.is_stopped():
-                    break
-                try:
-                    self.manager.rebuild_alive_index(src.name)
-                except Exception:
-                    logger.exception(
-                        f"rebuild_alive_index({src.name})")
+            # Гарантируем достижение границы фазы 2
+            self._last_phase2_pct = self.PHASE2_END
+            self.progress.emit(
+                self.PHASE2_END, self.PHASE3_END,
+                f"[2/3] Проверка URL: {self._phase2_total}/{self._phase2_total}")
+
+            if self.is_stopped():
+                self.all_done.emit(success, total)
+                return
+
+            # === ФАЗА 3: rebuild_alive_index (90..100%) ===
+            self._phase3_rebuild(loaded)
 
             self.all_done.emit(success, total)
         except Exception as e:
@@ -710,6 +782,30 @@ class SourcesRefreshWorker(BaseWorker):
         finally:
             self._child_workers = []
             self.worker_done.emit()
+
+    def _phase3_rebuild(self, loaded: List[Tuple[LinkSource, List[ChannelData]]]):
+        """Rebuild индексов с прогрессом 90..100%."""
+        if not loaded:
+            self.progress.emit(
+                self.PHASE3_END, self.PHASE3_END, "[3/3] Готово")
+            return
+        span = self.PHASE3_END - self.PHASE2_END
+        total3 = len(loaded)
+        for i, (src, _chs) in enumerate(loaded):
+            if self.is_stopped():
+                break
+            try:
+                self.manager.rebuild_alive_index(src.name)
+            except Exception:
+                logger.exception(f"rebuild_alive_index({src.name})")
+            pct = self.PHASE2_END + int((i + 1) / total3 * span)
+            if pct > self.PHASE3_END:
+                pct = self.PHASE3_END
+            self.progress.emit(
+                pct, self.PHASE3_END,
+                f"[3/3] Перестройка индекса: {i + 1}/{total3}")
+        self.progress.emit(
+            self.PHASE3_END, self.PHASE3_END, "[3/3] Готово")
 
 
 class EPGLoaderWorker(BaseWorker):

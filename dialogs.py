@@ -1929,7 +1929,13 @@ class DomainUserAgentDialog(BaseDialog):
 
 
 class LinkSourceManagerDialog(BaseDialog):
-    """Менеджер источников: одна кнопка «🔄 Обновить всё»."""
+    """Менеджер источников: одна кнопка «🔄 Обновить всё».
+
+    Трёхфазная шкала прогресса (0..100), эмитится SourcesRefreshWorker:
+      • Фаза 1 (0..40%)  — загрузка источников
+      • Фаза 2 (40..90%) — проверка URL
+      • Фаза 3 (90..100%) — rebuild_alive_index
+    """
 
     sources_updated = pyqtSignal()
 
@@ -1987,6 +1993,7 @@ class LinkSourceManagerDialog(BaseDialog):
         layout.addWidget(self._progress_label)
 
         self._progress_bar = QProgressBar()
+        # ВСЕГДА 0..100 — SourcesRefreshWorker эмитит проценты
         self._progress_bar.setRange(0, 100)
         self._progress_bar.setValue(0)
         self._progress_bar.setVisible(False)
@@ -2117,8 +2124,11 @@ class LinkSourceManagerDialog(BaseDialog):
             check_urls=True)
 
         def on_progress(value, total, text):
-            self._progress_bar.setRange(0, max(1, total))
-            self._progress_bar.setValue(value)
+            # Всегда 0..100 — воркер эмитит проценты
+            if self._progress_bar.maximum() != 100:
+                self._progress_bar.setRange(0, 100)
+            v = max(0, min(100, int(value)))
+            self._progress_bar.setValue(v)
             self._progress_bar.setFormat(f"{text} (%p%)")
             self._progress_bar.setVisible(True)
             self._progress_label.setText(text)
@@ -2126,11 +2136,10 @@ class LinkSourceManagerDialog(BaseDialog):
             self._progress_label.repaint()
 
         def on_source_checked(name, working, total):
+            # Дополнительная строка статуса по завершении источника
             self._progress_label.setText(
                 f"✓ Проверено [{name}]: {working}/{total}")
-            self._progress_bar.setVisible(True)
             self._progress_label.repaint()
-            self._progress_bar.repaint()
 
         def on_channel_checked(source, name, ok, msg):
             mark = "✓" if ok else "✗"
@@ -2142,8 +2151,8 @@ class LinkSourceManagerDialog(BaseDialog):
         def on_done(success, total):
             self._load_sources()
             self.sources_updated.emit()
-            self._progress_bar.setRange(0, max(1, total))
-            self._progress_bar.setValue(total)
+            self._progress_bar.setRange(0, 100)
+            self._progress_bar.setValue(100)
             self._progress_bar.setFormat(
                 f"✓ Обновлено {success} из {total} (100%)")
             self._progress_label.setText(

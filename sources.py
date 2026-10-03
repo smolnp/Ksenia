@@ -21,6 +21,18 @@ from constants import (URL_CHECK_MAX_WORKERS, LOADED_CHANNELS_TTL_SEC,
 from models import ChannelData
 from parsers import M3UParser
 from paths import logger, parse_datetime
+
+
+def _new_session() -> requests.Session:
+    """Простая сессия, как в генераторе."""
+    s = requests.Session()
+    s.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                      'AppleWebKit/537.36',
+        'Accept': '*/*',
+    })
+    return s
+
 from storage import BaseJsonStore
 from utils import ChannelNameNormalizer, URLUtils, _StopToken, cancelled
 
