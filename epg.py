@@ -4,6 +4,7 @@
 from __future__ import annotations
 import re
 import gzip
+import requests
 import threading
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -17,7 +18,18 @@ from constants import (EPG_MAX_BYTES, EPG_SOURCE_TIMEOUT_SEC,
 from models import ChannelData, EPGEntry, EPGChannelInfo
 from paths import logger
 from utils import ChannelNameNormalizer, _StopToken, cancelled
-from sources import HttpSessionFactory
+
+
+def _new_session() -> requests.Session:
+    """Простая сессия, как в генераторе."""
+    s = requests.Session()
+    s.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                      'AppleWebKit/537.36',
+        'Accept': '*/*',
+    })
+    return s
+
 
 class EPGDatabase:
     def __init__(self, cache_manager: Optional['CacheManager'] = None):
@@ -211,7 +223,6 @@ class EPGDatabase:
                 self.cache_manager.save_epg_entries(to_cache, source)
             if info_to_cache:
                 self.cache_manager.save_epg_channels(info_to_cache, source)
-        # Сбросить fuzzy-кэш: _channel_info обновилось
         with self._fuzzy_cache_lock:
             self._fuzzy_cache.clear()
         return count
@@ -221,7 +232,7 @@ class EPGDatabase:
                        ) -> Tuple[int, List[str]]:
         total = 0
         errors: List[str] = []
-        session = HttpSessionFactory.get(verify_ssl=False)
+        session = _new_session()
         for url in urls:
             if cancelled(stop_token):
                 break

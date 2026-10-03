@@ -8,22 +8,21 @@ import concurrent.futures
 from contextlib import suppress
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple
-from urllib.parse import urlparse
-from PyQt6.QtCore import QThread, pyqtSignal, Qt
+from PyQt6.QtCore import QThread, pyqtSignal
 from constants import (URL_CHECK_MAX_WORKERS, VLC_DEFAULT_CHECK_TIMEOUT,
-    StatusText, CHECK_RESULT_CACHE_TTL_HOURS, SOURCE_CHECK_WORKERS_DEFAULT,
+    CHECK_RESULT_CACHE_TTL_HOURS, SOURCE_CHECK_WORKERS_DEFAULT,
     SOURCE_CHECK_TIMEOUT_DEFAULT, SOURCE_CHECK_TRUST_SEC_DEFAULT,
     SOURCE_CHECK_BATCH_SIZE_DEFAULT, REPLACEMENT_MAX_WORKERS_DEFAULT,
     SEARCH_WORKER_MAX, EPG_FUZZY_ENABLED_DEFAULT,
     EPG_FUZZY_THRESHOLD_DEFAULT, EPG_FUZZY_MIN_LENGTH_DEFAULT,
-    EPG_FUZZY_MIN_GAP_DEFAULT, STREAMING_PROTOCOLS,
-    EPG_SOURCE_TIMEOUT_SEC)
+    EPG_FUZZY_MIN_GAP_DEFAULT, EPG_SOURCE_TIMEOUT_SEC)
 from models import ChannelData, LinkQuality
 from paths import logger
 from utils import URLUtils, _StopToken, cancelled
 from config import Config, LinkReplacementSettings
 from sources import LinkSource, LinkSourceManager
 from epg import EPGDatabase
+
 
 class BaseWorker(QThread):
     progress = pyqtSignal(int, int, str)
@@ -40,146 +39,10 @@ class BaseWorker(QThread):
     def is_stopped(self) -> bool:
         return self._stop_token.is_set()
 
-    def _run_in_pool(self, items, worker_fn, max_workers=None):
-        ex = None
-        try:
-            if not items:
-                return
-            ex = concurrent.futures.ThreadPoolExecutor(
-                max_workers=max_workers or len(items))
-            futures = {ex.submit(worker_fn, it): it for it in items}
-            for fut in concurrent.futures.as_completed(futures):
-                if self.is_stopped():
-                    break
-                try:
-                    yield fut.result()
-                except Exception:
-                    logger.exception("pool worker")
-                    continue
-        finally:
-            if ex is not None:
-                try:
-                    ex.shutdown(wait=False, cancel_futures=True)
-                except TypeError:
-                    with suppress(Exception):
-                        ex.shutdown(wait=False)
-
-class URLCheckerWorker(BaseWorker):
-    """
-    v0.9.4: точечная проверка по запросу пользователя (UI).
-    Пишет результаты в url_status_cache (тот же, что SourceUrlCheckWorker).
-    Использует URLUtils.check_url — единственный примитив.
-    НЕ считает None (неизвестно) битым.
-    """
-    url_checked = pyqtSignal(int, object, str, object, object, str, object)
-
-    def __init__(self, urls: List[str], timeout: int = VLC_DEFAULT_CHECK_TIMEOUT,
-                 max_workers: int = URL_CHECK_MAX_WORKERS,
-                 max_retries: int = 0, retry_delay: float = 0.5,
-                 verify_ssl: bool = False):
-        super().__init__()
-        self.urls = list(urls)
-        self.timeout = timeout
-        self.max_workers = max(1, min(max_workers, URL_CHECK_MAX_WORKERS))
-        self.max_retries = max_retries
-        self.retry_delay = retry_delay
-        self.verify_ssl = verify_ssl
-        self._processed = 0
-        self._total = len(self.urls)
-
-    def run(self):
-        try:
-            if self._total == 0:
-                return
-            stop_token = self._stop_token
-            indexed = list(enumerate(self.urls))
-            for r in self._run_in_pool(
-                    indexed,
-                    lambda it: self._check_one(it[1], it[0], stop_token),
-                    max_workers=self.max_workers):
-                if r is None:
-                    continue
-                self.url_checked.emit(
-                    r['index'], r['success'], r['message'],
-                    r['response_time'], r['quality'], r['url'],
-                    r.get('status_code'))
-                self._processed += 1
-                self.progress.emit(
-                    self._processed, self._total,
-                    f"Проверено: {self._processed}/{self._total}")
-        except Exception as e:
-            self.error.emit(f"Ошибка при проверке URL: {e}")
-            logger.exception("URLCheckerWorker")
-        finally:
-            self.worker_done.emit()
-
-    def _check_one(self, url: str, index: int,
-                   stop_token: '_StopToken') -> Dict[str, Any]:
-        if cancelled(stop_token):
-            return {'index': index, 'success': None, 'message': 'Отменено',
-                    'response_time': None, 'quality': LinkQuality.UNKNOWN,
-                    'url': url, 'status_code': None}
-        if not url or not url.strip():
-            return {'index': index, 'success': False, 'message': 'Пустой URL',
-                    'response_time': None,
-                    'quality': LinkQuality.NOT_WORKING,
-                    'url': url, 'status_code': None}
-        try:
-            p = urlparse(url)
-            if not p.scheme or not p.netloc:
-                return {'index': index, 'success': False,
-                        'message': 'Некорректный URL',
-                        'response_time': None,
-                        'quality': LinkQuality.NOT_WORKING,
-                        'url': url, 'status_code': None}
-            if p.scheme in ('http', 'https'):
-                effective_timeout = max(self.timeout, VLC_DEFAULT_CHECK_TIMEOUT)
-                ok, rt, msg, code = URLUtils.check_url(
-                    url, effective_timeout, verify_ssl=False,
-                    max_retries=self.max_retries,
-                    retry_delay=self.retry_delay,
-                    stop_token=stop_token)
-                if ok is True:
-                    quality = LinkQuality.WORKING
-                elif ok is False:
-                    quality = LinkQuality.NOT_WORKING
-                else:
-                    quality = LinkQuality.UNKNOWN
-                return {
-                    'index': index,
-                    'success': ok,
-                    'message': msg,
-                    'response_time': rt,
-                    'quality': quality,
-                    'url': url,
-                    'status_code': code,
-                }
-            if p.scheme in STREAMING_PROTOCOLS:
-                return {'index': index, 'success': None,
-                        'message': StatusText.UNSUPPORTED,
-                        'response_time': None,
-                        'quality': LinkQuality.UNSUPPORTED,
-                        'url': url, 'status_code': None}
-            return {'index': index, 'success': False,
-                    'message': f'Неподдерживаемый: {p.scheme}',
-                    'response_time': None,
-                    'quality': LinkQuality.NOT_WORKING,
-                    'url': url, 'status_code': None}
-        except Exception as e:
-            return {'index': index, 'success': False,
-                    'message': f'Ошибка: {str(e)[:50]}',
-                    'response_time': None,
-                    'quality': LinkQuality.NOT_WORKING,
-                    'url': url, 'status_code': None}
 
 class LinkReplacementWorker(BaseWorker):
-    """
-    v0.9.4: автозамена РАБОТАЕТ ТОЛЬКО ИЗ КЭША.
-    Удалены _check_urls_parallel и self._url_pool.
-    _find_replacement:
-        get_alive_urls() → search_channel() → _filter_urls_by_cache() →
-        return None (никаких сетевых проверок!).
-    """
+    """Автозамена — ТОЛЬКО из кэша url_status_cache, без сети."""
+
     channel_updated = pyqtSignal(int, str, str, str)
     replacement_done = pyqtSignal(int, int)
 
@@ -320,12 +183,6 @@ class LinkReplacementWorker(BaseWorker):
     def _filter_urls_by_cache(self, urls: List[str],
                               name_lower: str
                               ) -> Tuple[List[str], List[str]]:
-        """
-        v0.1 fix: явная семантика.
-          trusted — свежие живые URL из кэша (0 сети).
-          unknown — всё остальное: нет кэша, кэш протух,
-                    или URL свежий но мёртвый (тоже не проверяем).
-        """
         trusted: List[str] = []
         unknown: List[str] = []
         trust_sec = 3600
@@ -345,19 +202,12 @@ class LinkReplacementWorker(BaseWorker):
             if age >= trust_sec:
                 unknown.append(u)
                 continue
-            # Кэш свежий.
             if cached.get('alive'):
                 trusted.append(u)
-            # else: свежий мёртвый — молча пропускаем,
-            # в unknown не кладём, чтобы не проверять сетью.
         return trusted, unknown
 
     def _find_replacement(self, channel: ChannelData) -> Optional[str]:
-        """
-        v0.9.4: НИКАКИХ сетевых проверок.
-        Только: get_alive_urls → search_channel → _filter_urls_by_cache.
-        Если в кэше ничего нет — return None.
-        """
+        """Только кэш: get_alive_urls → search_channel → filter."""
         t0 = time.perf_counter()
         try:
             s = self.settings
@@ -436,11 +286,10 @@ class LinkReplacementWorker(BaseWorker):
             logger.exception(f"Ошибка поиска замены {channel.meta.name}")
             return None
 
+
 class SourceUrlCheckWorker(BaseWorker):
-    """
-    v0.9.4: единственная массовая проверка URL (для менеджера источников).
-    v6.0: прогресс по КАЖДОМУ каналу + сигнал channel_checked.
-    """
+    """Единственная массовая проверка URL."""
+
     source_check_progress = pyqtSignal(str, int, int)
     source_check_done = pyqtSignal(str, int, int)
     channel_checked = pyqtSignal(str, bool, str)
@@ -463,11 +312,10 @@ class SourceUrlCheckWorker(BaseWorker):
         self.channels = list(channels)
         self.cache_manager = cache_manager
         self.max_workers = max(1, min(int(max_workers), 32))
-        
         self.timeout = max(int(timeout), VLC_DEFAULT_CHECK_TIMEOUT)
         self.trust_sec = int(trust_sec)
         self.batch_size = max(1, int(batch_size))
-        
+
         self._settings = None
         self._bl_names: Set[str] = set()
         self._bl_tvgs: Set[str] = set()
@@ -476,7 +324,6 @@ class SourceUrlCheckWorker(BaseWorker):
         self._skip_count_filtered = 0
 
     def _prepare_filters(self):
-        """Кэш ЧС каналов/доменов + is_filtered_domain."""
         try:
             from ksenia_window import ApplicationCore
             core = ApplicationCore.instance()
@@ -499,8 +346,6 @@ class SourceUrlCheckWorker(BaseWorker):
             logger.exception("SourceUrlCheckWorker prepare bl")
 
     def _should_skip(self, ch: ChannelData) -> bool:
-        """3 фильтра ДО сети. True = пропустить канал."""
-        
         n_low = (ch.meta.name or '').strip().lower()
         t_low = (ch.meta.tvg_id or '').strip().lower()
         if (n_low and n_low in self._bl_names) or \
@@ -510,12 +355,10 @@ class SourceUrlCheckWorker(BaseWorker):
         url = ch.link.url
         if not url:
             return True
-        
         if self._settings is not None:
             if self._settings.is_blacklisted(url):
                 self._skip_count_domain += 1
                 return True
-            
             if self._settings.is_filtered_domain(url):
                 self._skip_count_filtered += 1
                 return True
@@ -582,8 +425,6 @@ class SourceUrlCheckWorker(BaseWorker):
             lock = threading.Lock()
             pending: List[Tuple[str, str, bool, float, str, Optional[int]]] = []
             pending_lock = threading.Lock()
-            last_channel_emit = [0]
-            CHANNEL_EMIT_EVERY = 3
 
             def flush_batch(items):
                 if not items:
@@ -615,11 +456,10 @@ class SourceUrlCheckWorker(BaseWorker):
                     ok, rt, msg, code = URLUtils.check_url(
                         url, self.timeout, verify_ssl=False,
                         max_retries=0, retry_delay=0.0,
-                        stop_token=self._stop_token, pool_size=2)
-                except Exception:
-                    logger.exception(
-                        f"SourceUrlCheckWorker check {url[:80]}")
-                    ok, rt, msg, code = False, 0.0, "exception", None
+                        stop_token=self._stop_token, pool_size=4)
+                except Exception as e:
+                    ok, rt, msg, code = False, 0.0, \
+                                          f"exception: {str(e)[:40]}", None
                 if self.is_stopped():
                     return
                 with lock:
@@ -642,19 +482,6 @@ class SourceUrlCheckWorker(BaseWorker):
                         url, code, '' if ok else (msg or ''))
                     ch.status.status_text = st_txt
                     object.__setattr__(ch, 'modified_date', datetime.now())
-                _should_emit = False
-                with lock:
-                    _cur = checked
-                    if (_cur - last_channel_emit[0]
-                            >= CHANNEL_EMIT_EVERY
-                            or _cur == len(to_check)):
-                        last_channel_emit[0] = _cur
-                        _should_emit = True
-                if _should_emit and ok is not None:
-                    with suppress(Exception):
-                        self.channel_checked.emit(
-                            ch.meta.name, bool(ok),
-                            (msg or "")[:80])
                 with pending_lock:
                     if ok is not None:
                         pending.append((
@@ -662,11 +489,9 @@ class SourceUrlCheckWorker(BaseWorker):
                             (rt or 0.0) * 1000.0,
                             (msg or "")[:200], code,
                         ))
-                        if len(pending) >= self.batch_size:
-                            batch = pending[:]
-                            pending.clear()
-                        else:
-                            batch = None
+                    if len(pending) >= self.batch_size:
+                        batch = pending[:]
+                        pending.clear()
                     else:
                         batch = None
                 if batch:
@@ -690,6 +515,12 @@ class SourceUrlCheckWorker(BaseWorker):
                         last_emit_count = cur
                         self.source_check_progress.emit(
                             self.source_name, cur, total)
+                    if cur % 500 == 0 and cur > 0:
+                        logger.info(
+                            f"[SourceUrlCheckWorker {self.source_name}] "
+                            f"checked={cur}/{len(to_check)}, "
+                            f"working={working}")
+                    time.sleep(0)
             finally:
                 try:
                     executor.shutdown(wait=False, cancel_futures=True)
@@ -711,11 +542,10 @@ class SourceUrlCheckWorker(BaseWorker):
         finally:
             self.worker_done.emit()
 
+
 class SourcesRefreshWorker(BaseWorker):
-    """
-    v0.9.4: объединённое «Обновить всё».
-    v6.1: пробрасывает channel_checked от SourceUrlCheckWorker.
-    """
+    """Объединённое «Обновить всё»: загрузка + проверка URL + rebuild."""
+
     all_done = pyqtSignal(int, int)
     source_checked = pyqtSignal(str, int, int)
     channel_checked = pyqtSignal(str, str, bool, str)
@@ -736,6 +566,54 @@ class SourcesRefreshWorker(BaseWorker):
             with suppress(Exception):
                 if w.isRunning():
                     w.stop()
+
+    def _run_in_pool(self, items, worker_fn, max_workers=None):
+        if not items:
+            return
+        if max_workers is None or max_workers <= 1:
+            for item in items:
+                if self.is_stopped():
+                    return
+                yield worker_fn(item)
+            return
+        ex = concurrent.futures.ThreadPoolExecutor(
+            max_workers=max_workers, thread_name_prefix="sources-load")
+        try:
+            futures = {ex.submit(worker_fn, item): item for item in items}
+            for fut in concurrent.futures.as_completed(futures):
+                if self.is_stopped():
+                    for f in futures:
+                        f.cancel()
+                    break
+                try:
+                    yield fut.result()
+                except Exception:
+                    logger.exception("_run_in_pool")
+        finally:
+            try:
+                ex.shutdown(wait=False, cancel_futures=True)
+            except TypeError:
+                with suppress(Exception):
+                    ex.shutdown(wait=False)
+
+    def _load_one(self, source: LinkSource):
+        self.manager.invalidate_cache(source.name)
+        try:
+            chs = self.manager.load_links_from_source(
+                source, use_cache=False, config=self.config,
+                stop_token=self._stop_token)
+        except Exception:
+            logger.exception(f"load_links_from_source {source.name}")
+            chs = []
+        return (len(chs) if chs else 0), source, chs
+
+    def _on_source_check_done(self, name: str, working: int, total: int):
+        try:
+            self.manager.update_source_health(name, working)
+        except Exception:
+            logger.exception("update_source_health")
+        with suppress(Exception):
+            self.source_checked.emit(name, working, total)
 
     def run(self):
         processed = 0
@@ -793,8 +671,7 @@ class SourcesRefreshWorker(BaseWorker):
                 w.source_check_done.connect(self._on_source_check_done)
                 w.channel_checked.connect(
                     lambda n, ok_, m, s=src.name:
-                        self.channel_checked.emit(s, n, ok_, m),
-                    Qt.ConnectionType.DirectConnection)
+                        self.channel_checked.emit(s, n, ok_, m))
                 workers.append(w)
             self._child_workers = workers
 
@@ -834,25 +711,6 @@ class SourcesRefreshWorker(BaseWorker):
             self._child_workers = []
             self.worker_done.emit()
 
-    def _load_one(self, source: LinkSource):
-        """Возвращает (len(channels), source, channels)."""
-        self.manager.invalidate_cache(source.name)
-        try:
-            chs = self.manager.load_links_from_source(
-                source, use_cache=False, config=self.config,
-                stop_token=self._stop_token)
-        except Exception:
-            logger.exception(f"load_links_from_source {source.name}")
-            chs = []
-        return (len(chs) if chs else 0), source, chs
-
-    def _on_source_check_done(self, name: str, working: int, total: int):
-        try:
-            self.manager.update_source_health(name, working)
-        except Exception:
-            logger.exception("update_source_health")
-        with suppress(Exception):
-            self.source_checked.emit(name, working, total)
 
 class EPGLoaderWorker(BaseWorker):
     epg_loaded = pyqtSignal(int, list)
@@ -877,6 +735,7 @@ class EPGLoaderWorker(BaseWorker):
             self.error.emit(f"Ошибка EPG: {e}")
         finally:
             self.worker_done.emit()
+
 
 class EPGMetadataApplyWorker(BaseWorker):
     applied = pyqtSignal(int, list)

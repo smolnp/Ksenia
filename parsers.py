@@ -8,6 +8,7 @@ from constants import DEFAULT_GROUP
 from models import ChannelData
 from utils import ChannelNameNormalizer
 
+
 class M3UParser:
     _ATTR_RE = re.compile(
         r'(tvg-id|tvg-name|tvg-logo|group-title|tvg-country|tvg-language|'
@@ -171,6 +172,7 @@ class M3UParser:
                 channels.append(channel)
 
         return channels
+
 
 class PlaylistHeaderManager:
     def __init__(self):

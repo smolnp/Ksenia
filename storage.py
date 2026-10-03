@@ -17,6 +17,7 @@ from constants import (STABLE_STATE_FILE, CACHE_SCHEMA_VERSION,
     CHECK_RESULT_CACHE_TTL_HOURS, EPG_CACHE_TTL_HOURS)
 from paths import Paths, logger
 
+
 class BaseJsonStore:
     def __init__(self, path: str, default: Any):
         self.path = path
@@ -53,6 +54,7 @@ class BaseJsonStore:
             except Exception as e:
                 logger.exception(f"Save {self.path}: {e}")
                 return False
+
 
 class StableStateManager:
     def __init__(self, config_dir: str):
@@ -94,6 +96,7 @@ class StableStateManager:
     def set(self, key: str, url: str):
         with self._lock:
             self._data[key] = url
+
 
 class CacheManager:
     _all_connections: List[Any] = []
@@ -347,18 +350,12 @@ class CacheManager:
             return {}
         cutoff = time.time() - max_age_hours * 3600
         result: Dict[Tuple[str, str], Dict[str, Any]] = {}
-        by_name: Dict[str, Set[str]] = defaultdict(set)
-        for name, url in pairs:
-            if name and url:
-                by_name[name.lower()].add(url)
-        if not by_name:
-            return {}
         unique_pairs = list({
             (n.lower(), u) for n, u in pairs if n and u
         })
         if not unique_pairs:
             return {}
-        CHUNK = 400  # SQLite лимит ~999 параметров
+        CHUNK = 400
         try:
             conn = self._connect()
             for i in range(0, len(unique_pairs), CHUNK):

@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
     QTreeWidget, QTreeWidgetItem, QSizePolicy, QLayout)
 from constants import (VLC_INSTANCE_USER_AGENT,
     VLC_PLAYER_DEFAULT_VOLUME, VLC_PLAYER_DEFAULT_WIDTH,
-    VLC_PLAYER_DEFAULT_HEIGHT, STREAMING_PROTOCOLS)
+    VLC_PLAYER_DEFAULT_HEIGHT)
 from models import ChannelData
 from paths import (logger, error_box, warn_box, info_box,
     save_file_dialog)
@@ -32,8 +32,10 @@ except Exception as e:
     _HAS_VLC_MODULE = False
     _VLC_IMPORT_ERROR = str(e)
 
+
 def is_vlc_available() -> bool:
     return _HAS_VLC_MODULE
+
 
 def get_vlc_error() -> str:
     if _HAS_VLC_MODULE:
@@ -41,6 +43,7 @@ def get_vlc_error() -> str:
     if _VLC_IMPORT_ERROR:
         return f"Не удалось импортировать python-vlc: {_VLC_IMPORT_ERROR}"
     return "Модуль python-vlc не установлен."
+
 
 class EmbeddedVlcPlayer(QWidget):
     playback_error = pyqtSignal(str)
@@ -255,6 +258,7 @@ class EmbeddedVlcPlayer(QWidget):
                 self._vlc_instance.release()
             self._vlc_instance = None
         super().closeEvent(event)
+
 
 class EmbeddedPlayerDialog(BaseDialog):
     def __init__(self, channel: ChannelData, parent=None,
@@ -549,6 +553,7 @@ class EmbeddedPlayerDialog(BaseDialog):
                 self.player.closeEvent(event)
         super().closeEvent(event)
 
+
 def _apply_player_patch():
     """Подменяет EmbeddedVlcPlayer и EmbeddedPlayerDialog на патченные."""
     try:
@@ -578,10 +583,6 @@ def _apply_player_patch():
     _VALID = g.get('_is_qobject_valid', lambda x: x is not None)
     _BASE = g.get('BaseDialog')
     _OLD_PLAYER = g.get('EmbeddedVlcPlayer')
-    try:
-        from ksenia_window import ApplicationCore as _CORE_CLS
-    except Exception:
-        _CORE_CLS = g.get('ApplicationCore')
     _ERR_BOX = g.get('error_box')
     _INFO_BOX = g.get('info_box')
     _VLC_DEFAULT_VOL = g.get('VLC_PLAYER_DEFAULT_VOLUME', 100)
@@ -622,7 +623,6 @@ def _apply_player_patch():
                 self.playback_error.emit("Пустой URL")
                 return
             try:
-                
                 with _suppress(Exception):
                     self._media_player.set_media(None)
 
@@ -1162,7 +1162,6 @@ def _apply_player_patch():
         def _refresh_tracks(self):
             if not _VALID(self):
                 return
-            
             if getattr(self, '_resize_locked', False):
                 return
             self.setUpdatesEnabled(False)
@@ -1240,5 +1239,6 @@ def _apply_player_patch():
 
     logger.info("[PATCH] Патч плеера применён (v2)")
     return True
+
 
 _apply_player_patch()

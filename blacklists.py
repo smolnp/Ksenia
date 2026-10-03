@@ -9,12 +9,13 @@ import ipaddress
 from urllib.parse import urlparse
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
-from collections import OrderedDict, defaultdict
+from collections import OrderedDict
 from constants import DOMAIN_BL_CACHE_MAX, DOMAIN_UA_CACHE_MAX, StatusText
 from models import ChannelData
 from paths import logger, parse_datetime
 from storage import BaseJsonStore
 from utils import URLUtils
+
 
 class BlacklistManager:
     def __init__(self, config_dir: str):
@@ -82,6 +83,7 @@ class BlacklistManager:
                 filtered.append(ch)
         return filtered, removed
 
+
 class DomainBlacklistRule:
     __slots__ = ('value', 'is_ip', 'include_subdomains', 'note', 'added_date')
 
@@ -136,6 +138,7 @@ class DomainBlacklistRule:
         if dt is not None:
             r.added_date = dt
         return r
+
 
 class DomainBlacklistManager:
     """
@@ -271,7 +274,6 @@ class DomainBlacklistManager:
             cached = self._cache_get_locked(host)
             if cached is not None:
                 return cached
-            # Кэш-промах — считаем под тем же lock (правила неизменны)
             blocked = False
             for r in self._rules:
                 if r.matches_host(host):
@@ -314,10 +316,7 @@ class DomainBlacklistManager:
 
     def clean_channels(self, channels: List[ChannelData]
                        ) -> Tuple[List[ChannelData], int]:
-        """
-        ОЧИЩАЕТ ссылку, сохраняет канал.
-        v0.9.4: помечает статус «🚫 Заблокирован ЧС домен/IP».
-        """
+        """ОЧИЩАЕТ ссылку, сохраняет канал."""
         with self._lock:
             if not self._rules:
                 return list(channels), 0
@@ -341,7 +340,6 @@ class DomainBlacklistManager:
                     if u and not self.matches_url(u)
                 ]
                 ch.clear_url()
-                
                 ch.status.status_text = StatusText.BLOCKED_BY_DOMAIN
                 ch.update_extinf()
                 object.__setattr__(ch, 'modified_date', datetime.now())
@@ -381,6 +379,7 @@ class DomainBlacklistManager:
             self._persist_locked()
         return processed
 
+
 class DomainUserAgentRule:
     __slots__ = ('domain', 'user_agent', 'enabled', 'created_date')
 
@@ -413,6 +412,7 @@ class DomainUserAgentRule:
         if dt is not None:
             r.created_date = dt
         return r
+
 
 class DomainUserAgentManager:
     def __init__(self, config_dir: str):

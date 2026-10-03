@@ -1,129 +1,50 @@
 # -*- coding: utf-8 -*-
-"""LinkSource, LinkSourceManager, HttpSessionFactory."""
+"""LinkSource, LinkSourceManager."""
 
 from __future__ import annotations
 import os
 import re
-import json
 import time
 import threading
-import weakref
-import itertools
-import atexit
 import concurrent.futures
 from contextlib import suppress
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Set, Tuple
 from collections import OrderedDict, defaultdict
 import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 from difflib import SequenceMatcher
 from config import Config, LinkReplacementSettings
 from constants import (URL_CHECK_MAX_WORKERS, LOADED_CHANNELS_TTL_SEC,
     MAX_LOADED_SOURCES, MAX_SOURCE_FILE_BYTES, SEARCH_WORKER_MAX,
     SOURCE_LOAD_TIMEOUT_SEC, FALLBACK_DAYS_DEFAULT, DEFAULT_TIMEOUT,
-    CHECK_RESULT_CACHE_TTL_HOURS, ALIVE_INDEX_CACHE_MAX,
-    VLC_USER_AGENT, StatusText)
+    CHECK_RESULT_CACHE_TTL_HOURS, ALIVE_INDEX_CACHE_MAX, StatusText)
 from models import ChannelData
 from parsers import M3UParser
 from paths import logger, parse_datetime
 from storage import BaseJsonStore
-from utils import ChannelNameNormalizer, _StopToken, cancelled
+from utils import ChannelNameNormalizer, URLUtils, _StopToken, cancelled
 
-class HttpSessionFactory:
-    _local = threading.local()
-    _all_sessions: List[weakref.ref] = []
-    _all_sessions_lock = threading.Lock()
-    _atexit_registered = False
-    _atexit_lock = threading.Lock()
-    _put_counter = itertools.count()
 
-    @classmethod
-    def _register_atexit(cls):
-        with cls._atexit_lock:
-            if cls._atexit_registered:
-                return
+def _new_session() -> requests.Session:
+    """Простая сессия, как в генераторе."""
+    s = requests.Session()
+    s.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                      'AppleWebKit/537.36',
+        'Accept': '*/*',
+    })
+    return s
 
-            def _close_all():
-                with cls._all_sessions_lock:
-                    refs = list(cls._all_sessions)
-                    cls._all_sessions.clear()
-                for ref in refs:
-                    s = ref()
-                    if s is not None:
-                        with suppress(Exception):
-                            s.close()
-            atexit.register(_close_all)
-            cls._atexit_registered = True
-
-    @classmethod
-    def _gc_sessions(cls):
-        with cls._all_sessions_lock:
-            cls._all_sessions = [r for r in cls._all_sessions if r() is not None]
-
-    @classmethod
-    def _build_session(cls, verify_ssl: bool, pool_size: int) -> requests.Session:
-        s = requests.Session()
-        retry = Retry(total=0, redirect=3, backoff_factor=0.2)
-        adapter = HTTPAdapter(
-            max_retries=retry,
-            pool_connections=pool_size,
-            pool_maxsize=pool_size,
-        )
-        s.mount("http://", adapter)
-        s.mount("https://", adapter)
-        s.verify = verify_ssl
-        s.headers.update({
-            'User-Agent': VLC_USER_AGENT,
-            'Accept': '*/*',
-            'Accept-Encoding': 'gzip, deflate',
-            'Connection': 'keep-alive',
-            'Icy-MetaData': '1',
-        })
-        s._ksenia_pool_size = int(pool_size)
-        return s
-
-    @classmethod
-    def get(cls, verify_ssl: bool = False,
-            pool_size: int = URL_CHECK_MAX_WORKERS) -> requests.Session:
-        cls._register_atexit()
-        n = next(cls._put_counter)
-        if n > 0 and n % 64 == 0:
-            cls._gc_sessions()
-        cache: Dict[bool, requests.Session] = getattr(cls._local, 'sessions', None)
-        if cache is None:
-            cache = {}
-            cls._local.sessions = cache
-        s = cache.get(verify_ssl)
-        if s is None:
-            s = cls._build_session(verify_ssl, pool_size)
-            cache[verify_ssl] = s
-            with cls._all_sessions_lock:
-                cls._all_sessions.append(weakref.ref(s))
-        else:
-            cur_pool = int(getattr(s, '_ksenia_pool_size', 0) or 0)
-            if int(pool_size) > cur_pool:
-                with suppress(Exception):
-                    s.close()
-                s = cls._build_session(verify_ssl, pool_size)
-                cache[verify_ssl] = s
-                with cls._all_sessions_lock:
-                    cls._all_sessions.append(weakref.ref(s))
-        return s
 
 class LinkSource:
-    """
-    v0.9.4: убрано auto_check_urls, добавлены raw_total_links,
-    raw_total_with_url (сырые счётчики ДО фильтрации ЧС домен/IP).
-    """
+    """Источник ссылок (локальный файл или онлайн)."""
+
     __slots__ = ('name', 'path', 'source_type', 'last_updated', 'total_links',
                  'total_with_url', 'priority', 'enabled', 'auto_update',
                  'update_interval_hours', 'encoding',
                  'last_error', 'last_attempt', 'consecutive_errors',
                  'apply_blacklist', 'apply_domain_blacklist',
                  'total_working', 'working_checked_at',
-                 
                  'raw_total_links', 'raw_total_with_url')
 
     def __init__(self):
@@ -145,7 +66,6 @@ class LinkSource:
         self.apply_domain_blacklist: bool = True
         self.total_working: int = 0
         self.working_checked_at: Optional[float] = None
-        
         self.raw_total_links: int = 0
         self.raw_total_with_url: int = 0
 
@@ -222,7 +142,6 @@ class LinkSource:
         if wca is not None:
             with suppress(ValueError, TypeError):
                 s.working_checked_at = float(wca)
-        
         with suppress(ValueError, TypeError):
             s.raw_total_links = int(
                 data.get('raw_total_links', s.total_links) or 0)
@@ -231,13 +150,10 @@ class LinkSource:
                 data.get('raw_total_with_url', s.total_with_url) or 0)
         return s
 
+
 class LinkSourceManager:
-    """
-    P4': _name_index для search_type='exact'.
-    v0.9.2: _alive_index + get_alive_urls.
-    v0.9.4: rebuild_alive_index; ЧС фильтруется в _build_indexes_for,
-            _store_loaded и get_alive_urls.
-    """
+    """Менеджер источников: загрузка, индексы, поиск, alive_index."""
+
     def __init__(self, config_dir: str,
                  cache_manager: Optional['CacheManager'] = None):
         self._store = BaseJsonStore(
@@ -378,7 +294,7 @@ class LinkSourceManager:
             base = datetime.strptime(m.group(0), "%Y-%m-%d")
         except ValueError:
             return None
-        session = HttpSessionFactory.get(verify_ssl=False)
+        session = _new_session()
         for d in range(1, days + 1):
             if cancelled(stop_token):
                 return None
@@ -419,6 +335,79 @@ class LinkSourceManager:
             core.apply_domain_user_agent(channels)
         return channels
 
+    @staticmethod
+    def _is_url_blocked(url: str, bl_mgr,
+                        temp_domains: List[str],
+                        unsafe_domains: List[str]) -> bool:
+        if bl_mgr is not None and bl_mgr.matches_url(url):
+            return True
+        try:
+            host = URLUtils.extract_host(url) or ''
+        except Exception:
+            host = ''
+        if not host:
+            return False
+        for d in temp_domains + unsafe_domains:
+            dn = (d or '').strip().lower().strip('.')
+            if dn and (host == dn or host.endswith('.' + dn)):
+                return True
+        return False
+
+    @staticmethod
+    def _get_blocking_context():
+        settings = None
+        bl_mgr = None
+        try:
+            from ksenia_window import ApplicationCore
+            core = ApplicationCore.instance()
+            settings = core.get_replacement_settings()
+            bl_mgr = core.domain_blacklist_manager
+        except Exception:
+            pass
+        temp_domains = list(settings.temporary_domains) if settings else []
+        unsafe_domains = list(settings.unsafe_domains) if settings else []
+        return bl_mgr, temp_domains, unsafe_domains
+
+    def _build_alive_index(self, channels: List[ChannelData],
+                           bl_mgr,
+                           temp_domains: List[str],
+                           unsafe_domains: List[str]
+                           ) -> Dict[str, List[ChannelData]]:
+        alive_index: Dict[str, List[ChannelData]] = defaultdict(list)
+        if self.cache_manager is None or not channels:
+            return dict(alive_index)
+
+        pairs: List[Tuple[str, str]] = []
+        ch_by_key: Dict[Tuple[str, str], List[ChannelData]] = defaultdict(list)
+        for ch in channels:
+            url = ch.link.url
+            if not url:
+                continue
+            if self._is_url_blocked(url, bl_mgr, temp_domains, unsafe_domains):
+                continue
+            key = (ch.meta.name.lower(), url)
+            pairs.append(key)
+            ch_by_key[key].append(ch)
+
+        if not pairs:
+            return dict(alive_index)
+
+        try:
+            cached = self.cache_manager.get_check_results_batch(
+                pairs, max_age_hours=CHECK_RESULT_CACHE_TTL_HOURS)
+        except Exception:
+            logger.exception("alive_index batch read")
+            cached = {}
+
+        for key, info in cached.items():
+            if not info.get('alive'):
+                continue
+            for ch in ch_by_key.get(key, ()):
+                norm = ch.normalized_name()
+                if norm:
+                    alive_index[norm].append(ch)
+        return dict(alive_index)
+
     def _store_loaded(self, name: str, path: str,
                       channels: List[ChannelData]):
         index: Dict[str, List[ChannelData]] = defaultdict(list)
@@ -427,50 +416,16 @@ class LinkSourceManager:
             if norm:
                 index[norm].append(ch)
 
-        try:
-            from ksenia_window import ApplicationCore
-            settings = ApplicationCore.instance().get_replacement_settings()
-        except Exception:
-            settings = None
-
-        alive_index: Dict[str, List[ChannelData]] = defaultdict(list)
-        if self.cache_manager is not None and channels:
-            pairs: List[Tuple[str, str]] = []
-            ch_by_key: Dict[Tuple[str, str], List[ChannelData]] = defaultdict(list)
-            for ch in channels:
-                url = ch.link.url
-                if not url:
-                    continue
-                
-                if settings is not None:
-                    if settings.is_blacklisted(url):
-                        continue
-                    if settings.is_filtered_domain(url):
-                        continue
-                key = (ch.meta.name, url)
-                pairs.append(key)
-                ch_by_key[key].append(ch)
-            if pairs:
-                try:
-                    cached = self.cache_manager.get_check_results_batch(
-                        pairs, max_age_hours=CHECK_RESULT_CACHE_TTL_HOURS)
-                except Exception:
-                    logger.exception("alive_index batch read")
-                    cached = {}
-                for key, info in cached.items():
-                    if not info.get('alive'):
-                        continue
-                    for ch in ch_by_key.get(key, ()):
-                        norm = ch.normalized_name()
-                        if norm:
-                            alive_index[norm].append(ch)
+        bl_mgr, temp_domains, unsafe_domains = self._get_blocking_context()
+        alive_index = self._build_alive_index(
+            channels, bl_mgr, temp_domains, unsafe_domains)
 
         with self._lock:
             self._loaded[name] = (time.time(), path, channels)
             self._loaded.move_to_end(name)
             self._name_index[name] = dict(index)
             self._name_index.move_to_end(name)
-            self._alive_index[name] = dict(alive_index)
+            self._alive_index[name] = alive_index
             self._alive_index.move_to_end(name)
             self._alive_index_cache.clear()
             while len(self._loaded) > MAX_LOADED_SOURCES:
@@ -479,22 +434,11 @@ class LinkSourceManager:
                 self._alive_index.pop(old_name, None)
 
     def rebuild_alive_index(self, source_name: Optional[str] = None) -> int:
-        """
-        Перестроить _alive_index из url_status_cache без обращения к сети.
-        Вызывается:
-          • после SourceUrlCheckWorker (через SourcesRefreshWorker),
-          • при изменении ЧС каналов / ЧС домен/IP,
-          • при точечной проверке через URLCheckerWorker (опционально).
-
-        Возвращает число обновлённых источников.
-        """
+        """Перестроить _alive_index из url_status_cache без сети."""
         if self.cache_manager is None:
             return 0
-        try:
-            from ksenia_window import ApplicationCore
-            settings = ApplicationCore.instance().get_replacement_settings()
-        except Exception:
-            settings = None
+
+        bl_mgr, temp_domains, unsafe_domains = self._get_blocking_context()
 
         with self._lock:
             if source_name is None:
@@ -512,40 +456,11 @@ class LinkSourceManager:
             if not channels:
                 continue
 
-            pairs: List[Tuple[str, str]] = []
-            ch_by_key: Dict[Tuple[str, str], List[ChannelData]] = defaultdict(list)
-            for ch in channels:
-                url = ch.link.url
-                if not url:
-                    continue
-                
-                if settings is not None:
-                    if settings.is_blacklisted(url):
-                        continue
-                    if settings.is_filtered_domain(url):
-                        continue
-                key = (ch.meta.name, url)
-                pairs.append(key)
-                ch_by_key[key].append(ch)
-
-            alive_index: Dict[str, List[ChannelData]] = defaultdict(list)
-            if pairs:
-                try:
-                    cached = self.cache_manager.get_check_results_batch(
-                        pairs, max_age_hours=CHECK_RESULT_CACHE_TTL_HOURS)
-                except Exception:
-                    logger.exception("rebuild_alive_index batch read")
-                    cached = {}
-                for key, info in cached.items():
-                    if not info.get('alive'):
-                        continue
-                    for ch in ch_by_key.get(key, ()):
-                        norm = ch.normalized_name()
-                        if norm:
-                            alive_index[norm].append(ch)
+            alive_index = self._build_alive_index(
+                channels, bl_mgr, temp_domains, unsafe_domains)
 
             with self._lock:
-                self._alive_index[name] = dict(alive_index)
+                self._alive_index[name] = alive_index
                 self._alive_index.move_to_end(name)
                 self._alive_index_cache.clear()
             rebuilt += 1
@@ -622,7 +537,7 @@ class LinkSourceManager:
         except (LookupError, UnicodeDecodeError):
             content = raw.decode('utf-8', errors='replace')
         parsed = M3UParser.parse(content, source.name)
-        
+
         source.raw_total_links = len(parsed)
         source.raw_total_with_url = sum(
             1 for c in parsed if c.has_valid_url)
@@ -630,7 +545,8 @@ class LinkSourceManager:
 
     def _load_remote(self, source: LinkSource, use_cache: bool,
                      config: Optional[Config],
-                     stop_token: Optional['_StopToken'] = None) -> List[ChannelData]:
+                     stop_token: Optional['_StopToken'] = None
+                     ) -> List[ChannelData]:
         if use_cache:
             with self._lock:
                 entry = self._loaded.get(source.name)
@@ -645,7 +561,6 @@ class LinkSourceManager:
                 source.path, config.get('link_cache_hours', 6))
             if cached:
                 chs = self._dicts_to_channels(cached, source.name)
-                
                 source.raw_total_links = len(chs)
                 source.raw_total_with_url = sum(
                     1 for c in chs if c.has_valid_url)
@@ -653,7 +568,7 @@ class LinkSourceManager:
                 return self._post_process_channels(chs, source)
 
         channels: List[ChannelData] = []
-        session = HttpSessionFactory.get(verify_ssl=False)
+        session = _new_session()
         primary_error = ""
         was_stopped = False
         try:
@@ -747,12 +662,7 @@ class LinkSourceManager:
     def get_alive_urls(self, channel_name: str,
                        settings: LinkReplacementSettings,
                        limit: Optional[int] = None) -> List[str]:
-        """
-        v0.9.2: возвращает URL из _alive_index БЕЗ проверки сети.
-        v0.9.4: фильтрует settings.is_blacklisted / is_filtered_domain
-                ПЕРЕД results.append(url).
-        Мемоизировано по нормализованному имени канала (LRU).
-        """
+        """URL из _alive_index БЕЗ проверки сети. Мемоизировано (LRU)."""
         if not channel_name:
             return []
         if settings.ignore_special_chars_in_names:
@@ -787,7 +697,6 @@ class LinkSourceManager:
                 url = ch.link.url
                 if not url or url in seen:
                     continue
-                
                 if settings.is_blacklisted(url):
                     continue
                 if settings.is_filtered_domain(url):

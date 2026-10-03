@@ -1,19 +1,22 @@
 # -*- coding: utf-8 -*-
-"""URLUtils, ChannelNameNormalizer, link_score, _StopToken."""
+"""URLUtils, ChannelNameNormalizer, _StopToken."""
 
 from __future__ import annotations
 import re
 import time
+import socket
 import threading
 import ipaddress
+from contextlib import suppress
 from difflib import SequenceMatcher
-from typing import Optional, Tuple, Set, Dict, Any
+from typing import Optional, Tuple, Set
 from urllib.parse import urlparse
 import requests
-from constants import (MAX_URL_LENGTH, STREAMING_PROTOCOLS, StatusText,
-    ENABLE_HEAD_FOR_STREAMS, VLC_STREAM_CONTENT_TYPES,
-    URL_CHECK_MAX_WORKERS, DEFAULT_TIMEOUT, VLC_DEFAULT_CHECK_TIMEOUT)
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+from constants import MAX_URL_LENGTH, StatusText
 from paths import logger
+
 
 class ChannelNameNormalizer:
     QUALITY_PATTERNS = [
@@ -35,13 +38,11 @@ class ChannelNameNormalizer:
         r'\[GeoRestricted\]',
     ]
     MOJIBAKE_TRIGGERS = (
-        # cp1251 → latin1 (кириллица)
         'Ð°', 'Ð±', 'Ð²', 'Ð³', 'Ð´', 'Ðµ', 'Ð¶', 'Ð·',
         'Ð¸', 'Ð¹', 'Ðº', 'Ð»', 'Ð¼', 'Ð½', 'Ð¾', 'Ð¿',
         'Ñ€', 'Ñ', 'Ñ‚', 'Ñƒ', 'Ñ„', 'Ñ…', 'Ñ†', 'Ñ‡',
         'ÐŸ', 'Ð', 'Ð¡', 'Ð¢', 'Ð£', 'Ð¤', 'Ð¥', 'Ð¦',
         'Ñ‰', 'ÑŠ', 'Ñ‹', 'ÑŒ', 'Ñ', 'ÑŽ', 'Ñ',
-        # cp1251 → utf-8 двойное перекодирование
         '–°', '–∞', '–µ', '–∏', '—Å', '—Ä', '√©', '√®',
     )
     EMOJI_PATTERN = re.compile(
@@ -109,6 +110,7 @@ class ChannelNameNormalizer:
     def similarity(name1: str, name2: str) -> float:
         return SequenceMatcher(None, name1.lower(), name2.lower()).ratio()
 
+
 class _StopToken:
     __slots__ = ('_event',)
 
@@ -124,8 +126,10 @@ class _StopToken:
     def wait(self, timeout: float) -> bool:
         return self._event.wait(timeout)
 
+
 def cancelled(stop_token: Optional['_StopToken']) -> bool:
     return stop_token is not None and stop_token.is_set()
+
 
 class URLUtils:
     @staticmethod
@@ -238,189 +242,95 @@ class URLUtils:
             return "URL слишком длинный"
         if p.scheme not in ('http', 'https'):
             return f"Неподдерживаемый протокол: {p.scheme}"
+        low_path = (p.path or '').lower()
+        if low_path.startswith('/udp/') or '/udp/' in low_path:
+            return "UDP через HTTP-прокси (не поддерживается)"
+        if low_path.startswith('/tcp/') or '/tcp/' in low_path:
+            return "TCP через HTTP-прокси (не поддерживается)"
+        if low_path.endswith('.php'):
+            q = (p.query or '').lower()
+            if 'id=' in q and len(q) > 32:
+                return "Прокси-скрипт (не поток)"
+        if not low_path or low_path == '/':
+            if p.port and p.port not in (80, 443, 8080, 8000, 8888):
+                return "URL без пути на нестандартном порту"
         return None
 
     _validate_url = _url_error
 
     @staticmethod
-    def _is_stream_url(url: str) -> bool:
-        if not url:
-            return False
-        low = url.lower().split('?', 1)[0]
-        return low.endswith(('.mpd', '.m3u8', '.m3u'))
-
-    @staticmethod
-    def _read_first_chunk(response, chunk_size: int = 4096) -> bool:
+    def _check_url_single(url, timeout, verify_ssl, user_agent="",
+                          referrer="", extra_headers=None):
+        """Дословная копия NetworkValidator.test_network_connectivity."""
         try:
-            raw = response.raw
-            if raw is None:
-                return False
+            parsed = urlparse(url)
+            hostname = parsed.hostname
+            if hostname:
+                try:
+                    socket.gethostbyname(hostname)
+                except socket.gaierror:
+                    return False, 0, "DNS резолвинг не удался", None
+
+            start_time = time.time()
+            session = requests.Session()
+            headers = {
+                'User-Agent': user_agent or
+                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                    'AppleWebKit/537.36',
+                'Accept': '*/*',
+            }
+            if referrer:
+                headers['Referer'] = referrer
+            if extra_headers:
+                for k, v in extra_headers.items():
+                    if k.lower() not in ('user-agent', 'referer'):
+                        headers[k] = v
+            session.headers.update(headers)
             try:
-                if hasattr(raw, 'read1'):
-                    chunk = raw.read1(chunk_size)
-                else:
-                    chunk = raw.read(chunk_size)
-            except Exception:
-                return False
-            return bool(chunk)
-        except Exception:
-            return False
-
-    @staticmethod
-    def _try_head_request(session, url, timeout, verify, stop_token=None):
-        """v6.1: быстрый HEAD. Возвращает (ok, rt, msg, code) или None.
-
-        None = HEAD не подходит, надо идти в GET.
-        """
-        if cancelled(stop_token):
-            return False, None, "Отменено", None
-        start = time.time()
-        try:
-            with session.head(
-                url,
-                timeout=(timeout, timeout),
-                verify=verify,
-                allow_redirects=True,
-            ) as r:
-                rt = time.time() - start
-                code = r.status_code
-                if 200 <= code < 300:
-                    return True, rt, f"HTTP {code} (HEAD)", code
-                if code in (301, 302, 303, 307, 308):
-                    return True, rt, f"HTTP {code} (HEAD)", code
-                if code in (403, 404):
-                    return False, rt, f"HTTP {code} (HEAD)", code
-                # 405, 501, 400, 5xx — идём в GET
-                return None
-        except requests.exceptions.Timeout:
-            return None
-        except requests.exceptions.SSLError:
-            return None
-        except requests.exceptions.ConnectionError:
-            return None
-        except Exception:
-            return None
-
-    @staticmethod
-    def _vlc_get_request(session, url, timeout, verify, stop_token=None):
-        if cancelled(stop_token):
-            return False, None, "Отменено", None
-        if not ENABLE_HEAD_FOR_STREAMS and URLUtils._is_stream_url(url):
-            head = None
-        else:
-            head = URLUtils._try_head_request(
-                session, url, timeout, verify, stop_token=stop_token)
-        if head is not None:
-            return head
-        if cancelled(stop_token):
-            return False, None, "Отменено", None
-        start = time.time()
-        try:
-            with session.get(
-                url,
-                timeout=(timeout, timeout),
-                verify=verify,
-                allow_redirects=True,
-                stream=True,
-            ) as response:
-                rt = time.time() - start
-                code = response.status_code
-
-                if code >= 400:
-                    return False, rt, f"HTTP {code}", code
-
-                ctype = (response.headers.get('Content-Type') or '').lower()
-                is_stream = URLUtils._is_stream_url(url)
-                ctype_is_stream = any(
-                    ct in ctype for ct in VLC_STREAM_CONTENT_TYPES)
-
-                if is_stream and ctype_is_stream:
-                    return True, rt, f"HTTP {code} ({ctype.split(';')[0]})", code
-
-                got = URLUtils._read_first_chunk(
-                    response, chunk_size=4096)
-                rt = time.time() - start
-                if got:
-                    return True, rt, f"HTTP {code}", code
-
-                if 200 <= code < 400:
-                    return None, rt, (
-                        f"HTTP {code}, но данные не пришли "
-                        f"за {rt:.1f} с"), code
-
-                return False, rt, f"HTTP {code}", code
-        except requests.exceptions.Timeout:
-            rt = time.time() - start
-            return None, rt, "Таймаут (сервер не ответил)", None
-        except requests.exceptions.SSLError:
-            rt = time.time() - start
-            return None, rt, "SSL ошибка (VLC игнорирует)", None
-        except requests.exceptions.ConnectionError as e:
-            rt = time.time() - start
-            return None, rt, f"Ошибка соединения: {str(e)[:60]}", None
-        except requests.exceptions.RequestException as e:
-            rt = time.time() - start
-            return None, rt, f"Ошибка: {str(e)[:60]}", None
+                with session.get(
+                    url, timeout=timeout, allow_redirects=True,
+                    verify=False, stream=True,
+                ) as response:
+                    response_time = time.time() - start_time
+                    code = response.status_code
+                    if code in (200, 206, 301, 302, 304, 307, 308):
+                        try:
+                            next(response.iter_content(chunk_size=1024), None)
+                        except Exception:
+                            pass
+                        return True, response_time, f"HTTP {code}", code
+                    return False, response_time, f"HTTP {code}", code
+            except requests.Timeout:
+                return False, timeout, "Превышен таймаут", None
+            except requests.ConnectionError:
+                return False, 0, "Ошибка соединения", None
+            except Exception as e:
+                return False, 0, f"Ошибка: {str(e)[:60]}", None
+            finally:
+                try:
+                    session.close()
+                except Exception:
+                    pass
         except Exception as e:
-            rt = time.time() - start
-            return None, rt, f"Ошибка: {str(e)[:60]}", None
+            return False, 0, f"Критическая ошибка: {str(e)[:60]}", None
 
     @staticmethod
-    def check_url(url: str, timeout: int = VLC_DEFAULT_CHECK_TIMEOUT,
+    def check_url(url: str, timeout: int = 3,
                   verify_ssl: bool = False,
                   max_retries: int = 0,
                   retry_delay: float = 0.5,
-                  stop_token: Optional['_StopToken'] = None,
-                  pool_size: int = URL_CHECK_MAX_WORKERS
+                  stop_token=None,
+                  pool_size: int = 4,
+                  user_agent: str = "",
+                  referrer: str = "",
+                  extra_headers=None
                   ) -> Tuple[Optional[bool], Optional[float], str, Optional[int]]:
+        """ЕДИНСТВЕННЫЙ механизм проверки ссылок в Ksenia."""
         if not url or not url.strip():
             return False, None, "Пустой URL", None
-        err = URLUtils._validate_url(url)
-        if err:
-            return False, None, err, None
-
-        from sources import HttpSessionFactory
-        session = HttpSessionFactory.get(verify_ssl=verify_ssl,
-                                          pool_size=pool_size)
-
-        if cancelled(stop_token):
+        if stop_token is not None and stop_token.is_set():
             return False, None, "Отменено", None
-
-        ok, rt, msg, code = URLUtils._vlc_get_request(
-            session, url, timeout, verify=verify_ssl, stop_token=stop_token)
-
-        if ok is None and max_retries > 0:
-            if stop_token:
-                stop_token.wait(retry_delay)
-            else:
-                time.sleep(retry_delay)
-            if cancelled(stop_token):
-                return False, rt, "Отменено", code
-            ok2, rt2, msg2, code2 = URLUtils._vlc_get_request(
-                session, url, timeout, verify=verify_ssl, stop_token=stop_token)
-            if ok2 is True:
-                return True, rt2, msg2, code2
-            if ok2 is False:
-                return False, rt2, msg2, code2
-            return None, rt, msg, code
-
-        return ok, rt, msg, code
-
-def link_score(channel: ChannelData, url: str,
-               cached: Optional[Dict[str, Any]] = None) -> float:
-    if not url or not url.strip():
-        return -1000.0
-    score = 0.0
-    if url == channel.link.url and channel.status.url_status is True:
-        score += 100.0
-    elif url in channel.link.alternative_urls:
-        score += 50.0
-    if cached:
-        if cached.get('alive'):
-            score += 100.0
-        ms = float(cached.get('response_ms') or 0)
-        if ms > 0:
-            score += max(0.0, 40.0 - ms / 100.0)
-        score += min(int(cached.get('successes') or 0) * 2, 20)
-        score -= min(int(cached.get('failures') or 0) * 5, 30)
-    return score
+        return URLUtils._check_url_single(
+            url, timeout, verify_ssl,
+            user_agent=user_agent, referrer=referrer,
+            extra_headers=extra_headers)

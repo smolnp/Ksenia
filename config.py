@@ -18,6 +18,7 @@ from constants import (URL_CHECK_MAX_WORKERS, FALLBACK_DAYS_DEFAULT,
     DEFAULT_TIMEOUT)
 from paths import Paths, logger
 
+
 class Config:
     DEFAULT = {
         'max_workers': URL_CHECK_MAX_WORKERS,
@@ -82,7 +83,6 @@ class Config:
         'source_check_timeout': SOURCE_CHECK_TIMEOUT_DEFAULT,
         'source_check_trust_sec': SOURCE_CHECK_TRUST_SEC_DEFAULT,
         'source_check_batch_size': SOURCE_CHECK_BATCH_SIZE_DEFAULT,
-        
         'apply_filters_on_file_open': True,
     }
 
@@ -122,7 +122,7 @@ class Config:
                 return value
             if isinstance(value, str):
                 return [v.strip() for v in value.split(',') if v.strip()]
-            return self.DEFAULT.get(key, value)
+            return list(self.DEFAULT.get(key, []) or [])
         if expected is str:
             if isinstance(value, str):
                 return value
@@ -175,6 +175,7 @@ class Config:
         with self._lock:
             self.config.update(values)
 
+
 def _build_config_types(default: Dict[str, Any]) -> Dict[str, type]:
     types: Dict[str, type] = {}
     for k, v in default.items():
@@ -191,6 +192,7 @@ def _build_config_types(default: Dict[str, Any]) -> Dict[str, type]:
         else:
             types[k] = type(v)
     return types
+
 
 class LinkReplacementSettings:
     __slots__ = ('_config',)
@@ -236,7 +238,6 @@ class LinkReplacementSettings:
                 if host == dn or host.endswith('.' + dn):
                     return True
             return False
-        # Fallback: если host не извлекли — старая логика
         u = url.lower()
         return any((d or '').lower() in u
                    for d in self.temporary_domains) or \

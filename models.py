@@ -2,9 +2,6 @@
 """ChannelData, Metadata, Link, Status, EPG-модели."""
 
 from __future__ import annotations
-import itertools
-import hashlib
-import json
 import threading
 from contextlib import suppress
 from datetime import datetime
@@ -12,16 +9,17 @@ from typing import Optional, Dict, Any, Tuple, List
 from enum import Enum
 from PyQt6.QtGui import QColor
 from constants import (DEFAULT_GROUP, StatusText, URL_FG_COLORS,
-    EPG_ALLOWED_META_FIELDS, EPG_FUZZY_MIN_LENGTH_DEFAULT,
-    EPG_FUZZY_MIN_GAP_DEFAULT, EPG_FUZZY_CACHE_LIMIT)
+    EPG_ALLOWED_META_FIELDS)
 from paths import logger, parse_datetime
 from utils import ChannelNameNormalizer
+
 
 class LinkQuality(Enum):
     UNKNOWN = 0
     WORKING = 1
     NOT_WORKING = 2
     UNSUPPORTED = 3
+
 
 class ChannelMetadata:
     __slots__ = ('name', 'original_name', 'group', 'tvg_id', 'tvg_name',
@@ -55,6 +53,7 @@ class ChannelMetadata:
             setattr(m, s, getattr(self, s))
         return m
 
+
 class ChannelLink:
     __slots__ = ('url', 'extinf', 'user_agent', 'extvlcopt_lines',
                  'extra_headers', 'has_url', 'alternative_urls',
@@ -81,6 +80,7 @@ class ChannelLink:
             setattr(l, s, v)
         return l
 
+
 class ChannelStatus:
     __slots__ = ('url_status', 'url_check_time', 'link_quality',
                  'link_response_time', 'status_text', 'status_code')
@@ -106,6 +106,7 @@ class ChannelStatus:
         for sl in self.__slots__:
             setattr(s, sl, getattr(self, sl))
         return s
+
 
 class ChannelData:
     _uid_next: int = 1
@@ -204,7 +205,6 @@ class ChannelData:
         return bool(self.link.url and self.link.url.strip())
 
     def clear_url(self):
-        """Очистить ссылку. Метаданные НЕ трогаются."""
         self.link.url = ""
         self.link.has_url = False
         self.status.reset()
@@ -466,7 +466,9 @@ class ChannelData:
                                int(data.get('original_index', -1)))
         self._invalidate_caches()
 
+
 ChannelData._build_attr_map()
+
 
 class EPGEntry:
     __slots__ = ('channel_id', 'start', 'stop', 'title', 'desc', 'category')
@@ -478,6 +480,7 @@ class EPGEntry:
         self.title: str = ""
         self.desc: str = ""
         self.category: str = ""
+
 
 class EPGChannelInfo:
     __slots__ = ('channel_id', 'display_name', 'icon', 'lcn')

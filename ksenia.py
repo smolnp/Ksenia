@@ -1,16 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Ksenia M3U Editor — точка входа.
+"""Ksenia M3U Editor — точка входа."""
 
-Запуск:
-    python -m ksenia.ksenia
-    или
-    python ksenia/ksenia.py
-"""
 from __future__ import annotations
 
 import sys
-import os
 import signal
 import faulthandler
 from contextlib import suppress
@@ -30,9 +24,6 @@ def _install_signal_handlers(app):
     for sig in (signal.SIGINT, signal.SIGTERM):
         with suppress(ValueError, OSError):
             signal.signal(sig, handler)
-
-
-# v5: watchdog перенесён в ksenia_window.py (единая точка входа).
 
 
 def main():
@@ -60,7 +51,6 @@ def main():
     window = MainWindow()
     window.show()
     rc = app.exec()
-    _install_exit_watchdog()
     sys.exit(rc)
 
 

@@ -33,15 +33,18 @@ from constants import (OK_CANCEL_BB, CLOSE_BB, YES_NO, M3U_FILTER,
     SOURCE_CHECK_TRUST_SEC_DEFAULT, SOURCE_CHECK_BATCH_SIZE_DEFAULT,
     CHECK_RESULT_CACHE_TTL_HOURS, EPG_CACHE_TTL_HOURS,
     REPLACEMENT_MAX_WORKERS_DEFAULT,
-    URL_CHECK_MAX_WORKERS, VLC_DEFAULT_CHECK_TIMEOUT)
+    URL_CHECK_MAX_WORKERS, VLC_DEFAULT_CHECK_TIMEOUT,
+    FALLBACK_DAYS_DEFAULT)
 from models import ChannelData
 from paths import (logger, error_box, warn_box, info_box, confirm,
     confirm_three, open_file_dialog, save_file_dialog, open_dir_dialog,
     open_external)
 from utils import URLUtils
+from urllib.parse import urlparse
 from config import Config
 from sources import LinkSource, LinkSourceManager
-from blacklists import (DomainUserAgentManager, DomainBlacklistRule, DomainUserAgentRule)
+from blacklists import (DomainUserAgentManager, DomainBlacklistRule,
+    DomainUserAgentRule)
 from undo import SimpleDuplicateFinder
 from parsers import M3UParser
 from workers import SourcesRefreshWorker
@@ -53,6 +56,7 @@ except ImportError:
     shiboken6 = None
     _HAS_SHIBOKEN = False
 
+
 def _is_qobject_valid(obj) -> bool:
     if obj is None:
         return False
@@ -63,6 +67,7 @@ def _is_qobject_valid(obj) -> bool:
     except Exception:
         return False
 
+
 def _is_gui_thread() -> bool:
     app = QApplication.instance()
     if app is None:
@@ -71,6 +76,7 @@ def _is_gui_thread() -> bool:
         return QThread.currentThread() == app.thread()
     except Exception:
         return True
+
 
 class IconProvider:
     _icons_enabled: bool = True
@@ -158,6 +164,7 @@ class IconProvider:
             cls._theme_available_cache.clear()
             cls._style = None
 
+
 class _NumericItem(QTableWidgetItem):
     """QTableWidgetItem с числовым сравнением для сортировки."""
     def __init__(self, value: int):
@@ -178,7 +185,8 @@ class _NumericItem(QTableWidgetItem):
 class BaseDialog(QDialog):
     __slots__ = ('root',)
 
-    def __init__(self, title: str, parent=None, size: Tuple[int, int] = (400, 300)):
+    def __init__(self, title: str, parent=None,
+                 size: Tuple[int, int] = (400, 300)):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.resize(*size)
@@ -198,6 +206,7 @@ class BaseDialog(QDialog):
         bb.rejected.connect(self.reject)
         self.root.addWidget(bb)
         return bb
+
 
 def make_table(headers: List[str], parent=None, *,
                stretch_last: bool = True,
@@ -219,6 +228,7 @@ def make_table(headers: List[str], parent=None, *,
         t.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
     return t
 
+
 def make_action(parent, text: str, slot: Callable,
                 shortcut: str = "", icon: Optional[QIcon] = None,
                 tooltip: str = "") -> QAction:
@@ -233,6 +243,7 @@ def make_action(parent, text: str, slot: Callable,
     a.triggered.connect(lambda checked=False, _slot=slot: _slot())
     return a
 
+
 def fill_channels_table(table: QTableWidget,
                         channels: List['ChannelData'],
                         max_url: int = 120):
@@ -243,11 +254,13 @@ def fill_channels_table(table: QTableWidget,
         table.setItem(i, 2,
                       QTableWidgetItem((ch.link.url or "")[:max_url]))
 
+
 def make_form(rows: List[Tuple[str, QWidget]]) -> QFormLayout:
     f = QFormLayout()
     for label, widget in rows:
         f.addRow(label, widget)
     return f
+
 
 def json_import_dialog(parent, title: str,
                        on_items: Callable[[list], int]) -> Optional[int]:
@@ -272,6 +285,7 @@ def json_import_dialog(parent, title: str,
         error_box(parent, f"Ошибка при обработке:\n{e}")
         return None
 
+
 def json_export_dialog(parent, title: str, default_name: str,
                        items: list) -> bool:
     fp = save_file_dialog(parent, title, default_name, JSON_FILTER)
@@ -285,6 +299,7 @@ def json_export_dialog(parent, title: str, default_name: str,
         error_box(parent, str(e))
         return False
 
+
 class SupportDialog(BaseDialog):
     def __init__(self, parent=None):
         super().__init__("Поддержка проекта", parent, size=(500, 400))
@@ -292,7 +307,9 @@ class SupportDialog(BaseDialog):
         self.setMinimumWidth(500)
         layout = self.root
         title = QLabel("☕ Поддержать проект")
-        f = title.font(); f.setPointSize(16); f.setBold(True)
+        f = title.font()
+        f.setPointSize(16)
+        f.setBold(True)
         title.setFont(f)
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title)
@@ -313,6 +330,7 @@ class SupportDialog(BaseDialog):
         layout.addWidget(wallet_label)
         self.add_close()
 
+
 class HelpDialog(BaseDialog):
     def __init__(self, parent=None):
         super().__init__("Справка", parent, size=(700, 600))
@@ -321,7 +339,8 @@ class HelpDialog(BaseDialog):
         layout = self.root
         tabs = QTabWidget()
 
-        general = QWidget(); gl = QVBoxLayout(general)
+        general = QWidget()
+        gl = QVBoxLayout(general)
         gl.addWidget(self._html_label(
             f"<h2>Ksenia M3U Editor {APP_VERSION}</h2>"
             "<p>Редактор и менеджер IPTV плейлистов в формате M3U/M3U8.</p>"
@@ -332,22 +351,15 @@ class HelpDialog(BaseDialog):
             "<td><a href='https://github.com/smolnp'>https://github.com/smolnp</a></td></tr>"
             "<tr><td><b>Репозиторий:</b></td>"
             "<td><a href='https://github.com/smolnp/Ksenia'>https://github.com/smolnp/Ksenia</a></td></tr>"
-            "<tr><td><b>Документация:</b></td>"
-            "<td><a href='https://github.com/smolnp/Ksenia/blob/main/Ksenia%20M3U%20Editor/help.md'>https://github.com/smolnp/Ksenia/blob/main/Ksenia%20M3U%20Editor/help.md</a></td></tr>"
-            "<tr><td><b>Версия:</b></td><td>{APP_VERSION}</td></tr>"
+            "<tr><td><b>Версия:</b></td><td>" + APP_VERSION + "</td></tr>"
             "<tr><td><b>Лицензия:</b></td>"
             "<td>GNU GPL v3.0</td></tr>"
-            "</table>"
-            "<h3>Ссылки</h3>"
-            "<ul>"
-            "<li><a href='https://github.com/smolnp/Ksenia'>GitHub-репозиторий</a></li>"
-            "<li><a href='https://github.com/smolnp/Ksenia/blob/main/Ksenia%20M3U%20Editor/help.md'>Онлайн-документация</a></li>"
-            "<li><a href='https://github.com/smolnp'>Профиль автора</a></li>"
-            "<li><a href='https://github.com/smolnp/Ksenia/issues'>Сообщить о проблеме</a></li>"
-            "</ul>"))
+            "</table>"))
         gl.addStretch()
         tabs.addTab(general, "О проекте")
-        shortcuts = QWidget(); shl = QVBoxLayout(shortcuts)
+
+        shortcuts = QWidget()
+        shl = QVBoxLayout(shortcuts)
         shl.addWidget(self._html_label(
             "<h3>Горячие клавиши</h3>"
             "<ul>"
@@ -363,7 +375,8 @@ class HelpDialog(BaseDialog):
         shl.addStretch()
         tabs.addTab(shortcuts, "Клавиши")
 
-        lt_tab = QWidget(); lt_l = QVBoxLayout(lt_tab)
+        lt_tab = QWidget()
+        lt_l = QVBoxLayout(lt_tab)
         lt_l.setContentsMargins(8, 8, 8, 8)
 
         lt_header = QLabel("GNU General Public License v3.0")
@@ -399,9 +412,10 @@ class HelpDialog(BaseDialog):
         lt_link.setTextFormat(Qt.TextFormat.RichText)
         lt_link.setOpenExternalLinks(True)
         lt_l.addWidget(lt_link)
-
         tabs.addTab(lt_tab, "Лицензия GPLv3")
-        sup_tab = QWidget(); spl = QVBoxLayout(sup_tab)
+
+        sup_tab = QWidget()
+        spl = QVBoxLayout(sup_tab)
         spl.addWidget(QLabel("Поддержать развитие проекта:"))
         b = QPushButton("☕ Поддержать проект")
         b.clicked.connect(lambda: SupportDialog(self).exec())
@@ -419,6 +433,7 @@ class HelpDialog(BaseDialog):
         lbl.setTextFormat(Qt.TextFormat.RichText)
         lbl.setOpenExternalLinks(True)
         return lbl
+
 
 class M3USyntaxHighlighter(QSyntaxHighlighter):
     def __init__(self, parent=None):
@@ -455,6 +470,7 @@ class M3USyntaxHighlighter(QSyntaxHighlighter):
             for m in pattern.finditer(text):
                 self.setFormat(m.start(), m.end() - m.start(), fmt)
 
+
 class EnhancedTextEdit(QPlainTextEdit):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -462,9 +478,11 @@ class EnhancedTextEdit(QPlainTextEdit):
         self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self.highlighter = M3USyntaxHighlighter(self.document())
 
+
 class PlaylistHeaderDialog(BaseDialog):
     def __init__(self, header_manager: 'PlaylistHeaderManager', parent=None):
-        super().__init__("Редактор заголовка плейлиста", parent, size=(600, 450))
+        super().__init__("Редактор заголовка плейлиста", parent,
+                         size=(600, 450))
         self._original = header_manager
         self.header_manager = header_manager.copy()
         self._setup_ui()
@@ -472,12 +490,14 @@ class PlaylistHeaderDialog(BaseDialog):
 
     def _setup_ui(self):
         layout = self.root
-        g = QGroupBox("Основные"); gl = QFormLayout(g)
+        g = QGroupBox("Основные")
+        gl = QFormLayout(g)
         self.playlist_name_edit = QLineEdit()
         gl.addRow("Название плейлиста:", self.playlist_name_edit)
         layout.addWidget(g)
 
-        eg = QGroupBox("Источники EPG (url-tvg)"); el = QVBoxLayout(eg)
+        eg = QGroupBox("Источники EPG (url-tvg)")
+        el = QVBoxLayout(eg)
         info = QLabel("✓ EPG-источники сохраняются в заголовок.")
         info.setWordWrap(True)
         info.setStyleSheet("color: #2E7D32;")
@@ -488,22 +508,28 @@ class PlaylistHeaderDialog(BaseDialog):
         for t, s in (("Добавить", self._add_epg),
                      ("Редактировать", self._edit_epg),
                      ("Удалить", self._remove_epg)):
-            b = QPushButton(t); b.clicked.connect(s); bl.addWidget(b)
+            b = QPushButton(t)
+            b.clicked.connect(s)
+            bl.addWidget(b)
         el.addLayout(bl)
         layout.addWidget(eg)
 
-        cg = QGroupBox("Пользовательские атрибуты"); cl = QVBoxLayout(cg)
+        cg = QGroupBox("Пользовательские атрибуты")
+        cl = QVBoxLayout(cg)
         self.custom_attrs_table = make_table(["Ключ", "Значение"])
         cl.addWidget(self.custom_attrs_table)
         cbl = QHBoxLayout()
         for t, s in (("Добавить", self._add_attr),
                      ("Редактировать", self._edit_attr),
                      ("Удалить", self._remove_attr)):
-            b = QPushButton(t); b.clicked.connect(s); cbl.addWidget(b)
+            b = QPushButton(t)
+            b.clicked.connect(s)
+            cbl.addWidget(b)
         cl.addLayout(cbl)
         layout.addWidget(cg)
 
-        pg = QGroupBox("Предпросмотр"); pl = QVBoxLayout(pg)
+        pg = QGroupBox("Предпросмотр")
+        pl = QVBoxLayout(pg)
         self.preview_text = QPlainTextEdit()
         self.preview_text.setFont(QFont("Courier New", 10))
         self.preview_text.setMaximumHeight(100)
@@ -602,12 +628,14 @@ class PlaylistHeaderDialog(BaseDialog):
         self.header_manager.set_playlist_name(self.playlist_name_edit.text())
         super().accept()
 
+
 class RemoveMetadataDialog(BaseDialog):
     def __init__(self, parent=None):
         super().__init__("Удаление метаданных", parent, size=(400, 320))
         l = self.root
         l.addWidget(QLabel("Выберите метаданные:"))
-        g = QGroupBox("Параметры"); gl = QVBoxLayout(g)
+        g = QGroupBox("Параметры")
+        gl = QVBoxLayout(g)
         self.tvg_id_check = QCheckBox("Удалить tvg-id")
         self.tvg_name_check = QCheckBox("Удалить tvg-name")
         self.tvg_logo_check = QCheckBox("Удалить tvg-logo")
@@ -618,7 +646,8 @@ class RemoveMetadataDialog(BaseDialog):
                   self.user_agent_check):
             gl.addWidget(w)
         l.addWidget(g)
-        sg = QGroupBox("Область"); sl = QVBoxLayout(sg)
+        sg = QGroupBox("Область")
+        sl = QVBoxLayout(sg)
         self._scope_group = QButtonGroup(self)
         self._scope_group.addButton(QRadioButton("Текущий канал"), 0)
         self._scope_group.addButton(QRadioButton("Выбранные"), 1)
@@ -642,13 +671,15 @@ class RemoveMetadataDialog(BaseDialog):
         return {0: "current", 1: "selected", 2: "all"}.get(
             self._scope_group.checkedId(), "all")
 
+
 class MassEditDialog(BaseDialog):
     def __init__(self, count: int, parent=None):
         super().__init__(f"Массовая правка ({count} каналов)",
                          parent, size=(520, 320))
         l = self.root
         l.addWidget(QLabel(f"<b>Выбрано каналов:</b> {count}"))
-        g = QGroupBox("Что изменить"); gl = QVBoxLayout(g)
+        g = QGroupBox("Что изменить")
+        gl = QVBoxLayout(g)
         self.ua_check = QCheckBox("User-Agent")
         self.tvg_id_check = QCheckBox("TVG-ID")
         self.tvg_logo_check = QCheckBox("TVG-Logo")
@@ -686,17 +717,17 @@ class MassEditDialog(BaseDialog):
 
     def accept(self):
         if not any((self.ua_check.isChecked(), self.tvg_id_check.isChecked(),
-                    self.tvg_logo_check.isChecked(), self.group_check.isChecked())):
+                    self.tvg_logo_check.isChecked(),
+                    self.group_check.isChecked())):
             warn_box(self, "Выберите хотя бы одно поле")
             return
         super().accept()
 
+
 class LinkReplacementSettingsDialog(BaseDialog):
-    """
-    v0.9.4: убраны auto_check_sources_on_refresh и auto_check_urls
-    (у источника). Добавлена вкладка «Автозамена» без этих чекбоксов,
-    но с source_check_* настройками.
-    """
+    """Настройки замены ссылок (вкладки: Поиск, Нормализация,
+    Автозамена, Сеть, Фильтрация, EPG)."""
+
     def __init__(self, config: Config, parent=None):
         super().__init__("Настройки замены ссылок", parent, size=(640, 720))
         self.config = config
@@ -765,10 +796,7 @@ class LinkReplacementSettingsDialog(BaseDialog):
         self.fast_replacement_check = QCheckBox(
             "⚡ Быстрая замена (агрессивные таймауты)")
         self.fast_replacement_check.setToolTip(
-            "Использовать короткие таймауты и без повторов.\n"
-            "Ускоряет массовую замену, но медленные URL могут\n"
-            "быть пропущены. Для ручной проверки используйте\n"
-            "«Проверить все ссылки».")
+            "Использовать короткие таймауты и без повторов.")
         f3.addRow(self.fast_replacement_check)
 
         self.replace_timeout_spin = QSpinBox()
@@ -789,8 +817,7 @@ class LinkReplacementSettingsDialog(BaseDialog):
         self.cache_trust_spin.setSuffix(" сек")
         self.cache_trust_spin.setToolTip(
             "Если URL проверялся меньше N секунд назад и он живой —\n"
-            "используем результат кэша без повторной проверки.\n"
-            "Свежие битые URL вообще не проверяются.")
+            "используем результат кэша без повторной проверки.")
         f3.addRow("Доверять кэшу проверок (сек):", self.cache_trust_spin)
 
         sep2 = QFrame()
@@ -799,17 +826,20 @@ class LinkReplacementSettingsDialog(BaseDialog):
 
         self.source_check_workers_spin = QSpinBox()
         self.source_check_workers_spin.setRange(1, 32)
-        f3.addRow("Потоков проверки источников:", self.source_check_workers_spin)
+        f3.addRow("Потоков проверки источников:",
+                  self.source_check_workers_spin)
 
         self.source_check_timeout_spin = QSpinBox()
         self.source_check_timeout_spin.setRange(1, 60)
         self.source_check_timeout_spin.setSuffix(" сек")
-        f3.addRow("Таймаут проверки источников:", self.source_check_timeout_spin)
+        f3.addRow("Таймаут проверки источников:",
+                  self.source_check_timeout_spin)
 
         self.source_check_trust_spin = QSpinBox()
         self.source_check_trust_spin.setRange(60, 86400)
         self.source_check_trust_spin.setSuffix(" сек")
-        f3.addRow("Доверять кэшу (источники):", self.source_check_trust_spin)
+        f3.addRow("Доверять кэшу (источники):",
+                  self.source_check_trust_spin)
 
         self.source_check_batch_spin = QSpinBox()
         self.source_check_batch_spin.setRange(10, 1000)
@@ -822,7 +852,7 @@ class LinkReplacementSettingsDialog(BaseDialog):
             "🔄 Фоновое наполнение кэша ускоряет последующие замены:\n"
             "если URL уже проверен и жив, замена произойдёт мгновенно.\n\n"
             "Источники проверяются ТОЛЬКО через «Обновить всё»\n"
-            "в менеджере источников (v0.9.4).")
+            "в менеджере источников.")
         info_fast.setWordWrap(True)
         info_fast.setStyleSheet("color: gray; font-style: italic;")
         f3.addRow(info_fast)
@@ -933,19 +963,30 @@ class LinkReplacementSettingsDialog(BaseDialog):
         idx = self.search_type_combo.findData(c.get('search_type', 'exact'))
         if idx >= 0:
             self.search_type_combo.setCurrentIndex(idx)
-        self.match_threshold_spin.setValue(float(c.get('match_threshold_percent', 80.0)))
-        self.min_similarity_spin.setValue(float(c.get('min_name_similarity', 0.1)))
-        self.use_fuzzy_check.setChecked(bool(c.get('use_fuzzy_matching', True)))
-        self.ignore_special_check.setChecked(bool(c.get('ignore_special_chars_in_names', True)))
-        self.remove_parens_check.setChecked(bool(c.get('remove_parentheses_in_names', True)))
-        self.remove_brackets_check.setChecked(bool(c.get('remove_brackets_in_names', True)))
-        self.remove_emoji_check.setChecked(bool(c.get('remove_emojis_in_names', True)))
-        self.auto_broken_check.setChecked(bool(c.get('auto_replace_broken', True)))
-        self.auto_missing_check.setChecked(bool(c.get('auto_replace_missing', True)))
-        self.keep_backup_check.setChecked(bool(c.get('keep_backup_links', True)))
+        self.match_threshold_spin.setValue(
+            float(c.get('match_threshold_percent', 80.0)))
+        self.min_similarity_spin.setValue(
+            float(c.get('min_name_similarity', 0.1)))
+        self.use_fuzzy_check.setChecked(
+            bool(c.get('use_fuzzy_matching', True)))
+        self.ignore_special_check.setChecked(
+            bool(c.get('ignore_special_chars_in_names', True)))
+        self.remove_parens_check.setChecked(
+            bool(c.get('remove_parentheses_in_names', True)))
+        self.remove_brackets_check.setChecked(
+            bool(c.get('remove_brackets_in_names', True)))
+        self.remove_emoji_check.setChecked(
+            bool(c.get('remove_emojis_in_names', True)))
+        self.auto_broken_check.setChecked(
+            bool(c.get('auto_replace_broken', True)))
+        self.auto_missing_check.setChecked(
+            bool(c.get('auto_replace_missing', True)))
+        self.keep_backup_check.setChecked(
+            bool(c.get('keep_backup_links', True)))
         self.max_alt_spin.setValue(int(c.get('max_alternative_urls', 5)))
         self.replacement_workers_spin.setValue(
-            int(c.get('replacement_max_workers', REPLACEMENT_MAX_WORKERS_DEFAULT)))
+            int(c.get('replacement_max_workers',
+                      REPLACEMENT_MAX_WORKERS_DEFAULT)))
         self.fast_replacement_check.setChecked(
             bool(c.get('fast_replacement_mode', True)))
         self.replace_timeout_spin.setValue(
@@ -961,30 +1002,41 @@ class LinkReplacementSettingsDialog(BaseDialog):
         self.source_check_timeout_spin.setValue(
             int(c.get('source_check_timeout', SOURCE_CHECK_TIMEOUT_DEFAULT)))
         self.source_check_trust_spin.setValue(
-            int(c.get('source_check_trust_sec', SOURCE_CHECK_TRUST_SEC_DEFAULT)))
+            int(c.get('source_check_trust_sec',
+                      SOURCE_CHECK_TRUST_SEC_DEFAULT)))
         self.source_check_batch_spin.setValue(
-            int(c.get('source_check_batch_size', SOURCE_CHECK_BATCH_SIZE_DEFAULT)))
+            int(c.get('source_check_batch_size',
+                      SOURCE_CHECK_BATCH_SIZE_DEFAULT)))
         self._on_fast_replacement_toggled(
             self.fast_replacement_check.isChecked())
 
-        self.timeout_spin.setValue(int(c.get('check_timeout', VLC_DEFAULT_CHECK_TIMEOUT)))
-        self.workers_spin.setValue(int(c.get('max_workers', URL_CHECK_MAX_WORKERS)))
+        self.timeout_spin.setValue(
+            int(c.get('check_timeout', VLC_DEFAULT_CHECK_TIMEOUT)))
+        self.workers_spin.setValue(
+            int(c.get('max_workers', URL_CHECK_MAX_WORKERS)))
         self.retries_spin.setValue(int(c.get('max_retries', 0)))
         self.retry_delay_spin.setValue(float(c.get('retry_delay', 0.5)))
         self.verify_ssl_check.setChecked(bool(c.get('verify_ssl', False)))
-        self.use_ip_filter_check.setChecked(bool(c.get('use_ip_filtering', True)))
-        self.temporary_domains_edit.setPlainText("\n".join(c.get('temporary_domains', [])))
-        self.unsafe_domains_edit.setPlainText("\n".join(c.get('unsafe_domains', [])))
+        self.use_ip_filter_check.setChecked(
+            bool(c.get('use_ip_filtering', True)))
+        self.temporary_domains_edit.setPlainText(
+            "\n".join(c.get('temporary_domains', [])))
+        self.unsafe_domains_edit.setPlainText(
+            "\n".join(c.get('unsafe_domains', [])))
         self.epg_overwrite_check.setChecked(
             bool(c.get('epg_overwrite_metadata', True)))
         self.epg_fuzzy_enabled_check.setChecked(
-            bool(c.get('epg_fuzzy_match_enabled', EPG_FUZZY_ENABLED_DEFAULT)))
+            bool(c.get('epg_fuzzy_match_enabled',
+                       EPG_FUZZY_ENABLED_DEFAULT)))
         self.epg_fuzzy_threshold_spin.setValue(
-            float(c.get('epg_fuzzy_threshold', EPG_FUZZY_THRESHOLD_DEFAULT)))
+            float(c.get('epg_fuzzy_threshold',
+                        EPG_FUZZY_THRESHOLD_DEFAULT)))
         self.epg_fuzzy_min_length_spin.setValue(
-            int(c.get('epg_fuzzy_min_length', EPG_FUZZY_MIN_LENGTH_DEFAULT)))
+            int(c.get('epg_fuzzy_min_length',
+                      EPG_FUZZY_MIN_LENGTH_DEFAULT)))
         self.epg_fuzzy_min_gap_spin.setValue(
-            float(c.get('epg_fuzzy_min_gap', EPG_FUZZY_MIN_GAP_DEFAULT)))
+            float(c.get('epg_fuzzy_min_gap',
+                        EPG_FUZZY_MIN_GAP_DEFAULT)))
 
     @staticmethod
     def _split_lines(text: str) -> List[str]:
@@ -1001,16 +1053,21 @@ class LinkReplacementSettingsDialog(BaseDialog):
         c.set('match_threshold_percent', self.match_threshold_spin.value())
         c.set('min_name_similarity', self.min_similarity_spin.value())
         c.set('use_fuzzy_matching', self.use_fuzzy_check.isChecked())
-        c.set('ignore_special_chars_in_names', self.ignore_special_check.isChecked())
-        c.set('remove_parentheses_in_names', self.remove_parens_check.isChecked())
-        c.set('remove_brackets_in_names', self.remove_brackets_check.isChecked())
+        c.set('ignore_special_chars_in_names',
+              self.ignore_special_check.isChecked())
+        c.set('remove_parentheses_in_names',
+              self.remove_parens_check.isChecked())
+        c.set('remove_brackets_in_names',
+              self.remove_brackets_check.isChecked())
         c.set('remove_emojis_in_names', self.remove_emoji_check.isChecked())
         c.set('auto_replace_broken', self.auto_broken_check.isChecked())
         c.set('auto_replace_missing', self.auto_missing_check.isChecked())
         c.set('keep_backup_links', self.keep_backup_check.isChecked())
         c.set('max_alternative_urls', self.max_alt_spin.value())
-        c.set('replacement_max_workers', self.replacement_workers_spin.value())
-        c.set('fast_replacement_mode', self.fast_replacement_check.isChecked())
+        c.set('replacement_max_workers',
+              self.replacement_workers_spin.value())
+        c.set('fast_replacement_mode',
+              self.fast_replacement_check.isChecked())
         c.set('replace_check_timeout', self.replace_timeout_spin.value())
         c.set('replace_max_retries', self.replace_retries_spin.value())
         c.set('replace_retry_delay', 0.0)
@@ -1018,9 +1075,12 @@ class LinkReplacementSettingsDialog(BaseDialog):
               self.max_urls_per_channel_spin.value())
         c.set('check_cache_trust_seconds', self.cache_trust_spin.value())
         c.set('source_check_workers', self.source_check_workers_spin.value())
-        c.set('source_check_timeout', self.source_check_timeout_spin.value())
-        c.set('source_check_trust_sec', self.source_check_trust_spin.value())
-        c.set('source_check_batch_size', self.source_check_batch_spin.value())
+        c.set('source_check_timeout',
+              self.source_check_timeout_spin.value())
+        c.set('source_check_trust_sec',
+              self.source_check_trust_spin.value())
+        c.set('source_check_batch_size',
+              self.source_check_batch_spin.value())
 
         c.set('check_timeout', self.timeout_spin.value())
         c.set('max_workers', self.workers_spin.value())
@@ -1028,12 +1088,18 @@ class LinkReplacementSettingsDialog(BaseDialog):
         c.set('retry_delay', self.retry_delay_spin.value())
         c.set('verify_ssl', self.verify_ssl_check.isChecked())
         c.set('use_ip_filtering', self.use_ip_filter_check.isChecked())
-        c.set('temporary_domains', self._split_lines(self.temporary_domains_edit.toPlainText()))
-        c.set('unsafe_domains', self._split_lines(self.unsafe_domains_edit.toPlainText()))
-        c.set('epg_overwrite_metadata', self.epg_overwrite_check.isChecked())
-        c.set('epg_fuzzy_match_enabled', self.epg_fuzzy_enabled_check.isChecked())
-        c.set('epg_fuzzy_threshold', self.epg_fuzzy_threshold_spin.value())
-        c.set('epg_fuzzy_min_length', self.epg_fuzzy_min_length_spin.value())
+        c.set('temporary_domains',
+              self._split_lines(self.temporary_domains_edit.toPlainText()))
+        c.set('unsafe_domains',
+              self._split_lines(self.unsafe_domains_edit.toPlainText()))
+        c.set('epg_overwrite_metadata',
+              self.epg_overwrite_check.isChecked())
+        c.set('epg_fuzzy_match_enabled',
+              self.epg_fuzzy_enabled_check.isChecked())
+        c.set('epg_fuzzy_threshold',
+              self.epg_fuzzy_threshold_spin.value())
+        c.set('epg_fuzzy_min_length',
+              self.epg_fuzzy_min_length_spin.value())
         c.set('epg_fuzzy_min_gap', self.epg_fuzzy_min_gap_spin.value())
 
     def accept(self):
@@ -1044,6 +1110,7 @@ class LinkReplacementSettingsDialog(BaseDialog):
             return
         self.config.save()
         super().accept()
+
 
 class DuplicateFinderDialog(BaseDialog):
     duplicates_removed = pyqtSignal(int)
@@ -1107,7 +1174,8 @@ class DuplicateFinderDialog(BaseDialog):
         self.stats_label.setText(
             f"<b>Всего каналов:</b> {len(self.channels)} | "
             f"<b>Дубликатов по URL:</b> {report['total_url_duplicates']} | "
-            f"<b>Дубликатов по названию:</b> {report['total_name_duplicates']}")
+            f"<b>Дубликатов по названию:</b> "
+            f"{report['total_name_duplicates']}")
 
         by_url = report['by_url']
         self._fill_dup_table(self.url_table, by_url)
@@ -1136,7 +1204,8 @@ class DuplicateFinderDialog(BaseDialog):
         self.channels.extend(new_list)
 
     def _remove_by_url(self):
-        if not confirm(self, "Удалить дубликаты по URL? Останется первый канал."):
+        if not confirm(self,
+                       "Удалить дубликаты по URL? Останется первый канал."):
             return
         new_list, removed = SimpleDuplicateFinder.remove_duplicates_by_url(
             self.channels)
@@ -1147,7 +1216,8 @@ class DuplicateFinderDialog(BaseDialog):
         info_box(self, f"Удалено: {removed}", "Готово")
 
     def _remove_by_name(self):
-        if not confirm(self, "Удалить дубликаты по названию? Останется первый канал."):
+        if not confirm(self,
+                       "Удалить дубликаты по названию? Останется первый канал."):
             return
         new_list, removed = SimpleDuplicateFinder.remove_duplicates_by_name(
             self.channels, use_tvg_id=self.use_tvg_id)
@@ -1156,6 +1226,7 @@ class DuplicateFinderDialog(BaseDialog):
         self.duplicates_removed.emit(removed)
         self._update_stats()
         info_box(self, f"Удалено: {removed}", "Готово")
+
 
 class ComparePlaylistsDialog(BaseDialog):
     def __init__(self, current_channels: List[ChannelData], parent=None):
@@ -1192,7 +1263,8 @@ class ComparePlaylistsDialog(BaseDialog):
                         (self.only_b_table, "Только во втором"),
                         (self.both_table, "В обоих"),
                         (self.diff_url_table, "Разные URL")):
-            w = QWidget(); wl = QVBoxLayout(w)
+            w = QWidget()
+            wl = QVBoxLayout(w)
             wl.addWidget(t)
             tabs.addTab(w, name)
         l.addWidget(tabs)
@@ -1206,9 +1278,11 @@ class ComparePlaylistsDialog(BaseDialog):
         try:
             with open(fp, 'r', encoding='utf-8', errors='replace') as f:
                 content = f.read()
-            self.other_channels = M3UParser.parse(content, os.path.basename(fp))
-            self.file_label.setText(f"Загружен: {os.path.basename(fp)} "
-                                    f"({len(self.other_channels)} каналов)")
+            self.other_channels = M3UParser.parse(
+                content, os.path.basename(fp))
+            self.file_label.setText(
+                f"Загружен: {os.path.basename(fp)} "
+                f"({len(self.other_channels)} каналов)")
             self._compute_diff()
             self.export_btn.setEnabled(True)
         except Exception as e:
@@ -1230,7 +1304,8 @@ class ComparePlaylistsDialog(BaseDialog):
         only_b = [other_map[k] for k in other_map if k not in cur_map]
         both_keys = [k for k in cur_map if k in other_map]
         diff_url = [cur_map[k] for k in both_keys
-                    if (cur_map[k].link.url or "") != (other_map[k].link.url or "")]
+                    if (cur_map[k].link.url or "")
+                    != (other_map[k].link.url or "")]
 
         self.stats_label.setText(
             f"<b>Текущий:</b> {len(self.current_channels)} | "
@@ -1253,14 +1328,18 @@ class ComparePlaylistsDialog(BaseDialog):
         try:
             if fp.lower().endswith('.json'):
                 data = {
-                    'only_in_current': [ch.to_dict() for ch in
-                                        self._table_to_channels(self.only_a_table)],
-                    'only_in_other': [ch.to_dict() for ch in
-                                      self._table_to_channels(self.only_b_table)],
-                    'in_both': [ch.to_dict() for ch in
-                                self._table_to_channels(self.both_table)],
-                    'different_urls': [ch.to_dict() for ch in
-                                       self._table_to_channels(self.diff_url_table)],
+                    'only_in_current': [
+                        ch.to_dict() for ch in
+                        self._table_to_channels(self.only_a_table)],
+                    'only_in_other': [
+                        ch.to_dict() for ch in
+                        self._table_to_channels(self.only_b_table)],
+                    'in_both': [
+                        ch.to_dict() for ch in
+                        self._table_to_channels(self.both_table)],
+                    'different_urls': [
+                        ch.to_dict() for ch in
+                        self._table_to_channels(self.diff_url_table)],
                 }
                 with open(fp, 'w', encoding='utf-8') as f:
                     json.dump(data, f, ensure_ascii=False, indent=2)
@@ -1279,9 +1358,12 @@ class ComparePlaylistsDialog(BaseDialog):
                         for row in range(table.rowCount()):
                             writer.writerow([
                                 cat,
-                                table.item(row, 0).text() if table.item(row, 0) else '',
-                                table.item(row, 1).text() if table.item(row, 1) else '',
-                                table.item(row, 2).text() if table.item(row, 2) else '',
+                                table.item(row, 0).text()
+                                if table.item(row, 0) else '',
+                                table.item(row, 1).text()
+                                if table.item(row, 1) else '',
+                                table.item(row, 2).text()
+                                if table.item(row, 2) else '',
                             ])
             info_box(self, "Экспортировано", "Готово")
         except Exception as e:
@@ -1292,15 +1374,19 @@ class ComparePlaylistsDialog(BaseDialog):
         result = []
         for row in range(table.rowCount()):
             ch = ChannelData()
-            ch.meta.name = table.item(row, 0).text() if table.item(row, 0) else ''
-            ch.meta.group = table.item(row, 1).text() if table.item(row, 1) else ''
-            ch.link.url = table.item(row, 2).text() if table.item(row, 2) else ''
+            ch.meta.name = (table.item(row, 0).text()
+                            if table.item(row, 0) else '')
+            ch.meta.group = (table.item(row, 1).text()
+                             if table.item(row, 1) else '')
+            ch.link.url = (table.item(row, 2).text()
+                           if table.item(row, 2) else '')
             result.append(ch)
         return result
 
     @staticmethod
     def _fill_table(table: QTableWidget, channels: List[ChannelData]):
         fill_channels_table(table, channels, max_url=120)
+
 
 class BlockDomainDialog(BaseDialog):
     def __init__(self, value: str, all_channels: List[ChannelData],
@@ -1330,9 +1416,10 @@ class BlockDomainDialog(BaseDialog):
         layout.addWidget(self.subdomain_check)
 
         layout.addWidget(QLabel("Будут очищены ссылки у каналов:"))
-        self.preview = make_table(["Название", "Группа", "URL"],
-                                   edit_disabled=True,
-                                   select_mode=QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.preview = make_table(
+            ["Название", "Группа", "URL"],
+            edit_disabled=True,
+            select_mode=QAbstractItemView.SelectionMode.ExtendedSelection)
         layout.addWidget(self.preview)
 
         self.bb = self.add_ok_cancel("Заблокировать и очистить ссылки")
@@ -1380,6 +1467,7 @@ class BlockDomainDialog(BaseDialog):
                 self.note_edit.text().strip(),
                 list(self._current))
 
+
 class DomainBlacklistDialog(BaseDialog):
     def __init__(self, core: 'ApplicationCore', parent=None):
         super().__init__("Менеджер чёрного списка домен/IP",
@@ -1415,7 +1503,9 @@ class DomainBlacklistDialog(BaseDialog):
                      ("Удалить", self._remove_selected),
                      ("Очистить", self._clear_all),
                      ("Экспорт", self._export_bl)):
-            b = QPushButton(t); b.clicked.connect(s); bl.addWidget(b)
+            b = QPushButton(t)
+            b.clicked.connect(s)
+            bl.addWidget(b)
         l.addLayout(bl)
         self.add_close()
 
@@ -1510,10 +1600,8 @@ class DomainBlacklistDialog(BaseDialog):
                               "domain_blacklist.json", items):
             info_box(self, f"Сохранено правил: {len(items)}", "Экспорт")
 
+
 class LinkSourceEditDialog(BaseDialog):
-    """
-    v0.9.4: убрано auto_check_urls_check.
-    """
     def __init__(self, parent=None, source: Optional[LinkSource] = None,
                  existing_names: Optional[Set[str]] = None):
         super().__init__("Правка источника" if source
@@ -1528,24 +1616,29 @@ class LinkSourceEditDialog(BaseDialog):
     def _setup_ui(self):
         layout = self.root
         form = QFormLayout()
-        self.name_edit = QLineEdit(); form.addRow("Название:", self.name_edit)
+        self.name_edit = QLineEdit()
+        form.addRow("Название:", self.name_edit)
         self.type_combo = QComboBox()
         self.type_combo.addItems(["Локальный файл", "Онлайн источник"])
         self.type_combo.currentIndexChanged.connect(self._on_type_changed)
         form.addRow("Тип:", self.type_combo)
-        self.path_edit = QLineEdit(); form.addRow("Путь/URL:", self.path_edit)
+        self.path_edit = QLineEdit()
+        form.addRow("Путь/URL:", self.path_edit)
         self.browse_btn = QPushButton("Обзор...")
         self.browse_btn.clicked.connect(self._browse)
         form.addRow("", self.browse_btn)
-        self.priority_spin = QSpinBox(); self.priority_spin.setRange(1, 10)
+        self.priority_spin = QSpinBox()
+        self.priority_spin.setRange(1, 10)
         self.priority_spin.setValue(5)
         form.addRow("Приоритет (1-10):", self.priority_spin)
         self.encoding_edit = QLineEdit("utf-8")
         form.addRow("Кодировка:", self.encoding_edit)
         layout.addLayout(form)
 
-        g = QGroupBox("Дополнительно"); gl = QVBoxLayout(g)
-        self.enabled_check = QCheckBox("Включен"); self.enabled_check.setChecked(True)
+        g = QGroupBox("Дополнительно")
+        gl = QVBoxLayout(g)
+        self.enabled_check = QCheckBox("Включен")
+        self.enabled_check.setChecked(True)
         gl.addWidget(self.enabled_check)
         self.auto_update_check = QCheckBox("Автоматическое обновление")
         gl.addWidget(self.auto_update_check)
@@ -1559,7 +1652,8 @@ class LinkSourceEditDialog(BaseDialog):
         gl.addLayout(ul)
         layout.addWidget(g)
 
-        fg = QGroupBox("Фильтрация при загрузке"); fl = QVBoxLayout(fg)
+        fg = QGroupBox("Фильтрация при загрузке")
+        fl = QVBoxLayout(fg)
         self.apply_blacklist_check = QCheckBox(
             "Применять чёрный список каналов")
         self.apply_blacklist_check.setChecked(True)
@@ -1577,7 +1671,8 @@ class LinkSourceEditDialog(BaseDialog):
         if not s:
             return
         self.name_edit.setText(s.name)
-        self.type_combo.setCurrentIndex(0 if s.source_type == "local" else 1)
+        self.type_combo.setCurrentIndex(
+            0 if s.source_type == "local" else 1)
         self.path_edit.setText(s.path)
         self.priority_spin.setValue(s.priority)
         self.encoding_edit.setText(s.encoding)
@@ -1585,7 +1680,8 @@ class LinkSourceEditDialog(BaseDialog):
         self.auto_update_check.setChecked(s.auto_update)
         self.update_interval_spin.setValue(s.update_interval_hours)
         self.apply_blacklist_check.setChecked(s.apply_blacklist)
-        self.apply_domain_blacklist_check.setChecked(s.apply_domain_blacklist)
+        self.apply_domain_blacklist_check.setChecked(
+            s.apply_domain_blacklist)
         self._on_type_changed(self.type_combo.currentIndex())
 
     def _on_type_changed(self, idx: int):
@@ -1622,7 +1718,8 @@ class LinkSourceEditDialog(BaseDialog):
     def _create(self) -> LinkSource:
         s = LinkSource() if not self.source else self.source.copy()
         s.name = self.name_edit.text().strip()
-        s.source_type = "local" if self.type_combo.currentIndex() == 0 else "online"
+        s.source_type = ("local" if self.type_combo.currentIndex() == 0
+                         else "online")
         s.path = self.path_edit.text().strip()
         s.priority = self.priority_spin.value()
         s.encoding = self.encoding_edit.text().strip() or "utf-8"
@@ -1630,7 +1727,8 @@ class LinkSourceEditDialog(BaseDialog):
         s.auto_update = self.auto_update_check.isChecked()
         s.update_interval_hours = self.update_interval_spin.value()
         s.apply_blacklist = self.apply_blacklist_check.isChecked()
-        s.apply_domain_blacklist = self.apply_domain_blacklist_check.isChecked()
+        s.apply_domain_blacklist = \
+            self.apply_domain_blacklist_check.isChecked()
         return s
 
     def get_source(self) -> Optional[LinkSource]:
@@ -1641,6 +1739,7 @@ class LinkSourceEditDialog(BaseDialog):
     def accept(self):
         if self._validate():
             super().accept()
+
 
 class DomainUserAgentEditDialog(BaseDialog):
     def __init__(self, parent=None,
@@ -1683,6 +1782,7 @@ class DomainUserAgentEditDialog(BaseDialog):
             return
         super().accept()
 
+
 class DomainUserAgentDialog(BaseDialog):
     rules_updated = pyqtSignal()
 
@@ -1691,7 +1791,8 @@ class DomainUserAgentDialog(BaseDialog):
         super().__init__("Правила User-Agent по доменам",
                          parent, size=(800, 500))
         self.manager = manager
-        self._playlist_tab_ref = weakref.ref(playlist_tab) if playlist_tab else None
+        self._playlist_tab_ref = (weakref.ref(playlist_tab)
+                                  if playlist_tab else None)
         self._loading = False
         layout = self.root
         info = QLabel(
@@ -1716,11 +1817,14 @@ class DomainUserAgentDialog(BaseDialog):
         for t, s in (("Добавить", self._add),
                      ("Редактировать", self._edit),
                      ("Удалить", self._remove)):
-            b = QPushButton(t); b.clicked.connect(s); bl.addWidget(b)
+            b = QPushButton(t)
+            b.clicked.connect(s)
+            bl.addWidget(b)
         bl.addStretch()
         layout.addLayout(bl)
 
-        apply_btn = QPushButton("Применить ко всем каналам текущего плейлиста")
+        apply_btn = QPushButton(
+            "Применить ко всем каналам текущего плейлиста")
         apply_btn.clicked.connect(self._apply_all)
         layout.addWidget(apply_btn)
 
@@ -1823,13 +1927,10 @@ class DomainUserAgentDialog(BaseDialog):
         else:
             info_box(self, "Изменений не требуется")
 
+
 class LinkSourceManagerDialog(BaseDialog):
-    """
-    v0.9.4: ОДНА кнопка «🔄 Обновить всё» вместо двух.
-    Внутри — SourcesRefreshWorker(check_urls=True).
-    «Всего», «С URL», «Без URL» — из raw_total_links / raw_total_with_url.
-    Убрано «Проверить URL источников».
-    """
+    """Менеджер источников: одна кнопка «🔄 Обновить всё»."""
+
     sources_updated = pyqtSignal()
 
     def __init__(self, source_manager: LinkSourceManager,
@@ -1839,6 +1940,7 @@ class LinkSourceManagerDialog(BaseDialog):
         self.config = config
         self._refresh_worker: Optional[SourcesRefreshWorker] = None
         self._loading = False
+        self._channel_emit_counter = 0
         self._setup_ui()
         self._load_sources()
 
@@ -1862,7 +1964,8 @@ class LinkSourceManagerDialog(BaseDialog):
         self.sources_table.itemChanged.connect(self._on_item_changed)
         h = self.sources_table.horizontalHeader()
         for i in range(9):
-            h.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
+            h.setSectionResizeMode(i,
+                                   QHeaderView.ResizeMode.ResizeToContents)
         h.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         h.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         layout.addWidget(self.sources_table)
@@ -1874,7 +1977,9 @@ class LinkSourceManagerDialog(BaseDialog):
                      ("🔄 Обновить всё", self._refresh_all),
                      ("Импорт", self._import),
                      ("Экспорт", self._export)):
-            b = QPushButton(t); b.clicked.connect(s); bl.addWidget(b)
+            b = QPushButton(t)
+            b.clicked.connect(s)
+            bl.addWidget(b)
         layout.addLayout(bl)
 
         self._progress_label = QLabel("")
@@ -1921,7 +2026,8 @@ class LinkSourceManagerDialog(BaseDialog):
                 self.sources_table.setItem(i, 2, QTableWidgetItem(
                     "Локальный" if s.source_type == "local" else "Онлайн"))
 
-                pi = QTableWidgetItem(s.path); pi.setToolTip(s.path)
+                pi = QTableWidgetItem(s.path)
+                pi.setToolTip(s.path)
                 self.sources_table.setItem(i, 3, pi)
 
                 pr_item = QTableWidgetItem(str(s.priority))
@@ -1960,7 +2066,8 @@ class LinkSourceManagerDialog(BaseDialog):
         return {s.name for s in self.source_manager.get_all_sources()}
 
     def _add(self):
-        dlg = LinkSourceEditDialog(self, existing_names=self._existing_names())
+        dlg = LinkSourceEditDialog(self,
+                                   existing_names=self._existing_names())
         if dlg.exec() == QDialog.DialogCode.Accepted:
             src = dlg.get_source()
             if src and self.source_manager.add_source(src):
@@ -1997,13 +2104,6 @@ class LinkSourceManagerDialog(BaseDialog):
                 self.sources_updated.emit()
 
     def _refresh_all(self):
-        """
-        v0.9.4: ОДНА кнопка.
-        SourcesRefreshWorker(check_urls=True) — загружает + проверяет + rebuild.
-
-        v6.6: счётчик сигналов + processEvents() для
-        реального онлайнового обновления прогресса.
-        """
         self._channel_emit_counter = 0
         sources = self.source_manager.get_enabled_sources()
         if not sources:
@@ -2050,7 +2150,11 @@ class LinkSourceManagerDialog(BaseDialog):
                 f"✓ Обновлено {success} из {total}")
             info_box(self, f"Обновлено {success} из {total}", "Успех")
             self._progress_bar.setVisible(False)
+            w = self._refresh_worker
             self._refresh_worker = None
+            if w is not None:
+                with suppress(Exception):
+                    w.deleteLater()
 
         def on_error(msg):
             error_box(self, msg)
@@ -2101,6 +2205,7 @@ class LinkSourceManagerDialog(BaseDialog):
         self._refresh_worker = None
         event.accept()
 
+
 class LinkSelectionDialog(BaseDialog):
     def __init__(self, channel_name: str, alts: List[ChannelData],
                  parent=None):
@@ -2125,10 +2230,13 @@ class LinkSelectionDialog(BaseDialog):
         from ksenia_window import ApplicationCore
         core = ApplicationCore.instance()
         for i, a in enumerate(alts):
-            self.table.setItem(i, 0, QTableWidgetItem(a.link.link_source or "?"))
-            ui = QTableWidgetItem(a.link.url); ui.setToolTip(a.link.url)
+            self.table.setItem(i, 0,
+                               QTableWidgetItem(a.link.link_source or "?"))
+            ui = QTableWidgetItem(a.link.url)
+            ui.setToolTip(a.link.url)
             self.table.setItem(i, 1, ui)
-            src = core.link_source_manager.get_source_by_name(a.link.link_source)
+            src = core.link_source_manager.get_source_by_name(
+                a.link.link_source)
             pr = src.priority if src else 5
             pi = QTableWidgetItem(str(pr))
             pi.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -2158,6 +2266,7 @@ class LinkSelectionDialog(BaseDialog):
         if 0 <= self.selected_index < len(self.alts):
             return self.alts[self.selected_index]
         return None
+
 
 class BlacklistDialog(BaseDialog):
     def __init__(self, core: 'ApplicationCore', parent=None):
@@ -2189,7 +2298,9 @@ class BlacklistDialog(BaseDialog):
                      ("Очистить", self._clear_all),
                      ("Импорт", self._import_bl),
                      ("Экспорт", self._export_bl)):
-            b = QPushButton(t); b.clicked.connect(s); bl.addWidget(b)
+            b = QPushButton(t)
+            b.clicked.connect(s)
+            bl.addWidget(b)
         l.addLayout(bl)
         self.add_close()
 
@@ -2199,7 +2310,8 @@ class BlacklistDialog(BaseDialog):
         for i, it in enumerate(items):
             self.table.setItem(i, 0, QTableWidgetItem(it.get('name', '')))
             self.table.setItem(i, 1, QTableWidgetItem(it.get('tvg_id', '')))
-            self.table.setItem(i, 2, QTableWidgetItem(it.get('added_date', '')))
+            self.table.setItem(i, 2,
+                               QTableWidgetItem(it.get('added_date', '')))
 
     def _add_manual(self):
         name, ok1 = QInputDialog.getText(self, "Добавить", "Название:")
@@ -2213,7 +2325,8 @@ class BlacklistDialog(BaseDialog):
                        self.table.selectionModel().selectedRows()],
                       reverse=True)
         for r in rows:
-            n = self.table.item(r, 0); t = self.table.item(r, 1)
+            n = self.table.item(r, 0)
+            t = self.table.item(r, 1)
             if n and t:
                 self.core.remove_from_blacklist(n.text(), t.text())
         self._load_table()
@@ -2236,6 +2349,7 @@ class BlacklistDialog(BaseDialog):
     def _export_bl(self):
         json_export_dialog(self, "Экспорт ч.с. каналов",
                            "blacklist.json", self.core.get_blacklist())
+
 
 class PlaylistFromSourcesDialog(BaseDialog):
     def __init__(self, core: 'ApplicationCore', parent=None):
@@ -2325,7 +2439,8 @@ class PlaylistFromSourcesDialog(BaseDialog):
                 result.append(s)
         return result
 
-    def get_result(self) -> Tuple[List[LinkSource], bool, bool, bool, bool, bool, bool]:
+    def get_result(self) -> Tuple[List[LinkSource], bool, bool, bool, bool,
+                                   bool, bool]:
         return (self._selected_sources(),
                 self.minimize_check.isChecked(),
                 self.preserve_order_check.isChecked(),
@@ -2340,10 +2455,8 @@ class PlaylistFromSourcesDialog(BaseDialog):
             return
         super().accept()
 
+
 class GeneralSettingsDialog(BaseDialog):
-    """
-    v0.9.4: добавлен чекбокс apply_filters_on_file_open.
-    """
     def __init__(self, core: 'ApplicationCore', parent=None):
         super().__init__("Общие настройки", parent, size=(520, 700))
         self.core = core
@@ -2357,20 +2470,25 @@ class GeneralSettingsDialog(BaseDialog):
         form.addRow("Размер шрифта:", self.font_size_spin)
 
         self.save_extvlcopt_check = QCheckBox("Сохранять EXTVLCOPT-строки")
-        self.save_extvlcopt_check.setChecked(bool(c.get('save_extvlcopt', True)))
+        self.save_extvlcopt_check.setChecked(
+            bool(c.get('save_extvlcopt', True)))
         form.addRow(self.save_extvlcopt_check)
 
         self.limit_check_check = QCheckBox("Ограничивать число проверок")
-        self.limit_check_check.setChecked(bool(c.get('limit_check_enabled', False)))
+        self.limit_check_check.setChecked(
+            bool(c.get('limit_check_enabled', False)))
         form.addRow(self.limit_check_check)
 
         self.max_channels_spin = QSpinBox()
         self.max_channels_spin.setRange(10, 100000)
-        self.max_channels_spin.setValue(int(c.get('max_channels_to_check', 2000)))
+        self.max_channels_spin.setValue(
+            int(c.get('max_channels_to_check', 2000)))
         form.addRow("Макс. каналов для проверки:", self.max_channels_spin)
 
-        self.keep_dup_check = QCheckBox("Сохранять дубликаты при дедупликации")
-        self.keep_dup_check.setChecked(bool(c.get('keep_duplicates', False)))
+        self.keep_dup_check = QCheckBox(
+            "Сохранять дубликаты при дедупликации")
+        self.keep_dup_check.setChecked(
+            bool(c.get('keep_duplicates', False)))
         form.addRow(self.keep_dup_check)
 
         self.dedup_tvg_check = QCheckBox(
@@ -2406,19 +2524,23 @@ class GeneralSettingsDialog(BaseDialog):
         form.addRow(self.show_tvg_id_check)
 
         self.show_tvg_logo_check = QCheckBox("Показывать логотип")
-        self.show_tvg_logo_check.setChecked(bool(c.get('show_tvg_logo', True)))
+        self.show_tvg_logo_check.setChecked(
+            bool(c.get('show_tvg_logo', True)))
         form.addRow(self.show_tvg_logo_check)
 
         self.show_catchup_check = QCheckBox("Показывать catchup")
-        self.show_catchup_check.setChecked(bool(c.get('show_catchup', False)))
+        self.show_catchup_check.setChecked(
+            bool(c.get('show_catchup', False)))
         form.addRow(self.show_catchup_check)
 
         self.show_status_bar_check = QCheckBox("Показывать статус-бар")
-        self.show_status_bar_check.setChecked(bool(c.get('show_status_bar', True)))
+        self.show_status_bar_check.setChecked(
+            bool(c.get('show_status_bar', True)))
         form.addRow(self.show_status_bar_check)
 
         self.enable_icons_check = QCheckBox("Показывать иконки")
-        self.enable_icons_check.setChecked(bool(c.get('enable_icons', True)))
+        self.enable_icons_check.setChecked(
+            bool(c.get('enable_icons', True)))
         form.addRow(self.enable_icons_check)
 
         self.auto_update_sources_check = QCheckBox(
@@ -2435,7 +2557,8 @@ class GeneralSettingsDialog(BaseDialog):
 
         self.days_to_check_spin = QSpinBox()
         self.days_to_check_spin.setRange(0, 30)
-        self.days_to_check_spin.setValue(int(c.get('days_to_check', FALLBACK_DAYS_DEFAULT)))
+        self.days_to_check_spin.setValue(
+            int(c.get('days_to_check', FALLBACK_DAYS_DEFAULT)))
         form.addRow("Дней для fallback:", self.days_to_check_spin)
 
         l.addLayout(form)
@@ -2450,7 +2573,8 @@ class GeneralSettingsDialog(BaseDialog):
             'max_channels_to_check': self.max_channels_spin.value(),
             'keep_duplicates': self.keep_dup_check.isChecked(),
             'dedup_by_name_use_tvg': self.dedup_tvg_check.isChecked(),
-            'apply_filters_on_file_open': self.apply_filters_on_open_check.isChecked(),
+            'apply_filters_on_file_open':
+                self.apply_filters_on_open_check.isChecked(),
             'epg_overwrite_metadata': self.epg_overwrite_check.isChecked(),
             'preserve_original_order': self.preserve_order_check.isChecked(),
             'show_tvg_id': self.show_tvg_id_check.isChecked(),
@@ -2466,6 +2590,7 @@ class GeneralSettingsDialog(BaseDialog):
         c.save()
         self.core.apply_auto_update_setting()
         self.core.settings_changed.emit()
+
 
 class CacheManagerDialog(BaseDialog):
     def __init__(self, core: 'ApplicationCore', parent=None):
@@ -2591,7 +2716,8 @@ class CacheManagerDialog(BaseDialog):
 
     def _load_settings(self):
         c = self.core.config
-        self.use_cache_check.setChecked(bool(c.get('use_cache_manager', True)))
+        self.use_cache_check.setChecked(
+            bool(c.get('use_cache_manager', True)))
         self.use_check_cache_check.setChecked(
             bool(c.get('use_check_result_cache', True)))
         self.check_ttl_spin.setValue(
@@ -2739,8 +2865,10 @@ class CacheManagerDialog(BaseDialog):
         new_cache = self.use_cache_check.isChecked()
 
         c.set('use_cache_manager', new_cache)
-        c.set('use_check_result_cache', self.use_check_cache_check.isChecked())
-        c.set('check_result_cache_ttl_hours', self.check_ttl_spin.value())
+        c.set('use_check_result_cache',
+              self.use_check_cache_check.isChecked())
+        c.set('check_result_cache_ttl_hours',
+              self.check_ttl_spin.value())
         c.set('use_link_cache', self.use_lc_check.isChecked())
         c.set('link_cache_hours', self.lc_hours_spin.value())
         c.set('link_cache_max_files', self.lc_max_files_spin.value())

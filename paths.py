@@ -10,11 +10,12 @@ import webbrowser
 from contextlib import suppress
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
-from typing import Optional, Callable
+from typing import Optional
 from PyQt6.QtCore import QUrl
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import QFileDialog, QMessageBox
-from constants import M3U_FILTER, JSON_FILTER, YES_NO
+from constants import M3U_FILTER, YES_NO
+
 
 class Paths:
     @staticmethod
@@ -34,8 +35,10 @@ class Paths:
     def get_log_path() -> str:
         return os.path.join(Paths.get_config_dir(), "editor.log")
 
+
 _logging_initialized = False
 _logging_lock = threading.Lock()
+
 
 def _setup_logging():
     global _logging_initialized
@@ -50,6 +53,9 @@ def _setup_logging():
         sh.setFormatter(fmt)
         logger_.addHandler(sh)
         try:
+            import queue as _queue
+            from logging.handlers import QueueHandler, QueueListener
+            import atexit as _atexit
             config_dir = Paths.get_config_dir()
             os.makedirs(config_dir, exist_ok=True)
             log_path = Paths.get_log_path()
@@ -57,26 +63,39 @@ def _setup_logging():
                 log_path, maxBytes=2 * 1024 * 1024, backupCount=3,
                 encoding='utf-8')
             fh.setFormatter(fmt)
-            logger_.addHandler(fh)
+            log_queue = _queue.Queue(-1)
+            qh = QueueHandler(log_queue)
+            qh.setFormatter(fmt)
+            logger_.addHandler(qh)
+            _listener = QueueListener(log_queue, fh,
+                                      respect_handler_level=True)
+            _listener.start()
+            _atexit.register(_listener.stop)
         except Exception:
             pass
         _logging_initialized = True
     return logger_
 
+
 logger = _setup_logging()
+
 
 def error_box(parent, msg, title: str = "Ошибка"):
     QMessageBox.critical(parent, title, str(msg))
 
+
 def warn_box(parent, msg, title: str = "Предупреждение"):
     QMessageBox.warning(parent, title, str(msg))
+
 
 def info_box(parent, msg, title: str = "Информация"):
     QMessageBox.information(parent, title, str(msg))
 
+
 def confirm(parent, msg, title: str = "Подтверждение") -> bool:
     return QMessageBox.question(parent, title, msg, YES_NO) \
         == QMessageBox.StandardButton.Yes
+
 
 def confirm_three(parent, msg, title: str = "Подтверждение") -> str:
     r = QMessageBox.question(
@@ -88,11 +107,13 @@ def confirm_three(parent, msg, title: str = "Подтверждение") -> str
             QMessageBox.StandardButton.No: 'no',
             QMessageBox.StandardButton.Cancel: 'cancel'}.get(r, 'cancel')
 
+
 def open_file_dialog(parent, title: str = "Открыть",
                      filters: str = M3U_FILTER,
                      initial_dir: str = "") -> Optional[str]:
     fp, _ = QFileDialog.getOpenFileName(parent, title, initial_dir, filters)
     return fp or None
+
 
 def save_file_dialog(parent, title: str = "Сохранить",
                      default_name: str = "",
@@ -105,14 +126,17 @@ def save_file_dialog(parent, title: str = "Сохранить",
         fp += default_ext
     return fp
 
+
 def open_dir_dialog(parent, title: str = "Выбрать папку",
                     initial_dir: str = "") -> Optional[str]:
     d = QFileDialog.getExistingDirectory(parent, title, initial_dir)
     return d or None
 
+
 def open_external(url: str):
     if url:
         webbrowser.open(url)
+
 
 def open_in_os(path_or_url: str):
     if not path_or_url:
@@ -121,6 +145,7 @@ def open_in_os(path_or_url: str):
         webbrowser.open(path_or_url)
     else:
         QDesktopServices.openUrl(QUrl.fromLocalFile(path_or_url))
+
 
 def parse_datetime(s, fmt: str = "%Y-%m-%d %H:%M:%S") -> Optional[datetime]:
     if not s:

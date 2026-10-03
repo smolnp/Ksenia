@@ -4,10 +4,8 @@
 from __future__ import annotations
 import os
 import sys
-import re
 import csv
 import json
-import time
 import shutil
 import weakref
 import uuid
@@ -22,8 +20,7 @@ from collections import defaultdict
 from PyQt6.QtCore import (Qt, QTimer, QSettings, QPoint, pyqtSignal,
     QObject, QThread, QAbstractTableModel, QModelIndex, QUrl,
     QCoreApplication)
-from PyQt6.QtGui import (QAction, QKeySequence, QColor, QFont,
-    QShortcut, QIcon)
+from PyQt6.QtGui import QAction, QKeySequence, QColor, QFont, QShortcut, QIcon
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget,
     QVBoxLayout, QHBoxLayout, QTabWidget, QTableWidget,
     QTableWidgetItem, QGroupBox, QFormLayout, QLineEdit, QPushButton,
@@ -41,11 +38,11 @@ from config import Config, LinkReplacementSettings
 from storage import CacheManager, StableStateManager
 from blacklists import (BlacklistManager, DomainBlacklistManager,
     DomainUserAgentManager, DomainUserAgentRule)
-from sources import LinkSource, LinkSourceManager, HttpSessionFactory
+from sources import LinkSource, LinkSourceManager
 from epg import EPGDatabase
 from parsers import M3UParser, PlaylistHeaderManager
 from undo import UndoRedoManager, SimpleDuplicateFinder
-from workers import (URLCheckerWorker, LinkReplacementWorker,
+from workers import (LinkReplacementWorker,
     SourcesRefreshWorker, SourceUrlCheckWorker, EPGLoaderWorker,
     EPGMetadataApplyWorker)
 from dialogs import (
@@ -162,8 +159,7 @@ class ApplicationCore(QObject):
             app.aboutToQuit.connect(self._on_app_quit)
 
         logger.info(
-            f"ApplicationCore {APP_VERSION} инициализирован "
-            f"(v6.6: final — audit + online progress)")
+            f"ApplicationCore {APP_VERSION} инициализирован")
 
     def apply_auto_update_setting(self):
         with suppress(Exception):
@@ -238,7 +234,7 @@ class ApplicationCore(QObject):
                      and s.should_refresh()]
         if not to_update:
             return
-        
+
         worker = SourcesRefreshWorker(
             to_update, self.link_source_manager, self.config,
             check_urls=True)
@@ -305,7 +301,8 @@ class ApplicationCore(QObject):
             if tab_id in self._tab_metadata:
                 self._tab_metadata[tab_id].update(kwargs)
 
-    def update_channels(self, tab_id: str, channels: List[ChannelData]) -> None:
+    def update_channels(self, tab_id: str,
+                        channels: List[ChannelData]) -> None:
         with self._cache_lock:
             tab = self.get_tab(tab_id)
             if tab is None:
@@ -313,7 +310,8 @@ class ApplicationCore(QObject):
             tab.all_channels = channels
             self._tab_metadata[tab_id]['modified'] = True
             self._tab_metadata[tab_id]['channels_count'] = len(channels)
-            self._tab_revision[tab_id] = self._tab_revision.get(tab_id, 0) + 1
+            self._tab_revision[tab_id] = \
+                self._tab_revision.get(tab_id, 0) + 1
         self.channels_updated.emit(tab_id)
 
     def get_stats(self, tab_id: str) -> Dict[str, Any]:
@@ -453,7 +451,8 @@ class ApplicationCore(QObject):
     def get_replacement_settings(self) -> LinkReplacementSettings:
         return self.link_replacement_settings
 
-    def get_cached_check_result(self, name: str, url: str) -> Optional[Dict[str, Any]]:
+    def get_cached_check_result(self, name: str, url: str
+                                ) -> Optional[Dict[str, Any]]:
         if self.cache_manager is None:
             return None
         if not self.config.get('use_check_result_cache', True):
@@ -462,8 +461,10 @@ class ApplicationCore(QObject):
                                     CHECK_RESULT_CACHE_TTL_HOURS))
         return self.cache_manager.get_check_result(name, url, ttl)
 
+
 class ChannelTableModel(QAbstractTableModel):
-    HEADERS = ["№", "Название", "Группа", "TVG-ID", "Логотип", "Catchup", "URL"]
+    HEADERS = ["№", "Название", "Группа", "TVG-ID", "Логотип",
+               "Catchup", "URL"]
     URL_COLUMN = 6
     COL_NAME = 1
     COL_GROUP = 2
@@ -555,7 +556,8 @@ class ChannelTableModel(QAbstractTableModel):
             return (ch.link.url or "").lower()
         return ""
 
-    def sort(self, column: int, order: Qt.SortOrder = Qt.SortOrder.AscendingOrder):
+    def sort(self, column: int,
+             order: Qt.SortOrder = Qt.SortOrder.AscendingOrder):
         self._sort_column = column
         self._sort_order = order
         self.beginResetModel()
@@ -591,7 +593,8 @@ class ChannelTableModel(QAbstractTableModel):
     def columnCount(self, parent=QModelIndex()):
         return len(self.HEADERS)
 
-    def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
+    def headerData(self, section, orientation,
+                   role=Qt.ItemDataRole.DisplayRole):
         if orientation == Qt.Orientation.Horizontal and \
                 role == Qt.ItemDataRole.DisplayRole:
             return self.HEADERS[section]
@@ -604,8 +607,6 @@ class ChannelTableModel(QAbstractTableModel):
         col = index.column()
         if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole):
             if col == 0:
-                # Показываем текущую позицию строки в таблице.
-                # При сортировке номера переупорядочиваются.
                 return str(index.row() + 1)
             if col == self.COL_NAME:
                 return ch.meta.name
@@ -648,7 +649,8 @@ class ChannelTableModel(QAbstractTableModel):
             f |= Qt.ItemFlag.ItemIsEditable
         return f
 
-    def setData(self, index: QModelIndex, value, role=Qt.ItemDataRole.EditRole):
+    def setData(self, index: QModelIndex, value,
+                role=Qt.ItemDataRole.EditRole):
         if not index.isValid() or role != Qt.ItemDataRole.EditRole:
             return False
         ch = self._filtered[index.row()]
@@ -682,7 +684,8 @@ class ChannelTableModel(QAbstractTableModel):
                 max_alts = core.get_replacement_settings().max_alternative_urls
                 if ch.link.url not in ch.link.alternative_urls:
                     ch.link.alternative_urls.insert(0, ch.link.url)
-                    ch.link.alternative_urls = ch.link.alternative_urls[:max_alts]
+                    ch.link.alternative_urls = \
+                        ch.link.alternative_urls[:max_alts]
             ch.link.url = new_value
             ch.link.has_url = bool(ch.link.url)
             ch.link.link_source = ""
@@ -707,8 +710,10 @@ class ChannelTableModel(QAbstractTableModel):
     def refresh_all(self):
         if self._filtered:
             top = self.index(0, 0)
-            bot = self.index(len(self._filtered) - 1, self.columnCount() - 1)
+            bot = self.index(len(self._filtered) - 1,
+                             self.columnCount() - 1)
             self.dataChanged.emit(top, bot)
+
 
 class _NumericItem(QTableWidgetItem):
     def __init__(self, value: int):
@@ -725,6 +730,7 @@ class _NumericItem(QTableWidgetItem):
         except (ValueError, AttributeError):
             return super().__lt__(other)
 
+
 _META_CHECKS = (
     ('tvg_id',      lambda ch: bool(ch.meta.tvg_id)),
     ('tvg_logo',    lambda ch: bool(ch.meta.tvg_logo)),
@@ -734,15 +740,10 @@ _META_CHECKS = (
     ('user_agent',  lambda ch: bool(ch.link.user_agent)),
 )
 
+
 class PlaylistTab(QWidget):
-    """
-    v0.9.4:
-      • ВОЗВРАЩЕНЫ check_all_urls / _check_selected_urls / _check_single_url —
-        используют URLCheckerWorker (пишет в тот же url_status_cache).
-      • _load_file: применение ЧС каналов + ЧС домен/IP + info_box
-        со счётчиками (если apply_filters_on_file_open=True).
-      • _clean_blocked_by_domain — очищает ссылки, помечает статус.
-    """
+    """Вкладка плейлиста."""
+
     undo_state_changed = pyqtSignal(bool, bool)
     info_changed = pyqtSignal(str)
 
@@ -766,7 +767,7 @@ class PlaylistTab(QWidget):
         self.header_manager = PlaylistHeaderManager()
         self.undo_manager = UndoRedoManager()
 
-        self._url_checker_worker: Optional[URLCheckerWorker] = None
+        self._src_check_worker: Optional[SourceUrlCheckWorker] = None
         self._replacement_worker: Optional[LinkReplacementWorker] = None
         self._loading = False
         self._suppress_state_save = False
@@ -795,8 +796,6 @@ class PlaylistTab(QWidget):
         self.core.channels_updated.connect(self._on_core_channels_updated)
 
         if filepath and os.path.exists(filepath):
-            # Отложить загрузку — сигналы info_changed/undo_state_changed
-            # будут подключены в MainWindow._create_tab до вызова.
             _fp = filepath
             QTimer.singleShot(0, lambda: self._load_file(_fp))
         else:
@@ -820,8 +819,10 @@ class PlaylistTab(QWidget):
         self._setup_table()
         layout.addWidget(self.table)
         self.model.dataChanged.connect(self._on_model_data_changed)
-        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.table.customContextMenuRequested.connect(self._show_context_menu)
+        self.table.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(
+            self._show_context_menu)
         self.table.selectionModel().selectionChanged.connect(
             self._on_selection_changed)
 
@@ -848,8 +849,6 @@ class PlaylistTab(QWidget):
         h.setSortIndicator(0, Qt.SortOrder.AscendingOrder)
         h.blockSignals(False)
         h.sortIndicatorChanged.connect(self._on_sort_indicator_changed)
-        # Применить сортировку сразу — иначе таблица выглядит
-        # отсортированной, но модель не сортирована.
         self.model.sort(0, Qt.SortOrder.AscendingOrder)
 
         self.table.setSelectionBehavior(
@@ -860,13 +859,15 @@ class PlaylistTab(QWidget):
             QAbstractItemView.EditTrigger.DoubleClicked |
             QAbstractItemView.EditTrigger.EditKeyPressed)
 
-    def _on_sort_indicator_changed(self, column: int, order: Qt.SortOrder):
+    def _on_sort_indicator_changed(self, column: int,
+                                    order: Qt.SortOrder):
         self.model.sort(column, order)
 
     def _setup_shortcuts(self):
         extra = {
             QKeySequence("Delete"): self._delete_channel,
-            QKeySequence("Ctrl+Shift+Delete"): self._delete_selected_channels,
+            QKeySequence("Ctrl+Shift+Delete"):
+                self._delete_selected_channels,
             QKeySequence("Ctrl+Up"): self._move_channel_up,
             QKeySequence("Ctrl+Down"): self._move_channel_down,
             QKeySequence("Ctrl+Shift+Up"): self._move_selected_up,
@@ -923,8 +924,8 @@ class PlaylistTab(QWidget):
             if (self.core.config.get('preserve_original_order', True)
                     and self._needs_resort):
                 self.all_channels.sort(
-                    key=lambda ch: ch.original_index if ch.original_index >= 0
-                    else float('inf'))
+                    key=lambda ch: ch.original_index
+                    if ch.original_index >= 0 else float('inf'))
                 self._needs_resort = False
             self.model.set_channels(self.all_channels)
         finally:
@@ -982,7 +983,8 @@ class PlaylistTab(QWidget):
                     raw = f.read()
                 detected_enc = 'utf-8'
                 content = None
-                for enc in ('utf-8', 'utf-8-sig', 'windows-1251', 'cp1251'):
+                for enc in ('utf-8', 'utf-8-sig',
+                            'windows-1251', 'cp1251'):
                     try:
                         content = raw.decode(enc)
                         detected_enc = enc
@@ -1047,7 +1049,8 @@ class PlaylistTab(QWidget):
 
             try:
                 if self.core.domain_user_agent_manager.get_all_rules():
-                    modified = self.core.apply_domain_user_agent(self.all_channels)
+                    modified = self.core.apply_domain_user_agent(
+                        self.all_channels)
                     if modified:
                         logger.info(f"UA применён к {modified} каналам")
             except Exception:
@@ -1058,9 +1061,11 @@ class PlaylistTab(QWidget):
                     self,
                     "При открытии применены фильтры:\n"
                     f"• удалено по ЧС каналов: {removed_by_bl}\n"
-                    f"• очищено ссылок по ЧС домен/IP: {cleaned_by_domain_bl}\n"
+                    f"• очищено ссылок по ЧС домен/IP: "
+                    f"{cleaned_by_domain_bl}\n"
                     "Каналы без ссылок сохранены и помечены.\n"
-                    "Отключить фильтры можно в настройках или в менеджере ЧС.",
+                    "Отключить фильтры можно в настройках "
+                    "или в менеджере ЧС.",
                     "Фильтры применены")
 
             self.undo_manager.reset(self.all_channels)
@@ -1083,8 +1088,10 @@ class PlaylistTab(QWidget):
             return False
         if not self.core.epg_db.has_channel_info:
             if not silent:
-                info_box(self, "EPG не загружен (или не содержит <channel>-записей).\n"
-                               "Загрузите EPG через «Инструменты → Загрузить EPG».", "EPG")
+                info_box(self, "EPG не загружен (или не содержит "
+                               "<channel>-записей).\n"
+                               "Загрузите EPG через "
+                               "«Инструменты → Загрузить EPG».", "EPG")
             return False
         if not self.all_channels:
             return False
@@ -1155,12 +1162,14 @@ class PlaylistTab(QWidget):
                 with self._suppress_save():
                     self.model.refresh_all()
                 self.update_info()
-                logger.info(f"EPG-метаданные применены к {modified} каналам")
+                logger.info(
+                    f"EPG-метаданные применены к {modified} каналам")
                 if not silent:
                     info_box(self, f"Обновлено каналов: {modified}", "EPG")
             else:
                 if not silent:
-                    info_box(self, "Метаданные не изменились (нет совпадений или "
+                    info_box(self, "Метаданные не изменились "
+                                   "(нет совпадений или "
                                    "всё уже актуально).", "EPG")
 
         def on_error(msg):
@@ -1243,11 +1252,13 @@ class PlaylistTab(QWidget):
             return
         prev_can_undo = self.undo_manager.can_undo()
         prev_can_redo = self.undo_manager.can_redo()
-        self.undo_manager.save_state(self.all_channels, self._pending_state_desc)
+        self.undo_manager.save_state(self.all_channels,
+                                     self._pending_state_desc)
         self._pending_state_desc = ""
         cur_can_undo = self.undo_manager.can_undo()
         cur_can_redo = self.undo_manager.can_redo()
-        if (cur_can_undo != prev_can_undo) or (cur_can_redo != prev_can_redo):
+        if (cur_can_undo != prev_can_undo) or \
+                (cur_can_redo != prev_can_redo):
             self.undo_state_changed.emit(cur_can_undo, cur_can_redo)
 
     def _apply_diff(self, diff: Dict[str, Any], reverse: bool = False):
@@ -1257,7 +1268,8 @@ class PlaylistTab(QWidget):
         removed = diff.get('removed', [])
         changed = diff.get('changed', [])
 
-        uid_map: Dict[int, ChannelData] = {ch.uid: ch for ch in self.all_channels}
+        uid_map: Dict[int, ChannelData] = {
+            ch.uid: ch for ch in self.all_channels}
 
         for entry in changed:
             if len(entry) < 3:
@@ -1278,7 +1290,8 @@ class PlaylistTab(QWidget):
             if uid not in existing_uids and data:
                 new_ch = ChannelData.from_dict(data)
                 if new_ch.uid in existing_uids:
-                    object.__setattr__(new_ch, 'uid', ChannelData._next_uid())
+                    object.__setattr__(new_ch, 'uid',
+                                       ChannelData._next_uid())
                 uid_map[new_ch.uid] = new_ch
                 existing_uids.add(new_ch.uid)
 
@@ -1335,9 +1348,11 @@ class PlaylistTab(QWidget):
             warn_box(self, "Нет URL", "Плеер")
             return
         if not is_vlc_available():
-            error_box(self, f"Встроенный плеер недоступен.\n\n"
-                            f"{get_vlc_error()}\n\n"
-                            f"Установите VLC: https://www.videolan.org/vlc/",
+            error_box(self,
+                      f"Встроенный плеер недоступен.\n\n"
+                      f"{get_vlc_error()}\n\n"
+                      f"Установите VLC: "
+                      f"https://www.videolan.org/vlc/",
                       "Плеер")
             return
         playlist = self.model.channels_filtered()
@@ -1355,7 +1370,7 @@ class PlaylistTab(QWidget):
         if not with_urls:
             info_box(self, "У выбранных каналов нет URL")
             return
-        self.check_urls_async(with_urls)
+        self.check_urls_async(with_urls, force=True)
 
     def check_all_urls(self):
         with_urls = [ch for ch in self.all_channels if ch.has_valid_url]
@@ -1364,24 +1379,27 @@ class PlaylistTab(QWidget):
             return
         if not confirm(self, f"Проверить {len(with_urls)} ссылок?"):
             return
-        self.check_urls_async(with_urls)
+        self.check_urls_async(with_urls, force=True)
 
     def _check_single_url(self, row: int):
         ch = self.channel_for_row(row)
         if ch and ch.link.url:
-            self.check_urls_async([ch])
+            self.check_urls_async([ch], force=True)
 
     def _apply_cached_check(self, ch: ChannelData) -> bool:
-        """Применить свежий результат из url_status_cache (0 сети)."""
-        cached = self.core.get_cached_check_result(ch.meta.name, ch.link.url)
+        cached = self.core.get_cached_check_result(
+            ch.meta.name, ch.link.url)
         if cached is None:
             return False
         ch.status.url_status = cached['alive']
-        ch.status.url_check_time = (datetime.fromtimestamp(cached['last_check'])
-                                     if cached['last_check'] else None)
-        ch.status.link_response_time = (cached['response_ms'] / 1000.0
-                                         if cached['response_ms'] else None)
-        ch.status.status_text = cached['status_text'] or StatusText.UNCHECKED
+        ch.status.url_check_time = (
+            datetime.fromtimestamp(cached['last_check'])
+            if cached['last_check'] else None)
+        ch.status.link_response_time = (
+            cached['response_ms'] / 1000.0
+            if cached['response_ms'] else None)
+        ch.status.status_text = (cached['status_text']
+                                  or StatusText.UNCHECKED)
         ch.status.status_code = cached['status_code']
         if cached['alive']:
             ch.status.link_quality = LinkQuality.WORKING
@@ -1389,137 +1407,96 @@ class PlaylistTab(QWidget):
             ch.status.link_quality = LinkQuality.NOT_WORKING
         return True
 
-    def check_urls_async(self, channels: List[ChannelData]):
+    def check_urls_async(self, channels: List[ChannelData],
+                         force: bool = True):
+        """ЕДИНЫЙ механизм проверки — как у источников.
+
+        Использует SourceUrlCheckWorker (тот же, что «Обновить всё»
+        в менеджере источников).
+        """
         if not _is_qobject_valid(self):
             return
-        if self._url_checker_worker and self._url_checker_worker.isRunning():
+        if self._src_check_worker is not None \
+                and self._src_check_worker.isRunning():
             info_box(self, "Проверка уже запущена")
             return
-        use_cache = self.core.config.get('use_check_result_cache', True)
-        to_check: List[ChannelData] = []
-        for ch in channels:
-            if use_cache and self._apply_cached_check(ch):
-                continue
-            to_check.append(ch)
+
+        to_check: List[ChannelData] = list(channels)
         if not to_check:
-            self.sync_to_core()
-            with self._suppress_save():
-                self.model.refresh_all()
-            self.update_info()
-            info_box(self, "Все ссылки уже в свежем кэше — сеть не использовалась.")
             return
+
         limit_enabled = self.core.config.get('limit_check_enabled', False)
         limit = int(self.core.config.get('max_channels_to_check', 2000))
         if limit_enabled and len(to_check) > limit:
             to_check = to_check[:limit]
-        urls = [ch.link.url for ch in to_check]
+
         settings = self.core.get_replacement_settings()
         w = self.parent_window
         if w is not None:
-            w.set_action(f"⏳ Проверка ссылок: {len(to_check)} каналов")
-        self._url_checker_worker = URLCheckerWorker(
-            urls, timeout=max(settings.check_timeout, VLC_DEFAULT_CHECK_TIMEOUT),
-            max_workers=settings.max_workers,
-            max_retries=settings.max_retries,
-            retry_delay=settings.retry_delay,
-            verify_ssl=False)
+            w.set_action(
+                f"⏳ Проверка ссылок: {len(to_check)} каналов")
 
-        url_to_channels: Dict[str, List[ChannelData]] = defaultdict(list)
-        for ch in to_check:
-            url_to_channels[ch.link.url].append(ch)
+        timeout = max(int(settings.check_timeout or 3), 3)
+        max_workers = int(self.core.config.get('source_check_workers', 4))
+        trust_sec = 0
+        batch_size = int(self.core.config.get(
+            'source_check_batch_size', 100))
 
-        affected_sources: Set[str] = set()
+        worker = SourceUrlCheckWorker(
+            source_name="__playlist__",
+            channels=to_check,
+            cache_manager=self.core.cache_manager,
+            max_workers=max_workers,
+            timeout=timeout,
+            trust_sec=trust_sec,
+            batch_size=batch_size,
+            stop_token=None,
+        )
+        self._src_check_worker = worker
 
-        pending_saves: List[Tuple[str, str, bool, float, str, Optional[int]]] = []
-        pending_lock = threading.Lock()
-        BATCH_SIZE = 100
-
-        def flush_pending_saves():
-            if not pending_saves or self.core.cache_manager is None:
-                return
-            with pending_lock:
-                batch = pending_saves[:]
-                pending_saves.clear()
-            if not batch:
-                return
-            with suppress(Exception):
-                self.core.cache_manager.save_check_results_batch(batch)
-
-        def on_url_checked(index, success, message, response_time,
-                           quality, url, status_code):
-            if not _is_qobject_valid(self):
-                return
-            chans = url_to_channels.get(url, [])
-            if not chans:
-                return
-            status_text = ""
-            sc = status_code
-            for ch in chans:
-                ch.status.url_status = success
-                ch.status.url_check_time = datetime.now()
-                ch.status.link_response_time = response_time \
-                    if isinstance(response_time, float) else None
-                status_text, sc = URLUtils.classify_status(
-                    url, status_code, "" if success else message)
-                ch.status.status_text = status_text
-                ch.status.status_code = sc
-                if quality == LinkQuality.WORKING:
-                    ch.status.link_quality = LinkQuality.WORKING
-                elif quality == LinkQuality.NOT_WORKING:
-                    ch.status.link_quality = LinkQuality.NOT_WORKING
-                elif quality == LinkQuality.UNSUPPORTED:
-                    ch.status.link_quality = LinkQuality.UNSUPPORTED
-                else:
-                    ch.status.link_quality = LinkQuality.UNKNOWN
-                if ch.link.link_source:
-                    affected_sources.add(ch.link.link_source)
-
-            if self.core.cache_manager and success is not None:
-                with pending_lock:
-                    pending_saves.append((
-                        chans[0].meta.name, url, bool(success),
-                        (response_time or 0) * 1000,
-                        status_text, sc))
-                    if len(pending_saves) >= BATCH_SIZE:
-                        flush_pending_saves()
-
-        def on_progress(processed, total, text):
+        def on_progress(name, cur, tot):
             w2 = self.parent_window
             if w2 is not None:
-                w2.show_progress(processed, total, text)
+                w2.show_progress(cur, max(1, tot),
+                                 f"Проверено: {cur}/{tot}")
 
-        def on_finished():
-            flush_pending_saves()
-            if not _is_qobject_valid(self):
-                return
+        def on_done(name, working, total):
+            if getattr(self, '_src_check_worker', None) is worker:
+                self._src_check_worker = None
             w2 = self.parent_window
             if w2 is not None:
                 w2.hide_progress()
+            if not _is_qobject_valid(self):
+                return
             with self._suppress_save():
-                self.undo_manager.save_state(self.all_channels, "Проверка ссылок")
+                self.undo_manager.save_state(
+                    self.all_channels, "Проверка ссылок")
             self.sync_to_core()
             with self._suppress_save():
                 self.model.refresh_all()
             self.update_info()
-            
-            if affected_sources:
-                with suppress(Exception):
-                    self.core.link_source_manager.rebuild_alive_index()
-            self._url_checker_worker = None
+            with suppress(Exception):
+                self.core.link_source_manager.rebuild_alive_index()
+            if _is_qobject_valid(self):
+                info_box(
+                    self,
+                    f"Проверка завершена.\n"
+                    f"Рабочих: {working} из {total}",
+                    "Проверка ссылок")
 
         def on_error(msg):
+            if getattr(self, '_src_check_worker', None) is worker:
+                self._src_check_worker = None
             w2 = self.parent_window
             if w2 is not None:
                 w2.hide_progress()
             if _is_qobject_valid(self):
                 error_box(self, msg, "Ошибка проверки")
-            self._url_checker_worker = None
 
-        self._url_checker_worker.url_checked.connect(on_url_checked)
-        self._url_checker_worker.progress.connect(on_progress)
-        self._url_checker_worker.worker_done.connect(on_finished)
-        self._url_checker_worker.error.connect(on_error)
-        self._url_checker_worker.start()
+        worker.source_check_progress.connect(on_progress)
+        worker.source_check_done.connect(on_done)
+        worker.error.connect(on_error)
+        worker.start()
 
     def _clear_urls(self, channels: List[ChannelData],
                     description: str, confirm_msg: str = "",
@@ -1678,7 +1655,8 @@ class PlaylistTab(QWidget):
             return
         target = self.find_channel_by_ref(channel)
         if target is None:
-            info_box(self, f"Канал «{channel.meta.name}» не найден в плейлисте.")
+            info_box(self, f"Канал «{channel.meta.name}» "
+                           f"не найден в плейлисте.")
             return
         if not target.has_valid_url:
             info_box(self, f"У канала «{target.meta.name}» нет URL.")
@@ -1698,25 +1676,18 @@ class PlaylistTab(QWidget):
         added = self.core.add_domain_to_blacklist(
             value, include_subdomains=include, note=note)
         if not selected and not added:
-            info_box(self, f"Правило для «{value}» уже существует, совпадений нет.")
+            info_box(self, f"Правило для «{value}» уже существует, "
+                           f"совпадений нет.")
         elif not selected:
             info_box(self, f"Правило «{value}» добавлено. "
                            f"Совпадений в плейлисте не найдено.")
         else:
-            
             self._clean_blocked_by_domain()
             info_box(self, f"Правило «{value}» добавлено.\n"
                            f"Очищено ссылок: {len(selected)}.\n"
                            f"Каналы сохранены с метаданными.")
 
     def _clean_blocked_by_domain(self) -> int:
-        """v0.9.4 fix: применить ЧС домен/IP (очистка URL).
-
-        Сначала считаем, сколько каналов будет очищено, потом
-        фиксируем undo-состояние ДО мутации, потом мутируем.
-        Иначе undo не откатит очистку (мутация уже произошла
-        до save_state).
-        """
         if not self.all_channels:
             return 0
         mgr = self.core.domain_blacklist_manager
@@ -1728,9 +1699,10 @@ class PlaylistTab(QWidget):
                 blocked_count += 1
         if blocked_count == 0:
             return 0
-        
+
         self.flush_pending_state()
         self.save_state("Очистка ссылок по ЧС домен/IP")
+        self.flush_pending_state()
         _, cleaned = self.core.apply_domain_blacklist_clean(
             self.all_channels)
         self.sync_to_core()
@@ -1753,13 +1725,18 @@ class PlaylistTab(QWidget):
         l = QVBoxLayout(dlg)
         l.addWidget(QLabel(f"Канал: {ch.meta.name}"))
         l.addWidget(QLabel(f"TVG-ID: {ch.meta.tvg_id}"))
-        g = QGroupBox("Параметры"); gl = QVBoxLayout(g)
-        nc = QCheckBox("По названию"); nc.setChecked(True); gl.addWidget(nc)
-        tc = QCheckBox("По TVG-ID"); tc.setChecked(bool(ch.meta.tvg_id))
+        g = QGroupBox("Параметры")
+        gl = QVBoxLayout(g)
+        nc = QCheckBox("По названию")
+        nc.setChecked(True)
+        gl.addWidget(nc)
+        tc = QCheckBox("По TVG-ID")
+        tc.setChecked(bool(ch.meta.tvg_id))
         gl.addWidget(tc)
         l.addWidget(g)
         bb = QDialogButtonBox(OK_CANCEL_BB)
-        bb.accepted.connect(dlg.accept); bb.rejected.connect(dlg.reject)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
         l.addWidget(bb)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
@@ -1791,12 +1768,18 @@ class PlaylistTab(QWidget):
         if len(chs) > 100:
             lw.addItem(f"... и ещё {len(chs) - 100}")
         l.addWidget(lw)
-        g = QGroupBox("Параметры"); gl = QVBoxLayout(g)
-        nc = QCheckBox("По названию"); nc.setChecked(True); gl.addWidget(nc)
-        tc = QCheckBox("По TVG-ID"); tc.setChecked(True); gl.addWidget(tc)
+        g = QGroupBox("Параметры")
+        gl = QVBoxLayout(g)
+        nc = QCheckBox("По названию")
+        nc.setChecked(True)
+        gl.addWidget(nc)
+        tc = QCheckBox("По TVG-ID")
+        tc.setChecked(True)
+        gl.addWidget(tc)
         l.addWidget(g)
         bb = QDialogButtonBox(OK_CANCEL_BB)
-        bb.accepted.connect(dlg.accept); bb.rejected.connect(dlg.reject)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
         l.addWidget(bb)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
@@ -1805,7 +1788,8 @@ class PlaylistTab(QWidget):
         added = 0
         for c in chs:
             name = c.meta.name if nc.isChecked() else ""
-            tid = c.meta.tvg_id if tc.isChecked() and c.meta.tvg_id else ""
+            tid = (c.meta.tvg_id
+                   if tc.isChecked() and c.meta.tvg_id else "")
             if not name and not tid:
                 continue
             if self.core.add_to_blacklist(name, tid):
@@ -1855,7 +1839,8 @@ class PlaylistTab(QWidget):
         self.save_state("Массовая правка")
         for ch in self.selected_channels:
             if 'user_agent' in changes:
-                ua = DomainUserAgentRule._sanitize_ua(changes['user_agent'])
+                ua = DomainUserAgentRule._sanitize_ua(
+                    changes['user_agent'])
                 ch.link.user_agent = ua
                 if ua:
                     ch.link.extra_headers['User-Agent'] = ua
@@ -1875,7 +1860,8 @@ class PlaylistTab(QWidget):
         self.sync_to_core()
         with self._suppress_save():
             self.model.refresh_all()
-        info_box(self, f"Обновлено {len(self.selected_channels)} каналов", "Готово")
+        info_box(self, f"Обновлено {len(self.selected_channels)} каналов",
+                 "Готово")
 
     def _copy_channel(self):
         w = self.parent_window
@@ -1887,7 +1873,6 @@ class PlaylistTab(QWidget):
             return
         target = self.current_channel
         self._copy_channel()
-        # Удаляем ТОЛЬКО текущий канал, не selected_channels
         uids = {target.uid}
         if not confirm(self, f"Вырезать канал '{target.meta.name}'?"):
             return
@@ -1908,7 +1893,8 @@ class PlaylistTab(QWidget):
     def _copy_selected_channels(self):
         w = self.parent_window
         if self.selected_channels and w is not None:
-            w.copied_channels = [ch.copy() for ch in self.selected_channels]
+            w.copied_channels = [ch.copy()
+                                 for ch in self.selected_channels]
 
     def _paste_channel(self):
         w = self.parent_window
@@ -1953,7 +1939,9 @@ class PlaylistTab(QWidget):
         groups = {ch.meta.group for ch in self.selected_channels}
         cur = next(iter(groups)) if len(groups) == 1 else "РАЗНЫЕ"
         l.addWidget(QLabel(f"<b>{cur}</b>"))
-        sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine); l.addWidget(sep)
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        l.addWidget(sep)
         l.addWidget(QLabel("Новая группа:"))
         edit = QLineEdit()
         if len(groups) == 1:
@@ -1961,7 +1949,8 @@ class PlaylistTab(QWidget):
         edit.setPlaceholderText("Введите название")
         l.addWidget(edit)
         bb = QDialogButtonBox(OK_CANCEL_BB)
-        bb.accepted.connect(dlg.accept); bb.rejected.connect(dlg.reject)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
         l.addWidget(bb)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
@@ -2021,8 +2010,10 @@ class PlaylistTab(QWidget):
         for i, idx in enumerate(indices):
             real_idx = idx - i
             if real_idx > 0:
-                self.all_channels[real_idx], self.all_channels[real_idx - 1] = \
-                    self.all_channels[real_idx - 1], self.all_channels[real_idx]
+                (self.all_channels[real_idx],
+                 self.all_channels[real_idx - 1]) = \
+                    (self.all_channels[real_idx - 1],
+                     self.all_channels[real_idx])
         self.sync_to_core()
         with self._suppress_save():
             self.model.set_channels(self.all_channels)
@@ -2044,8 +2035,10 @@ class PlaylistTab(QWidget):
         for i, idx in enumerate(indices):
             real_idx = idx + i
             if real_idx < last:
-                self.all_channels[real_idx], self.all_channels[real_idx + 1] = \
-                    self.all_channels[real_idx + 1], self.all_channels[real_idx]
+                (self.all_channels[real_idx],
+                 self.all_channels[real_idx + 1]) = \
+                    (self.all_channels[real_idx + 1],
+                     self.all_channels[real_idx])
         self.sync_to_core()
         with self._suppress_save():
             self.model.set_channels(self.all_channels)
@@ -2094,7 +2087,8 @@ class PlaylistTab(QWidget):
         if selected:
             self._do_apply_link(ch, selected)
 
-    def _do_apply_link(self, channel: ChannelData, source_ch: ChannelData):
+    def _do_apply_link(self, channel: ChannelData,
+                        source_ch: ChannelData):
         if not source_ch.has_valid_url:
             return
         self.save_state("Добавление ссылки из источников")
@@ -2114,7 +2108,8 @@ class PlaylistTab(QWidget):
                         del channel.link.extra_headers[k]
             else:
                 channel.link.user_agent = source_ch.link.user_agent
-                channel.link.extra_headers['User-Agent'] = source_ch.link.user_agent
+                channel.link.extra_headers['User-Agent'] = \
+                    source_ch.link.user_agent
         else:
             ua = self.core.get_user_agent_for_url(channel.link.url)
             if ua:
@@ -2181,7 +2176,8 @@ class PlaylistTab(QWidget):
             object.__setattr__(ch, 'modified_date', datetime.now())
             if selected.link.user_agent:
                 ch.link.user_agent = selected.link.user_agent
-                ch.link.extra_headers['User-Agent'] = selected.link.user_agent
+                ch.link.extra_headers['User-Agent'] = \
+                    selected.link.user_agent
             ch.update_extinf()
             ch.update_extvlcopt_from_headers()
             applied += 1
@@ -2196,14 +2192,15 @@ class PlaylistTab(QWidget):
     def replace_all_links(self):
         if not self.all_channels:
             return
-        
+
         sources = self.core.link_source_manager.get_enabled_sources()
         if not sources:
             info_box(
                 self,
                 "Нет включённых источников.\n\n"
                 "Откройте «Инструменты → Источники ссылок» и добавьте\n"
-                "хотя бы один источник. Затем нажмите «🔄 Обновить всё»,\n"
+                "хотя бы один источник. Затем нажмите "
+                "«🔄 Обновить всё»,\n"
                 "чтобы загрузить каналы и наполнить кэш живых URL.",
                 "Замена ссылок")
             return
@@ -2239,7 +2236,8 @@ class PlaylistTab(QWidget):
     def replace_links_async(self, channels: List[ChannelData]):
         if not _is_qobject_valid(self):
             return
-        if self._replacement_worker and self._replacement_worker.isRunning():
+        if self._replacement_worker and \
+                self._replacement_worker.isRunning():
             info_box(self, "Замена уже запущена")
             return
         settings = self.core.get_replacement_settings()
@@ -2250,16 +2248,19 @@ class PlaylistTab(QWidget):
             return
         w = self.parent_window
         if w is not None:
-            w.set_action(f"⏳ Замена ссылок (из кэша): {len(to_process)} каналов")
+            w.set_action(f"⏳ Замена ссылок (из кэша): "
+                         f"{len(to_process)} каналов")
         max_workers = int(self.core.config.get(
             'replacement_max_workers', REPLACEMENT_MAX_WORKERS_DEFAULT))
         self._replacement_worker = LinkReplacementWorker(
             to_process, self.core.link_source_manager, settings,
             config=self.core.config, max_workers=max_workers)
 
-        uid_map: Dict[int, ChannelData] = {ch.uid: ch for ch in self.all_channels}
+        uid_map: Dict[int, ChannelData] = {
+            ch.uid: ch for ch in self.all_channels}
 
-        def on_channel_updated(uid: int, old_url: str, new_url: str, name: str):
+        def on_channel_updated(uid: int, old_url: str, new_url: str,
+                                name: str):
             if not _is_qobject_valid(self):
                 return
             ch = uid_map.get(uid)
@@ -2269,7 +2270,8 @@ class PlaylistTab(QWidget):
             if s.keep_backup_links and old_url and old_url.strip():
                 if old_url not in ch.link.alternative_urls:
                     ch.link.alternative_urls.insert(0, old_url)
-                    ch.link.alternative_urls = ch.link.alternative_urls[:s.max_alternative_urls]
+                    ch.link.alternative_urls = \
+                        ch.link.alternative_urls[:s.max_alternative_urls]
             ch.link.url = new_url
             ch.link.has_url = True
             ch.status.reset()
@@ -2287,7 +2289,8 @@ class PlaylistTab(QWidget):
             if not _is_qobject_valid(self):
                 return
             with self._suppress_save():
-                self.undo_manager.save_state(self.all_channels, "Замена ссылок")
+                self.undo_manager.save_state(
+                    self.all_channels, "Замена ссылок")
             self.sync_to_core()
             with self._suppress_save():
                 self.model.refresh_all()
@@ -2297,7 +2300,8 @@ class PlaylistTab(QWidget):
                 info_box(
                     self,
                     "Заменено 0 из " + str(total) + ".\n\n"
-                    "Автозамена работает только из кэша url_status_cache.\n"
+                    "Автозамена работает только из кэша "
+                    "url_status_cache.\n"
                     "Возможные причины:\n"
                     "• источники не обновлялись с проверкой URL;\n"
                     "• живых URL нет в кэше;\n"
@@ -2306,7 +2310,8 @@ class PlaylistTab(QWidget):
                     "«🔄 Обновить всё», чтобы наполнить кэш.",
                     "Замена завершена")
             else:
-                info_box(self, f"Заменено {replaced} из {total}", "Замена завершена")
+                info_box(self, f"Заменено {replaced} из {total}",
+                         "Замена завершена")
             self._replacement_worker = None
 
         def on_error(msg):
@@ -2317,7 +2322,8 @@ class PlaylistTab(QWidget):
                 error_box(self, msg, "Ошибка замены")
             self._replacement_worker = None
 
-        self._replacement_worker.channel_updated.connect(on_channel_updated)
+        self._replacement_worker.channel_updated.connect(
+            on_channel_updated)
         self._replacement_worker.progress.connect(on_progress)
         self._replacement_worker.replacement_done.connect(on_done)
         self._replacement_worker.error.connect(on_error)
@@ -2357,7 +2363,8 @@ class PlaylistTab(QWidget):
         if not urls:
             url, ok = QInputDialog.getText(
                 self, "Загрузка EPG", "URL EPG (XMLTV):",
-                QLineEdit.EchoMode.Normal, "http://example.com/epg.xml.gz")
+                QLineEdit.EchoMode.Normal,
+                "http://example.com/epg.xml.gz")
             if not ok or not url:
                 return
             urls = [url]
@@ -2417,8 +2424,9 @@ class PlaylistTab(QWidget):
             w._save_file()
         else:
             if not self.filepath:
-                fp = save_file_dialog(self, "Сохранить как", "playlist.m3u",
-                                      M3U_FILTER, ".m3u")
+                fp = save_file_dialog(
+                    self, "Сохранить как", "playlist.m3u",
+                    M3U_FILTER, ".m3u")
                 if not fp:
                     return
                 self.filepath = fp
@@ -2432,9 +2440,11 @@ class PlaylistTab(QWidget):
         try:
             self.flush_sync()
             if (os.path.exists(self.filepath)
-                    and self.core.config.get('auto_backup_before_save', True)):
+                    and self.core.config.get(
+                        'auto_backup_before_save', True)):
                 with suppress(OSError):
-                    shutil.copy2(self.filepath, self.filepath + '.bak')
+                    shutil.copy2(self.filepath,
+                                 self.filepath + '.bak')
             enc = self.header_manager.original_encoding or 'utf-8'
             if enc not in ('utf-8', 'utf-8-sig'):
                 reply = QMessageBox.question(
@@ -2448,7 +2458,8 @@ class PlaylistTab(QWidget):
                 ht = self.header_manager.get_header_text()
                 if ht:
                     f.write(ht)
-                save_extvlcopt = self.core.config.get('save_extvlcopt', True)
+                save_extvlcopt = self.core.config.get(
+                    'save_extvlcopt', True)
                 for ch in self.all_channels:
                     f.write(ch.link.extinf + '\n')
                     if save_extvlcopt:
@@ -2472,7 +2483,8 @@ class PlaylistTab(QWidget):
                                     f'"{k}: {ch._escape(v)}"\n')
                     f.write((ch.link.url or '') + '\n')
             self.modified = False
-            self.core.update_tab_metadata(self.tab_id, filepath=self.filepath)
+            self.core.update_tab_metadata(self.tab_id,
+                                          filepath=self.filepath)
             with suppress(Exception):
                 ssm = self.core.stable_state_manager
                 for ch in self.all_channels:
@@ -2494,7 +2506,6 @@ class PlaylistTab(QWidget):
         return f"name:{norm}"
 
     def _find_stable_url(self, ch: ChannelData) -> Optional[str]:
-        """Осознанное исключение: живая проверка в Stable-экспорте."""
         ssm = self.core.stable_state_manager
         candidates: List[str] = []
         ref = ssm.get(self._stable_key(ch))
@@ -2510,18 +2521,21 @@ class PlaylistTab(QWidget):
         for u in candidates:
             if not u or not u.strip():
                 continue
-            if settings.is_blacklisted(u) or settings.is_filtered_domain(u):
+            if settings.is_blacklisted(u) or \
+                    settings.is_filtered_domain(u):
                 continue
             ok, rt, _, _ = URLUtils.check_url(
                 u, STABLE_CHECK_TIMEOUT_SEC, verify_ssl=False,
                 max_retries=0, retry_delay=0.0)
             if ok is True and (
-                    rt is None or rt * 1000 <= STABLE_LATENCY_THRESHOLD_MS):
+                    rt is None
+                    or rt * 1000 <= STABLE_LATENCY_THRESHOLD_MS):
                 return u
         return None
 
     def export_stable(self, filepath: str,
-                      progress_cb: Optional[Callable[[int, int, str], None]] = None
+                      progress_cb: Optional[Callable[
+                          [int, int, str], None]] = None
                       ) -> Tuple[int, int]:
         ssm = self.core.stable_state_manager
         written = 0
@@ -2532,7 +2546,8 @@ class PlaylistTab(QWidget):
                 f.write(self.header_manager.get_header_text())
                 for i, ch in enumerate(self.all_channels):
                     if progress_cb:
-                        progress_cb(i, total, f"Stable: {i+1}/{total}")
+                        progress_cb(i, total,
+                                    f"Stable: {i+1}/{total}")
                     url = self._find_stable_url(ch)
                     if not url:
                         skipped += 1
@@ -2578,16 +2593,19 @@ class PlaylistTab(QWidget):
                         writer.writerow([
                             ch.meta.name, ch.meta.group, ch.meta.tvg_id,
                             ch.meta.tvg_name, ch.meta.tvg_logo,
-                            ch.link.url, ch.link.user_agent, ch.meta.region,
-                            ch.meta.quality, ch.meta.timeshift, ch.meta.catchup,
-                            ch.meta.catchup_source, ch.meta.catchup_days,
-                            ch.meta.tvg_shift, ch.meta.tvg_chno,
-                            ch.meta.audio_track,
+                            ch.link.url, ch.link.user_agent,
+                            ch.meta.region,
+                            ch.meta.quality, ch.meta.timeshift,
+                            ch.meta.catchup, ch.meta.catchup_source,
+                            ch.meta.catchup_days, ch.meta.tvg_shift,
+                            ch.meta.tvg_chno, ch.meta.audio_track,
                             '|'.join(ch.link.alternative_urls),
                             ch.link.link_source,
                             'working' if ch.status.url_status is True else
-                            'broken' if ch.status.url_status is False else 'unknown',
-                            ch.status.status_code if ch.status.status_code is not None else '',
+                            'broken' if ch.status.url_status is False
+                            else 'unknown',
+                            ch.status.status_code
+                            if ch.status.status_code is not None else '',
                             ch.meta.epg_source,
                         ])
             else:
@@ -2642,14 +2660,17 @@ class PlaylistTab(QWidget):
             self.model.set_channels(self.all_channels)
 
     @staticmethod
-    def _has_meta_to_remove(ch: ChannelData, opts: Dict[str, bool]) -> bool:
-        return any(opts.get(k) and check(ch) for k, check in _META_CHECKS)
+    def _has_meta_to_remove(ch: ChannelData,
+                             opts: Dict[str, bool]) -> bool:
+        return any(opts.get(k) and check(ch)
+                   for k, check in _META_CHECKS)
 
     def show_duplicate_finder(self):
         if not self.all_channels:
             info_box(self, "Нет каналов")
             return
-        use_tvg = bool(self.core.config.get('dedup_by_name_use_tvg', False))
+        use_tvg = bool(self.core.config.get('dedup_by_name_use_tvg',
+                                             False))
         keep_dup = bool(self.core.config.get('keep_duplicates', False))
         dlg = DuplicateFinderDialog(self.all_channels, self,
                                      use_tvg_id=use_tvg,
@@ -2696,24 +2717,29 @@ class PlaylistTab(QWidget):
             if ch.has_valid_url:
                 menu.addAction(self._act(
                     "▶ Смотреть в плеере",
-                    lambda checked=False, r=row: self._play_in_player(r), menu))
+                    lambda checked=False, r=row:
+                        self._play_in_player(r), menu))
                 menu.addSeparator()
             menu.addAction(self._act(
                 "Редактировать User Agent...",
-                lambda checked=False, r=row: self._edit_user_agent(r), menu))
+                lambda checked=False, r=row:
+                    self._edit_user_agent(r), menu))
             if ch.link.alternative_urls:
                 alt = menu.addMenu(
-                    f"Альтернативные ссылки ({len(ch.link.alternative_urls)})")
+                    f"Альтернативные ссылки "
+                    f"({len(ch.link.alternative_urls)})")
                 try:
                     cached_map = {
-                        u: self.core.get_cached_check_result(ch.meta.name, u)
+                        u: self.core.get_cached_check_result(
+                            ch.meta.name, u)
                         for u in ch.link.alternative_urls[:10]
                     }
                 except Exception:
                     cached_map = {}
                 sorted_alts = sorted(
                     ch.link.alternative_urls,
-                    key=lambda u: link_score(ch, u, cached_map.get(u)),
+                    key=lambda u: link_score(
+                        ch, u, cached_map.get(u)),
                     reverse=True)[:10]
                 for i, u in enumerate(sorted_alts):
                     a = QAction(f"{i + 1}. {u[:60]}...", alt)
@@ -2725,12 +2751,14 @@ class PlaylistTab(QWidget):
             if ch.status.url_status is False:
                 menu.addAction(self._act(
                     "Удалить битую ссылку",
-                    lambda checked=False, r=row: self._remove_broken_url(r), menu))
+                    lambda checked=False, r=row:
+                        self._remove_broken_url(r), menu))
                 menu.addSeparator()
             if ch.meta.tvg_id:
                 menu.addAction(self._act(
                     "📺 Показать EPG",
-                    lambda checked=False, r=row: self._show_epg_for(r), menu))
+                    lambda checked=False, r=row:
+                        self._show_epg_for(r), menu))
             src_ch = self.find_channel_by_ref(ch)
             if src_ch is not None and src_ch.has_valid_url:
                 host = URLUtils.extract_host(src_ch.link.url)
@@ -2746,31 +2774,39 @@ class PlaylistTab(QWidget):
                         menu))
                 menu.addSeparator()
         menu.addAction(self._act("Новый канал", self._new_channel, menu))
-        menu.addAction(self._act("Копировать канал", self._copy_channel, menu))
-        menu.addAction(self._act("Вырезать канал", self._cut_channel, menu))
-        menu.addAction(self._act("Вставить канал", self._paste_channel, menu))
+        menu.addAction(self._act("Копировать канал",
+                                 self._copy_channel, menu))
+        menu.addAction(self._act("Вырезать канал",
+                                 self._cut_channel, menu))
+        menu.addAction(self._act("Вставить канал",
+                                 self._paste_channel, menu))
         menu.addSeparator()
         menu.addAction(self._act("Пакетное переименование групп",
                                  self._rename_groups, menu))
         menu.addSeparator()
         menu.addAction(self._act(
             "Добавить в чёрный список каналов",
-            lambda checked=False, r=row: self._add_to_blacklist(r), menu))
+            lambda checked=False, r=row:
+                self._add_to_blacklist(r), menu))
         menu.addSeparator()
         menu.addAction(self._act(
             "Проверить ссылку",
-            lambda checked=False, r=row: self._check_single_url(r), menu))
+            lambda checked=False, r=row:
+                self._check_single_url(r), menu))
         menu.addAction(self._act(
             "Заменить ссылку из источников...",
-            lambda checked=False, r=row: self.replace_single_link(r), menu))
+            lambda checked=False, r=row:
+                self.replace_single_link(r), menu))
         menu.addSeparator()
         menu.addAction(self._act(
             "Удалить канал",
-            lambda checked=False, r=row: self._delete_channel(r), menu))
+            lambda checked=False, r=row:
+                self._delete_channel(r), menu))
 
     def _build_multi_row_menu(self, menu: QMenu, rows: Set[int]):
         cnt = len(rows)
-        a = QAction(f"Выбрано каналов: {cnt}", menu); a.setEnabled(False)
+        a = QAction(f"Выбрано каналов: {cnt}", menu)
+        a.setEnabled(False)
         menu.addAction(a)
         menu.addSeparator()
         menu.addAction(self._act("Новый канал", self._new_channel, menu))
@@ -2791,10 +2827,12 @@ class PlaylistTab(QWidget):
         menu.addSeparator()
         menu.addAction(self._act(f"Проверить ссылки ({cnt})",
                                  self._check_selected_urls, menu))
-        menu.addAction(self._act(f"Заменить ссылки из источников ({cnt})...",
-                                 self.replace_selected_links, menu))
-        menu.addAction(self._act(f"Добавить в чёрный список каналов ({cnt})",
-                                 self._add_selected_to_blacklist, menu))
+        menu.addAction(self._act(
+            f"Заменить ссылки из источников ({cnt})...",
+            self.replace_selected_links, menu))
+        menu.addAction(self._act(
+            f"Добавить в чёрный список каналов ({cnt})",
+            self._add_selected_to_blacklist, menu))
         menu.addSeparator()
         menu.addAction(self._act(f"Удалить битые ссылки ({cnt})",
                                  self._remove_selected_broken_urls, menu))
@@ -2803,7 +2841,8 @@ class PlaylistTab(QWidget):
 
     def _build_empty_menu(self, menu: QMenu):
         menu.addAction(self._act("Новый канал", self._new_channel, menu))
-        menu.addAction(self._act("Вставить канал", self._paste_channel, menu))
+        menu.addAction(self._act("Вставить канал",
+                                 self._paste_channel, menu))
         menu.addSeparator()
         menu.addAction(self._act("Пакетное переименование групп",
                                  self._rename_groups, menu))
@@ -2824,20 +2863,23 @@ class PlaylistTab(QWidget):
         cur = self.core.epg_db.get_current(ch.meta.tvg_id)
         if not cur:
             info_box(self, f"Нет EPG для '{ch.meta.tvg_id}'.\n"
-                           "Загрузите EPG через меню «Инструменты → Загрузить EPG».",
+                           "Загрузите EPG через меню "
+                           "«Инструменты → Загрузить EPG».",
                      "EPG")
             return
         cat = f"\nКатегория: {cur.category}" if cur.category else ""
-        src = f"\nИсточник: {ch.meta.epg_source}" if ch.meta.epg_source else ""
-        info_box(self, f"Сейчас: {cur.title}\n"
-                       f"{cur.start.strftime('%H:%M') if cur.start else '?'} — "
-                       f"{cur.stop.strftime('%H:%M') if cur.stop else '?'}"
-                       f"{cat}{src}\n\n"
-                       f"{cur.desc or ''}",
+        src = (f"\nИсточник: {ch.meta.epg_source}"
+               if ch.meta.epg_source else "")
+        info_box(self,
+                 f"Сейчас: {cur.title}\n"
+                 f"{cur.start.strftime('%H:%M') if cur.start else '?'} — "
+                 f"{cur.stop.strftime('%H:%M') if cur.stop else '?'}"
+                 f"{cat}{src}\n\n"
+                 f"{cur.desc or ''}",
                  f"EPG: {ch.meta.name}")
 
     def disconnect_signals(self):
-        for w in (self._url_checker_worker, self._replacement_worker,
+        for w in (self._src_check_worker, self._replacement_worker,
                   self._epg_worker, self._epg_meta_worker):
             if w and w.isRunning():
                 with suppress(Exception):
@@ -2850,9 +2892,12 @@ class PlaylistTab(QWidget):
             sh.deleteLater()
         self._shortcuts.clear()
         with suppress(TypeError, RuntimeError):
-            self.core.channels_updated.disconnect(self._on_core_channels_updated)
+            self.core.channels_updated.disconnect(
+                self._on_core_channels_updated)
         with suppress(TypeError, RuntimeError):
-            self.model.dataChanged.disconnect(self._on_model_data_changed)
+            self.model.dataChanged.disconnect(
+                self._on_model_data_changed)
+
 
 class MainWindow(QMainWindow):
     _bg_progress = pyqtSignal(int, int, str)
@@ -2874,6 +2919,7 @@ class MainWindow(QMainWindow):
         self._toolbar_actions: List[QAction] = []
         self.toolbar_undo_action: Optional[QAction] = None
         self.toolbar_redo_action: Optional[QAction] = None
+        self._playlist_creation_stop = None
 
         IconProvider.initialize(self.style())
         IconProvider.set_enabled(
@@ -2924,7 +2970,8 @@ class MainWindow(QMainWindow):
                 tab.refresh_view()
                 tab.flush_pending_state()
                 tab.selected_channels = [
-                    ch for ch in tab.all_channels if ch.uid in selected_uids]
+                    ch for ch in tab.all_channels
+                    if ch.uid in selected_uids]
                 if current_uid is not None:
                     tab.current_channel = next(
                         (ch for ch in tab.all_channels
@@ -2980,9 +3027,12 @@ class MainWindow(QMainWindow):
             f = tab.table.font()
             f.setPointSize(font_size)
             tab.table.setFont(f)
-            tab.table.setColumnHidden(tab.model.COL_TVG_ID, not show_tvg_id)
-            tab.table.setColumnHidden(tab.model.COL_TVG_LOGO, not show_tvg_logo)
-            tab.table.setColumnHidden(tab.model.COL_CATCHUP, not show_catchup)
+            tab.table.setColumnHidden(tab.model.COL_TVG_ID,
+                                       not show_tvg_id)
+            tab.table.setColumnHidden(tab.model.COL_TVG_LOGO,
+                                       not show_tvg_logo)
+            tab.table.setColumnHidden(tab.model.COL_CATCHUP,
+                                       not show_catchup)
         self.status_bar.setVisible(bool(c.get('show_status_bar', True)))
 
     def _setup_ui(self):
@@ -3023,7 +3073,8 @@ class MainWindow(QMainWindow):
         fm.addMenu(self.recent_menu)
         fm.addSeparator()
         self._add_action(fm, "Сохранить", self._save_file, "Ctrl+S")
-        self._add_action(fm, "Сохранить как", self._save_as, "Ctrl+Shift+S")
+        self._add_action(fm, "Сохранить как", self._save_as,
+                         "Ctrl+Shift+S")
         self._add_action(fm, "Сохранить всё", self._save_all)
         fm.addSeparator()
         self._add_action(fm, "Экспорт Stable-плейлиста...",
@@ -3039,29 +3090,36 @@ class MainWindow(QMainWindow):
                          lambda: self._with_tab('_new_channel'),
                          "Ctrl+Shift+A")
         self._add_action(cm, "Вырезать",
-                         lambda: self._with_tab('_cut_channel'), "Ctrl+X")
+                         lambda: self._with_tab('_cut_channel'),
+                         "Ctrl+X")
         self._add_action(cm, "Копировать",
-                         lambda: self._with_tab('_copy_channel'), "Ctrl+C")
+                         lambda: self._with_tab('_copy_channel'),
+                         "Ctrl+C")
         self._add_action(cm, "Вставить",
-                         lambda: self._with_tab('_paste_channel'), "Ctrl+V")
+                         lambda: self._with_tab('_paste_channel'),
+                         "Ctrl+V")
         cm.addSeparator()
         self._add_action(cm, "Массовая правка выбранных...",
                          lambda: self._with_tab('_mass_edit_selected'))
         cm.addSeparator()
         self._add_action(cm, "Удалить каналы без ссылок",
-                         lambda: self._with_tab('delete_channels_without_urls'))
+                         lambda: self._with_tab(
+                             'delete_channels_without_urls'))
         self._add_action(cm, "Удалить каналы без метаданных",
-                         lambda: self._with_tab('delete_channels_without_metadata'))
+                         lambda: self._with_tab(
+                             'delete_channels_without_metadata'))
         cm.addSeparator()
         self._add_action(cm, "Переместить вверх",
                          lambda: self._with_tab('_move_channel_up'))
         self._add_action(cm, "Переместить вниз",
                          lambda: self._with_tab('_move_channel_down'))
         cm.addSeparator()
-        self._add_action(cm, "Поиск дубликатов...", self._show_duplicates)
+        self._add_action(cm, "Поиск дубликатов...",
+                         self._show_duplicates)
         self._add_action(cm, "Сравнить плейлисты...", self._show_compare)
         cm.addSeparator()
-        self._add_action(cm, "Удалить метаданные...", self._remove_metadata)
+        self._add_action(cm, "Удалить метаданные...",
+                         self._remove_metadata)
 
         lm = mb.addMenu("Ссылки")
         self._add_action(lm, "Проверить все ссылки",
@@ -3085,19 +3143,25 @@ class MainWindow(QMainWindow):
         self._add_action(lm, "🚫 Заблокировать домен/IP…",
                          self._block_domain_manual)
         lm.addSeparator()
-        
-        info_act = QAction("ℹ️ Проверка ссылок — в менеджере источников", self)
+
+        info_act = QAction(
+            "ℹ️ Проверка ссылок — в менеджере источников", self)
         info_act.setEnabled(False)
         lm.addAction(info_act)
 
         tm = mb.addMenu("Инструменты")
-        self._add_action(tm, "Источники ссылок (обновить + проверить URL)...",
-                         self._manage_sources)
-        self._add_action(tm, "Редактировать заголовок...", self._edit_header)
+        self._add_action(
+            tm,
+            "Источники ссылок (обновить + проверить URL)...",
+            self._manage_sources)
+        self._add_action(tm, "Редактировать заголовок...",
+                         self._edit_header)
         tm.addSeparator()
         self._add_action(tm, "Загрузить EPG", self._load_epg)
-        self._add_action(tm, "Применить метаданные из EPG ко всем каналам",
-                         self._apply_epg_metadata_all)
+        self._add_action(
+            tm,
+            "Применить метаданные из EPG ко всем каналам",
+            self._apply_epg_metadata_all)
         tm.addSeparator()
         self._add_action(tm, "Управление кэшем...", self._manage_cache)
         tm.addSeparator()
@@ -3108,20 +3172,24 @@ class MainWindow(QMainWindow):
         tm.addSeparator()
         self._add_action(tm, "Менеджер чёрного списка домен/IP",
                          self._manage_domain_blacklist)
-        self._add_action(tm, "Очистить ссылки по чёрному списку домен/IP",
-                         self._apply_domain_blacklist)
+        self._add_action(
+            tm,
+            "Очистить ссылки по чёрному списку домен/IP",
+            self._apply_domain_blacklist)
         tm.addSeparator()
-        self._add_action(tm, "User-Agent по доменам", self._manage_ua_rules)
+        self._add_action(tm, "User-Agent по доменам",
+                         self._manage_ua_rules)
         tm.addSeparator()
         self._add_action(tm, "Показать лог", self._show_log)
 
         sm = mb.addMenu("Настройки")
         self._add_action(sm, "Настройки замены ссылок",
                          self._manage_replacement_settings)
-        self._add_action(sm, "Общие настройки", self._manage_general_settings)
+        self._add_action(sm, "Общие настройки",
+                         self._manage_general_settings)
         sm.addSeparator()
-        self._add_action(sm, "Полноэкранный режим", self._toggle_fullscreen,
-                         "F11")
+        self._add_action(sm, "Полноэкранный режим",
+                         self._toggle_fullscreen, "F11")
         sm.addSeparator()
         self._add_action(sm, "Увеличить",
                          lambda: self._change_font(+1), "Ctrl++")
@@ -3134,10 +3202,12 @@ class MainWindow(QMainWindow):
         self._add_action(hm, "Справка", self._show_help, "F1")
         self._add_action(hm, "Поддержка проекта", self._show_support)
         hm.addSeparator()
-        self._add_action(hm, "О Qt", lambda: QMessageBox.aboutQt(self))
+        self._add_action(hm, "О Qt",
+                         lambda: QMessageBox.aboutQt(self))
 
     def _add_action(self, container, text: str, slot: Callable,
-                    shortcut: str = "", icon: Optional[QIcon] = None,
+                    shortcut: str = "",
+                    icon: Optional[QIcon] = None,
                     tooltip: str = "") -> QAction:
         a = make_action(self, text, slot, shortcut, icon, tooltip)
         if container is not None:
@@ -3315,7 +3385,8 @@ class MainWindow(QMainWindow):
                 recent_list = list(recent)
         except TypeError:
             recent_list = []
-        self.recent_files = [f for f in recent_list if isinstance(f, str)]
+        self.recent_files = [f for f in recent_list
+                             if isinstance(f, str)]
         self._update_recent_menu()
 
     def _save_settings(self):
@@ -3330,13 +3401,15 @@ class MainWindow(QMainWindow):
         self.recent_files = [fp for fp in self.recent_files
                              if os.path.exists(fp)]
         if not self.recent_files:
-            a = QAction("Нет недавних", self); a.setEnabled(False)
+            a = QAction("Нет недавних", self)
+            a.setEnabled(False)
             self.recent_menu.addAction(a)
             return
         for fp in self.recent_files:
             a = QAction(os.path.basename(fp), self)
             a.setToolTip(fp)
-            a.triggered.connect(lambda checked, f=fp: self._open_recent(f))
+            a.triggered.connect(
+                lambda checked, f=fp: self._open_recent(f))
             self.recent_menu.addAction(a)
         self.recent_menu.addSeparator()
         a = QAction("Очистить", self)
@@ -3371,7 +3444,8 @@ class MainWindow(QMainWindow):
             self.setWindowTitle(
                 f"{fn}{mod} - Ksenia M3U Editor {APP_VERSION}")
         else:
-            self.setWindowTitle(f"Ksenia M3U Editor {APP_VERSION}")
+            self.setWindowTitle(
+                f"Ksenia M3U Editor {APP_VERSION}")
 
     def _with_tab(self, method_name: str):
         if self.current_tab:
@@ -3380,8 +3454,10 @@ class MainWindow(QMainWindow):
     def _create_tab(self, filepath: Optional[str] = None,
                     title: Optional[str] = None) -> PlaylistTab:
         tab = PlaylistTab(filepath, parent_window=self)
-        idx = self.tab_widget.addTab(tab, title or (os.path.basename(filepath)
-                                                    if filepath else "Безымянный"))
+        idx = self.tab_widget.addTab(
+            tab,
+            title or (os.path.basename(filepath)
+                      if filepath else "Безымянный"))
         self.tabs[tab] = tab
         self.tab_widget.setCurrentIndex(idx)
         tab.undo_state_changed.connect(self._on_undo_state)
@@ -3421,7 +3497,8 @@ class MainWindow(QMainWindow):
 
         def load_worker():
             try:
-                logger.info(f"Создание плейлиста: {len(sources_to_load)} источников")
+                logger.info(f"Создание плейлиста: "
+                            f"{len(sources_to_load)} источников")
                 all_channels: List[ChannelData] = []
                 for src in sources_to_load:
                     if _stop.is_set():
@@ -3441,11 +3518,9 @@ class MainWindow(QMainWindow):
 
                 if (apply_domain_bl
                         and self.core.domain_blacklist_manager.get_all()):
-                    all_channels, _ = self.core.apply_domain_blacklist_clean(
-                        all_channels)
+                    all_channels, _ = \
+                        self.core.apply_domain_blacklist_clean(all_channels)
 
-                if _stop.is_set():
-                    return
                 if _stop.is_set():
                     return
                 if (apply_ua
@@ -3463,11 +3538,12 @@ class MainWindow(QMainWindow):
                     all_channels = final_channels
 
                 if preserve:
-                    priority_map = {s.name: s.priority for s in sources_to_load}
+                    priority_map = {s.name: s.priority
+                                    for s in sources_to_load}
                     all_channels.sort(key=lambda ch: (
                         priority_map.get(ch.link.link_source, 999),
-                        ch.original_index if ch.original_index >= 0 else float('inf')
-                    ))
+                        ch.original_index
+                        if ch.original_index >= 0 else float('inf')))
                 else:
                     all_channels.sort(
                         key=lambda ch: ch.original_index
@@ -3475,13 +3551,15 @@ class MainWindow(QMainWindow):
 
                 if _stop.is_set():
                     return
-                logger.info(f"Всего подготовлено: {len(all_channels)} каналов")
+                logger.info(f"Всего подготовлено: "
+                            f"{len(all_channels)} каналов")
                 w = win_ref()
                 if w is None or not _is_qobject_valid(w):
                     return
                 self.core.playlist_from_sources_ready.emit(all_channels)
             except Exception as e:
-                logger.exception("Ошибка создания плейлиста из источников")
+                logger.exception(
+                    "Ошибка создания плейлиста из источников")
                 w = win_ref()
                 if w is None or not _is_qobject_valid(w):
                     return
@@ -3489,11 +3567,13 @@ class MainWindow(QMainWindow):
 
         threading.Thread(target=load_worker, daemon=True).start()
 
-    def _finish_create_playlist_from_sources(self, channels: List[ChannelData]):
+    def _finish_create_playlist_from_sources(
+            self, channels: List[ChannelData]):
         if not _is_qobject_valid(self):
             return
         logger.info(
-            f"_finish_create_playlist_from_sources: {len(channels)} каналов")
+            f"_finish_create_playlist_from_sources: "
+            f"{len(channels)} каналов")
         self.hide_progress()
         if not channels:
             info_box(self, "Источники не содержат каналов "
@@ -3523,14 +3603,16 @@ class MainWindow(QMainWindow):
         if not _is_qobject_valid(self):
             return
         self.hide_progress()
-        error_box(self, f"Не удалось создать плейлист:\n{error_message}")
+        error_box(self, f"Не удалось создать плейлист:\n"
+                        f"{error_message}")
         self.set_action("✗ Ошибка создания плейлиста")
 
     def _open_file_in_tab(self, fp: str):
         logger.info(f"Открытие файла: {fp}")
         for tab in self.tabs.values():
             if tab.filepath == fp:
-                self.tab_widget.setCurrentIndex(self.tab_widget.indexOf(tab))
+                self.tab_widget.setCurrentIndex(
+                    self.tab_widget.indexOf(tab))
                 return
         try:
             self.set_action(f"⏳ Открытие: {os.path.basename(fp)}")
@@ -3556,7 +3638,8 @@ class MainWindow(QMainWindow):
         if not self.current_tab:
             return
         default = self.current_tab.filepath or "playlist.m3u"
-        fp = save_file_dialog(self, "Сохранить как", default, M3U_FILTER, ".m3u")
+        fp = save_file_dialog(self, "Сохранить как", default,
+                              M3U_FILTER, ".m3u")
         if not fp:
             return
         self.current_tab.flush_sync()
@@ -3574,13 +3657,17 @@ class MainWindow(QMainWindow):
                 continue
             if not tab.filepath:
                 default = f"playlist_{tab.tab_id[:6]}.m3u"
-                fp = save_file_dialog(self, f"Сохранить '{tab.filepath or 'Безымянный'}'",
-                                      default, M3U_FILTER, ".m3u")
+                fp = save_file_dialog(
+                    self,
+                    f"Сохранить "
+                    f"'{tab.filepath or 'Безымянный'}'",
+                    default, M3U_FILTER, ".m3u")
                 if not fp:
                     continue
                 idx = self.tab_widget.indexOf(tab)
                 if idx >= 0:
-                    self.tab_widget.setTabText(idx, os.path.basename(fp))
+                    self.tab_widget.setTabText(idx,
+                                                os.path.basename(fp))
                 self._add_recent(fp)
             tab.flush_sync()
             tab.save_to_file()
@@ -3614,7 +3701,8 @@ class MainWindow(QMainWindow):
                 t = tab_ref()
                 if t is None:
                     return
-                written, skipped = t.export_stable(fp, progress_cb=progress)
+                written, skipped = t.export_stable(
+                    fp, progress_cb=progress)
                 w2 = win_ref()
                 if w2 is not None and _is_qobject_valid(w2):
                     try:
@@ -3668,8 +3756,9 @@ class MainWindow(QMainWindow):
             r = confirm_three(self, "Файл изменён. Сохранить?")
             if r == 'yes':
                 if not tab.filepath:
-                    fp = save_file_dialog(self, "Сохранить как", "playlist.m3u",
-                                          M3U_FILTER, ".m3u")
+                    fp = save_file_dialog(
+                        self, "Сохранить как", "playlist.m3u",
+                        M3U_FILTER, ".m3u")
                     if not fp:
                         return
                     tab.filepath = fp
@@ -3701,7 +3790,8 @@ class MainWindow(QMainWindow):
             w = self.tab_widget.widget(index)
             if w in self.tabs:
                 self.current_tab = self.tabs[w]
-                self.current_tab.set_search_text(self.search_edit.text())
+                self.current_tab.set_search_text(
+                    self.search_edit.text())
                 grp = self.group_combo.currentText() or GROUP_FILTER_ALL
                 self.current_tab.set_group_filter(grp)
                 self._update_window_title()
@@ -3740,7 +3830,8 @@ class MainWindow(QMainWindow):
         self.group_combo.setCurrentIndex(idx)
         self.group_combo.blockSignals(False)
         if self.current_tab:
-            self.current_tab.set_group_filter(self.group_combo.currentText())
+            self.current_tab.set_group_filter(
+                self.group_combo.currentText())
 
     def _on_undo_state(self, cu: bool, cr: bool):
         sender = self.sender()
@@ -3810,7 +3901,8 @@ class MainWindow(QMainWindow):
         if self.current_tab:
             removed = self.current_tab.apply_blacklist()
             if removed > 0:
-                self.set_action(f"✓ Удалено по ч.с. каналов: {removed}")
+                self.set_action(
+                    f"✓ Удалено по ч.с. каналов: {removed}")
 
     def _apply_domain_blacklist(self):
         if not self.current_tab:
@@ -3854,12 +3946,14 @@ class MainWindow(QMainWindow):
             info_box(self, (f"Правило «{v}» добавлено. "
                             f"Совпадений в плейлисте не найдено.")
                      if added else
-                     (f"Правило «{v}» уже существует. Совпадений нет."))
+                     (f"Правило «{v}» уже существует. "
+                      f"Совпадений нет."))
 
     def _track_dialog(self, dlg: QDialog) -> QDialog:
         ref = weakref.ref(dlg)
         self._open_dialogs.append(ref)
-        self._open_dialogs = [r for r in self._open_dialogs if r() is not None]
+        self._open_dialogs = [r for r in self._open_dialogs
+                              if r() is not None]
         return dlg
 
     def _manage_blacklist(self):
@@ -3902,7 +3996,8 @@ class MainWindow(QMainWindow):
     def _show_log(self):
         log_path = Paths.get_log_path()
         if not os.path.exists(log_path):
-            info_box(self, f"Файл лога ещё не создан:\n{log_path}", "Лог")
+            info_box(self, f"Файл лога ещё не создан:\n{log_path}",
+                     "Лог")
             return
         try:
             open_in_os(log_path)
@@ -3947,9 +4042,11 @@ class MainWindow(QMainWindow):
             with suppress(TypeError, RuntimeError):
                 app.paletteChanged.disconnect(self._on_palette_changed)
         with suppress(TypeError, RuntimeError):
-            self.core.settings_changed.disconnect(self._on_settings_changed)
+            self.core.settings_changed.disconnect(
+                self._on_settings_changed)
         with suppress(TypeError, RuntimeError):
-            self.core.blacklist_updated.disconnect(self._on_blacklist_updated)
+            self.core.blacklist_updated.disconnect(
+                self._on_blacklist_updated)
         with suppress(TypeError, RuntimeError):
             self.core.domain_blacklist_updated.disconnect(
                 self._on_domain_blacklist_updated)
@@ -3989,8 +4086,9 @@ class MainWindow(QMainWindow):
             if r == 'yes':
                 for tab in modified:
                     if not tab.filepath:
-                        fp = save_file_dialog(self, "Сохранить как",
-                                              "playlist.m3u", M3U_FILTER, ".m3u")
+                        fp = save_file_dialog(
+                            self, "Сохранить как",
+                            "playlist.m3u", M3U_FILTER, ".m3u")
                         if not fp:
                             event.ignore()
                             return
@@ -4018,10 +4116,12 @@ class MainWindow(QMainWindow):
             if _app is not None:
                 _app.quit()
 
-def parse_cli_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+
+def parse_cli_args(argv: Optional[List[str]] = None
+                    ) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         prog="ksenia",
-        description=f"Ksenia M3U Editor {APP_VERSION} — CLI/headless режим")
+        description=f"Ksenia M3U Editor {APP_VERSION} — CLI/headless")
     p.add_argument("--headless", action="store_true",
                    help="Запустить без GUI")
     p.add_argument("--sources-file", default=None,
@@ -4030,11 +4130,14 @@ def parse_cli_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                    help="Куда писать M3U")
     p.add_argument("--export-stable", action="store_true",
                    help="Stable-экспорт с живой перепроверкой")
-    p.add_argument("--check-workers", type=int, default=STABLE_CHECK_MAX_WORKERS,
+    p.add_argument("--check-workers", type=int,
+                   default=STABLE_CHECK_MAX_WORKERS,
                    help="Число воркеров проверки")
-    p.add_argument("--timeout", type=int, default=STABLE_CHECK_TIMEOUT_SEC,
+    p.add_argument("--timeout", type=int,
+                   default=STABLE_CHECK_TIMEOUT_SEC,
                    help="Таймаут проверки, сек")
-    p.add_argument("--apply-blacklist", action="store_true", default=True,
+    p.add_argument("--apply-blacklist", action="store_true",
+                   default=True,
                    help="Применять ЧС каналов (удаляет)")
     p.add_argument("--no-domain-blacklist", action="store_true",
                    help="Не очищать ссылки по ЧС домен/IP")
@@ -4042,12 +4145,10 @@ def parse_cli_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                    version=f"Ksenia {APP_VERSION}")
     return p.parse_args(argv)
 
+
 def run_cli(args: argparse.Namespace) -> int:
-    """
-    CLI-режим. Осознанное исключение из архитектуры «одна задача — одна
-    утилита»: для headless-режима используется собственная логика проверки
-    (find_url), т.к. GUI-воркеры недоступны.
-    """
+    """CLI-режим. Осознанное исключение для headless:
+    собственная логика проверки URL."""
     _qcore = QCoreApplication.instance() or QCoreApplication(sys.argv)
     core = ApplicationCore.instance()
 
@@ -4071,7 +4172,8 @@ def run_cli(args: argparse.Namespace) -> int:
         print(f"Ошибка чтения источников: {e}", file=sys.stderr)
         return 2
     if not isinstance(sources_data, list):
-        print("Ошибка: ожидался JSON-массив источников", file=sys.stderr)
+        print("Ошибка: ожидался JSON-массив источников",
+              file=sys.stderr)
         return 2
 
     sources: List[LinkSource] = []
@@ -4103,14 +4205,16 @@ def run_cli(args: argparse.Namespace) -> int:
 
     if args.apply_blacklist and core.blacklist_manager.get_all():
         before = len(all_channels)
-        all_channels, removed = core.apply_blacklist_to_channels(all_channels)
+        all_channels, removed = core.apply_blacklist_to_channels(
+            all_channels)
         if removed:
             print(f"[+] ЧС каналов: удалено {removed} (было {before})")
 
     if (not args.no_domain_blacklist
             and core.domain_blacklist_manager.get_all()):
         before = len(all_channels)
-        all_channels, cleaned = core.apply_domain_blacklist_clean(all_channels)
+        all_channels, cleaned = core.apply_domain_blacklist_clean(
+            all_channels)
         if cleaned:
             print(f"[+] ЧС домен/IP: очищено ссылок {cleaned} "
                   f"(каналов осталось {len(all_channels)})")
@@ -4149,13 +4253,15 @@ def run_cli(args: argparse.Namespace) -> int:
             for u in cands:
                 if not u or not u.strip():
                     continue
-                if settings.is_blacklisted(u) or settings.is_filtered_domain(u):
+                if settings.is_blacklisted(u) or \
+                        settings.is_filtered_domain(u):
                     continue
                 ok, rt, _, _ = URLUtils.check_url(
                     u, args.timeout, verify_ssl=False,
                     max_retries=0, retry_delay=0.0)
                 if ok is True and (
-                        rt is None or rt * 1000 <= STABLE_LATENCY_THRESHOLD_MS):
+                        rt is None
+                        or rt * 1000 <= STABLE_LATENCY_THRESHOLD_MS):
                     return u
             return None
 
@@ -4190,9 +4296,21 @@ def run_cli(args: argparse.Namespace) -> int:
                 for line in ch.link.extvlcopt_lines:
                     f.write(line + '\n')
                 f.write((ch.link.url or '') + '\n')
-        print(f"[✓] Экспорт: {len(all_channels)} каналов → {args.export}")
+        print(f"[✓] Экспорт: {len(all_channels)} каналов → "
+              f"{args.export}")
 
     return 0
+
+
+def _install_signal_handlers(app: QApplication):
+    def handler(signum, frame):
+        logger.info(f"Получен сигнал {signum}, завершение...")
+        app.quit()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        with suppress(ValueError, OSError):
+            signal.signal(sig, handler)
+
 
 def main():
     import argparse as _argparse
@@ -4214,21 +4332,7 @@ def main():
     app.setOrganizationName("Ksenia")
     app.setQuitOnLastWindowClosed(True)
     _install_signal_handlers(app)
-    # v5: watchdog ДО app.exec() — если event loop зависнет,
-    # принудительно выйти через 3 секунды после возврата из exec().
-    _install_exit_watchdog()
     window = MainWindow()
     window.show()
     rc = app.exec()
     sys.exit(rc)
-
-def _install_signal_handlers(app: QApplication):
-    def handler(signum, frame):
-        logger.info(f"Получен сигнал {signum}, завершение...")
-        app.quit()
-
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        with suppress(ValueError, OSError):
-            signal.signal(sig, handler)
-
-# v5: watchdog вынесен в ksenia_window.py — единая точка входа.
