@@ -2,43 +2,34 @@
 """LinkSource, LinkSourceManager."""
 
 from __future__ import annotations
+
+import concurrent.futures
 import os
 import re
-import time
 import threading
-import concurrent.futures
+import time
+from collections import OrderedDict, defaultdict
 from contextlib import suppress
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Set, Tuple
-from collections import OrderedDict, defaultdict
-import requests
 from difflib import SequenceMatcher
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+import requests
+
 from config import Config, LinkReplacementSettings
-from constants import (URL_CHECK_MAX_WORKERS, LOADED_CHANNELS_TTL_SEC,
+from constants import (LOADED_CHANNELS_TTL_SEC,
     MAX_LOADED_SOURCES, MAX_SOURCE_FILE_BYTES, SEARCH_WORKER_MAX,
     SOURCE_LOAD_TIMEOUT_SEC, FALLBACK_DAYS_DEFAULT, DEFAULT_TIMEOUT,
-    CHECK_RESULT_CACHE_TTL_HOURS, ALIVE_INDEX_CACHE_MAX, StatusText)
+    CHECK_RESULT_CACHE_TTL_HOURS, ALIVE_INDEX_CACHE_MAX, StatusText,
+    SOURCES_FINDER_UPDATE_INTERVAL_HOURS, SOURCES_FINDER_EXCLUDE_KEYWORDS)
 from models import ChannelData
 from parsers import M3UParser
 from paths import logger, parse_datetime
-
-
-def _new_session() -> requests.Session:
-    """Простая сессия, как в генераторе."""
-    s = requests.Session()
-    s.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-                      'AppleWebKit/537.36',
-        'Accept': '*/*',
-    })
-    return s
-
 from storage import BaseJsonStore
 from utils import ChannelNameNormalizer, URLUtils, _StopToken, cancelled
 
 
 def _new_session() -> requests.Session:
-    """Простая сессия, как в генераторе."""
     s = requests.Session()
     s.headers.update({
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
@@ -57,7 +48,8 @@ class LinkSource:
                  'last_error', 'last_attempt', 'consecutive_errors',
                  'apply_blacklist', 'apply_domain_blacklist',
                  'total_working', 'working_checked_at',
-                 'raw_total_links', 'raw_total_with_url')
+                 'raw_total_links', 'raw_total_with_url',
+                 'generated')
 
     def __init__(self):
         self.name: str = ""
@@ -80,6 +72,7 @@ class LinkSource:
         self.working_checked_at: Optional[float] = None
         self.raw_total_links: int = 0
         self.raw_total_with_url: int = 0
+        self.generated: bool = False
 
     def should_refresh(self) -> bool:
         if not self.auto_update:
@@ -97,10 +90,7 @@ class LinkSource:
     def copy(self) -> 'LinkSource':
         s = LinkSource()
         for slot in self.__slots__:
-            v = getattr(self, slot)
-            if isinstance(v, list):
-                v = v.copy()
-            setattr(s, slot, v)
+            setattr(s, slot, getattr(self, slot))
         return s
 
     def to_dict(self) -> Dict[str, Any]:
@@ -125,6 +115,7 @@ class LinkSource:
             'working_checked_at': self.working_checked_at,
             'raw_total_links': self.raw_total_links,
             'raw_total_with_url': self.raw_total_with_url,
+            'generated': self.generated,
         }
 
     @classmethod
@@ -144,6 +135,7 @@ class LinkSource:
         s.last_error = data.get('last_error', '') or ''
         s.apply_blacklist = bool(data.get('apply_blacklist', True))
         s.apply_domain_blacklist = bool(data.get('apply_domain_blacklist', True))
+        s.generated = bool(data.get('generated', False))
         for fld in ('last_updated', 'last_attempt'):
             dt = parse_datetime(data.get(fld))
             if dt is not None:
@@ -166,8 +158,58 @@ class LinkSource:
 class LinkSourceManager:
     """Менеджер источников: загрузка, индексы, поиск, alive_index."""
 
+    @staticmethod
+    def _default_sources() -> List[LinkSource]:
+        defaults = [
+            ("SlyNet FreeBestTV",
+             "https://slynet-iptv2025.do.am/FreeBestTV.m3u8", 3),
+            ("iptv-org (all)",
+             "https://iptv-org.github.io/iptv/index.m3u", 5),
+            ("iptv-org Russia",
+             "https://iptv-org.github.io/iptv/countries/ru.m3u", 5),
+            ("Free-TV IPTV",
+             "https://raw.githubusercontent.com/Free-TV/IPTV/"
+             "master/playlist.m3u8", 5),
+            ("Spirt007 Rus",
+             "https://raw.githubusercontent.com/Spirt007/Tvru/"
+             "refs/heads/Master/Rus.m3u", 5),
+            ("smolnp IPTVru (основной)",
+             "https://smolnp.github.io/IPTVru/IPTVru.m3u", 2),
+            ("smolnp IPTVstable",
+             "https://smolnp.github.io/IPTVru/IPTVstable.m3u8", 2),
+        ]
+        result: List[LinkSource] = []
+        for name, url, prio in defaults:
+            text = f"{name} {url}".lower()
+            if any(k in text for k in SOURCES_FINDER_EXCLUDE_KEYWORDS):
+                continue
+            s = LinkSource()
+            s.name = name
+            s.path = url
+            s.source_type = "online"
+            s.priority = int(prio)
+            s.enabled = True
+            s.auto_update = True
+            s.update_interval_hours = SOURCES_FINDER_UPDATE_INTERVAL_HOURS
+            s.encoding = "utf-8"
+            s.apply_blacklist = True
+            s.apply_domain_blacklist = True
+            s.generated = False
+            result.append(s)
+        return result
+
+    def _bootstrap_default_sources(self):
+        defaults = self._default_sources()
+        if not defaults:
+            return
+        self._sources = defaults
+        self._persist()
+        logger.info(
+            f"Bootstrap: добавлено источников по умолчанию: {len(defaults)}")
+
     def __init__(self, config_dir: str,
-                 cache_manager: Optional['CacheManager'] = None):
+                 cache_manager: Optional['CacheManager'] = None,
+                 bootstrap_defaults: bool = True):
         self._store = BaseJsonStore(
             os.path.join(config_dir, "link_sources.json"), [])
         self.cache_manager = cache_manager
@@ -176,7 +218,8 @@ class LinkSourceManager:
             LinkSource.from_dict(x) for x in self._store._data
             if isinstance(x, dict)
         ]
-        self._persist()
+        if bootstrap_defaults and not self._sources:
+            self._bootstrap_default_sources()
         self._loaded: "OrderedDict[str, Tuple[float, str, List[ChannelData]]]" = OrderedDict()
         self._name_index: "OrderedDict[str, Dict[str, List[ChannelData]]]" = OrderedDict()
         self._alive_index: "OrderedDict[str, Dict[str, List[ChannelData]]]" = OrderedDict()
@@ -197,10 +240,8 @@ class LinkSourceManager:
             pool = self._search_pool
             self._search_pool = None
         if pool is not None:
-            with suppress(TypeError):
+            with suppress(Exception):
                 pool.shutdown(wait=False, cancel_futures=True)
-                return
-            pool.shutdown(wait=False)
 
     def invalidate_cache(self, source_name: Optional[str] = None):
         with self._lock:
@@ -237,18 +278,31 @@ class LinkSourceManager:
             self._alive_index_cache.clear()
         return self._persist()
 
+    def remove_generated_sources(self) -> int:
+        with self._lock:
+            before = len(self._sources)
+            removed_names = [s.name for s in self._sources if s.generated]
+            self._sources = [s for s in self._sources if not s.generated]
+            for name in removed_names:
+                self._loaded.pop(name, None)
+                self._name_index.pop(name, None)
+                self._alive_index.pop(name, None)
+            self._alive_index_cache.clear()
+            removed = before - len(self._sources)
+        if removed:
+            self._persist()
+        return removed
+
     def update_source(self, old_name: str, new_source: LinkSource) -> bool:
         with self._lock:
             found = False
             for i, s in enumerate(self._sources):
                 if s.name == old_name:
                     self._sources[i] = new_source
-                    self._loaded.pop(old_name, None)
-                    self._name_index.pop(old_name, None)
-                    self._alive_index.pop(old_name, None)
-                    self._loaded.pop(new_source.name, None)
-                    self._name_index.pop(new_source.name, None)
-                    self._alive_index.pop(new_source.name, None)
+                    for k in (old_name, new_source.name):
+                        self._loaded.pop(k, None)
+                        self._name_index.pop(k, None)
+                        self._alive_index.pop(k, None)
                     self._alive_index_cache.clear()
                     found = True
                     break
@@ -353,10 +407,7 @@ class LinkSourceManager:
                         unsafe_domains: List[str]) -> bool:
         if bl_mgr is not None and bl_mgr.matches_url(url):
             return True
-        try:
-            host = URLUtils.extract_host(url) or ''
-        except Exception:
-            host = ''
+        host = URLUtils.extract_host(url) or ''
         if not host:
             return False
         for d in temp_domains + unsafe_domains:
@@ -380,8 +431,7 @@ class LinkSourceManager:
         unsafe_domains = list(settings.unsafe_domains) if settings else []
         return bl_mgr, temp_domains, unsafe_domains
 
-    def _build_alive_index(self, channels: List[ChannelData],
-                           bl_mgr,
+    def _build_alive_index(self, channels: List[ChannelData], bl_mgr,
                            temp_domains: List[str],
                            unsafe_domains: List[str]
                            ) -> Dict[str, List[ChannelData]]:
@@ -446,7 +496,6 @@ class LinkSourceManager:
                 self._alive_index.pop(old_name, None)
 
     def rebuild_alive_index(self, source_name: Optional[str] = None) -> int:
-        """Перестроить _alive_index из url_status_cache без сети."""
         if self.cache_manager is None:
             return 0
 
@@ -467,18 +516,16 @@ class LinkSourceManager:
             _ts, _path, channels = entry
             if not channels:
                 continue
-
             alive_index = self._build_alive_index(
                 channels, bl_mgr, temp_domains, unsafe_domains)
-
             with self._lock:
                 self._alive_index[name] = alive_index
                 self._alive_index.move_to_end(name)
-                self._alive_index_cache.clear()
             rebuilt += 1
 
         with self._lock:
             self._alive_index_cache.clear()
+
         logger.info(
             f"rebuild_alive_index: перестроено {rebuilt} источников "
             f"(source={source_name or 'ALL'})")
@@ -551,8 +598,7 @@ class LinkSourceManager:
         parsed = M3UParser.parse(content, source.name)
 
         source.raw_total_links = len(parsed)
-        source.raw_total_with_url = sum(
-            1 for c in parsed if c.has_valid_url)
+        source.raw_total_with_url = sum(1 for c in parsed if c.has_valid_url)
         return self._post_process_channels(parsed, source)
 
     def _load_remote(self, source: LinkSource, use_cache: bool,
@@ -666,10 +712,7 @@ class LinkSourceManager:
 
     def has_alive_index(self) -> bool:
         with self._lock:
-            for idx in self._alive_index.values():
-                if idx:
-                    return True
-        return False
+            return any(bool(idx) for idx in self._alive_index.values())
 
     def get_alive_urls(self, channel_name: str,
                        settings: LinkReplacementSettings,
@@ -742,9 +785,7 @@ class LinkSourceManager:
         else:
             search_norm = channel_name.lower()
 
-        search_type = settings.search_type
-
-        if search_type == 'exact':
+        if settings.search_type == 'exact':
             for source in enabled:
                 if cancelled(stop_token):
                     break
@@ -820,18 +861,6 @@ class LinkSourceManager:
                 search_norm, cnorm) >= max(
                 settings.min_name_similarity, threshold)
         return False
-
-    def _is_match(self, search_norm: str, channel_name: str,
-                  settings: LinkReplacementSettings) -> bool:
-        if settings.ignore_special_chars_in_names:
-            cnorm = ChannelNameNormalizer.normalize(
-                channel_name,
-                remove_parentheses=settings.remove_parentheses_in_names,
-                remove_brackets=settings.remove_brackets_in_names,
-                remove_emojis=settings.remove_emojis_in_names)
-        else:
-            cnorm = channel_name.lower()
-        return self._is_match_normalized(search_norm, cnorm, settings)
 
     def _source_priority(self, source_name: str) -> int:
         s = self.get_source_by_name(source_name)

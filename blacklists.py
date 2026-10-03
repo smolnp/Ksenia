@@ -2,14 +2,16 @@
 """BlacklistManager, DomainBlacklistManager, DomainUserAgentManager."""
 
 from __future__ import annotations
+
+import ipaddress
 import os
 import re
 import threading
-import ipaddress
-from urllib.parse import urlparse
+from collections import OrderedDict
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
-from collections import OrderedDict
+from urllib.parse import urlparse
+
 from constants import DOMAIN_BL_CACHE_MAX, DOMAIN_UA_CACHE_MAX, StatusText
 from models import ChannelData
 from paths import logger, parse_datetime
@@ -141,10 +143,10 @@ class DomainBlacklistRule:
 
 
 class DomainBlacklistManager:
-    """
-    ЧС домен/IP.
-      - filter_channels()  — УДАЛЯЕТ каналы (legacy, для CLI).
-      - clean_channels()   — ОЧИЩАЕТ ссылки, сохраняет каналы (UI).
+    """ЧС домен/IP.
+
+    filter_channels() — удаляет каналы (для CLI).
+    clean_channels()  — очищает ссылки, каналы сохраняются (для UI).
     """
 
     def __init__(self, config_dir: str):
@@ -158,14 +160,8 @@ class DomainBlacklistManager:
         self._cache: "OrderedDict[str, bool]" = OrderedDict()
 
     def _persist_locked(self) -> bool:
-        old_data = self._store._data
         self._store._data = [r.to_dict() for r in self._rules]
-        ok = self._store.save()
-        if not ok:
-            self._store._data = old_data
-            logger.error(
-                "DomainBlacklist persist failed, rolled back")
-        return ok
+        return self._store.save()
 
     def _invalidate_cache_locked(self):
         self._cache.clear()
@@ -218,20 +214,6 @@ class DomainBlacklistManager:
                     return self._persist_locked()
         return False
 
-    def set_include_subdomains(self, value: str, include: bool) -> bool:
-        normalized = URLUtils.normalize_host(value)
-        if not normalized:
-            return False
-        with self._lock:
-            for r in self._rules:
-                if r.value == normalized:
-                    if r.include_subdomains == include:
-                        return False
-                    r.include_subdomains = bool(include)
-                    self._invalidate_cache_locked()
-                    return self._persist_locked()
-        return False
-
     def get_all(self) -> List[DomainBlacklistRule]:
         with self._lock:
             return list(self._rules)
@@ -255,16 +237,6 @@ class DomainBlacklistManager:
             for r in self._rules:
                 if r.value == normalized:
                     return r
-        return None
-
-    def find_rule_for_url(self, url: str) -> Optional[DomainBlacklistRule]:
-        if not url:
-            return None
-        with self._lock:
-            rules = list(self._rules)
-        for r in rules:
-            if r.matches(url):
-                return r
         return None
 
     def _matches_host(self, host: str) -> bool:
@@ -292,19 +264,10 @@ class DomainBlacklistManager:
 
     def filter_channels(self, channels: List[ChannelData]
                         ) -> Tuple[List[ChannelData], int]:
-        """LEGACY: удаляет каналы."""
+        """LEGACY (CLI): удаляет каналы."""
         with self._lock:
             if not self._rules:
                 return list(channels), 0
-            hosts: Set[str] = set()
-            for ch in channels:
-                if ch.link.url:
-                    h = URLUtils.extract_host(ch.link.url)
-                    if h:
-                        hosts.add(h)
-            for h in hosts:
-                self._matches_host(h)
-
         filtered: List[ChannelData] = []
         removed = 0
         for ch in channels:
@@ -316,7 +279,7 @@ class DomainBlacklistManager:
 
     def clean_channels(self, channels: List[ChannelData]
                        ) -> Tuple[List[ChannelData], int]:
-        """ОЧИЩАЕТ ссылку, сохраняет канал."""
+        """UI: очищает ссылку, сохраняет канал."""
         with self._lock:
             if not self._rules:
                 return list(channels), 0
@@ -345,39 +308,6 @@ class DomainBlacklistManager:
                 object.__setattr__(ch, 'modified_date', datetime.now())
                 cleaned += 1
         return list(channels), cleaned
-
-    def import_dicts(self, items: List[Dict[str, Any]]) -> int:
-        if not isinstance(items, list):
-            return 0
-        processed = 0
-        with self._lock:
-            for it in items:
-                if not isinstance(it, dict):
-                    continue
-                raw = it.get('value', '') or it.get('domain', '') or ''
-                if not raw:
-                    continue
-                normalized = URLUtils.normalize_host(raw)
-                if not normalized:
-                    continue
-                inc = bool(it.get('include_subdomains', True))
-                note = (it.get('note', '') or '').strip()
-                found = False
-                for r in self._rules:
-                    if r.value == normalized:
-                        r.include_subdomains = inc
-                        if note:
-                            r.note = note
-                        found = True
-                        processed += 1
-                        break
-                if not found:
-                    self._rules.append(
-                        DomainBlacklistRule(normalized, inc, note))
-                    processed += 1
-            self._invalidate_cache_locked()
-            self._persist_locked()
-        return processed
 
 
 class DomainUserAgentRule:
@@ -432,13 +362,14 @@ class DomainUserAgentManager:
     def _invalidate_cache_locked(self):
         self._cache.clear()
 
-    def _cache_get_locked(self, host: str):
+    def _cache_get_locked(self, host: str) -> Tuple[bool, Optional[str]]:
         if host in self._cache:
             self._cache.move_to_end(host)
-            return True, self._cache[host]
+            return self._cache[host]
         return False, None
 
-    def _cache_put_locked(self, host: str, matched: bool, ua):
+    def _cache_put_locked(self, host: str, matched: bool,
+                          ua: Optional[str]):
         self._cache[host] = (bool(matched), ua)
         self._cache.move_to_end(host)
         while len(self._cache) > DOMAIN_UA_CACHE_MAX:
@@ -498,11 +429,12 @@ class DomainUserAgentManager:
             return False, None
         host = host.lower()
         with self._lock:
-            found, cached = self._cache_get_locked(host)
-            if found:
-                return cached
+            matched, cached = self._cache_get_locked(host)
+            if matched:
+                return True, cached
             for r in self._rules:
-                if r.enabled and (host == r.domain or host.endswith('.' + r.domain)):
+                if r.enabled and (host == r.domain or
+                                  host.endswith('.' + r.domain)):
                     ua = r.user_agent or None
                     self._cache_put_locked(host, True, ua)
                     return True, ua

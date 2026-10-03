@@ -2,40 +2,45 @@
 """M3UParser, PlaylistHeaderManager."""
 
 from __future__ import annotations
+
 import re
-from typing import List, Dict, Optional
+from typing import Dict, List, Optional
+
 from constants import DEFAULT_GROUP
 from models import ChannelData
 from utils import ChannelNameNormalizer
 
 
+# Единый список атрибутов EXTINF — используется и в парсере, и в очистке
+_EXTINF_ATTRS = (
+    'tvg-id', 'tvg-name', 'tvg-logo', 'group-title', 'tvg-country',
+    'tvg-language', 'tvg-shift', 'timeshift', 'catchup', 'catchup-source',
+    'catchup-days', 'tvg-rec', 'tvg-chno', 'audio-track',
+)
+
+_ATTR_RE = re.compile(
+    r'(' + '|'.join(re.escape(a) for a in _EXTINF_ATTRS) + r')\s*=\s*'
+    r'(?:"((?:[^"\\]|\\.)*)"|\'((?:[^\'\\]|\\.)*)\'|([^\s,]+))'
+)
+_EXTINF_CLEAN_RE = re.compile(
+    r'(?:' + '|'.join(re.escape(a) for a in _EXTINF_ATTRS) + r')\s*=\s*'
+    r'(?:"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'|[^\s,]+)\s*'
+)
+
+
 class M3UParser:
-    _ATTR_RE = re.compile(
-        r'(tvg-id|tvg-name|tvg-logo|group-title|tvg-country|tvg-language|'
-        r'tvg-shift|timeshift|catchup|catchup-source|catchup-days|'
-        r'tvg-rec|tvg-chno|audio-track)\s*=\s*'
-        r'(?:"((?:[^"\\]|\\.)*)"|\'((?:[^\'\\]|\\.)*)\'|([^\s,]+))'
-    )
-
-    _EXTINF_CLEAN_RE = re.compile(
-        r'(?:tvg-id|tvg-name|tvg-logo|group-title|tvg-country|tvg-language|'
-        r'tvg-shift|timeshift|catchup|catchup-source|catchup-days|'
-        r'tvg-rec|tvg-chno|audio-track)\s*=\s*'
-        r'(?:"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'|[^\s,]+)\s*'
-    )
-
     @classmethod
     def extract_name(cls, line: str) -> str:
         if ',' not in line:
             return ""
-        clean = cls._EXTINF_CLEAN_RE.sub('', line)
+        clean = _EXTINF_CLEAN_RE.sub('', line)
         parts = clean.split(',', 1)
         return parts[1].strip() if len(parts) > 1 else ""
 
     @classmethod
     def parse_attrs(cls, line: str) -> Dict[str, str]:
         attrs = {}
-        for m in cls._ATTR_RE.finditer(line):
+        for m in _ATTR_RE.finditer(line):
             key = m.group(1)
             v = m.group(2) or m.group(3) or m.group(4) or ''
             v = v.replace('\\"', '"').replace("\\'", "'").replace('\\\\', '\\')
@@ -111,6 +116,9 @@ class M3UParser:
                 i += 1
                 continue
             if not line.startswith('#EXTINF:'):
+                # любые другие комментарии просто сбрасывают неиспользованные vlcopts
+                if line.startswith('#'):
+                    pending_vlcopts = []
                 i += 1
                 continue
 
@@ -175,6 +183,10 @@ class M3UParser:
 
 
 class PlaylistHeaderManager:
+    _ATTR_RE = re.compile(
+        r'(\S+?)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|\'((?:[^\'\\]|\\.)*)\')'
+    )
+
     def __init__(self):
         self.header_lines: List[str] = []
         self.epg_sources: List[str] = []
@@ -202,6 +214,7 @@ class PlaylistHeaderManager:
         self._original_attrs = {}
         self.playlist_name = ""
         self.has_extm3u = False
+
         for line in content.split('\n'):
             line = line.strip()
             if not line:
@@ -213,9 +226,10 @@ class PlaylistHeaderManager:
                 self.header_lines.append(line)
                 if ' ' in line:
                     attrs_line = line[8:]
-                    attrs = re.findall(
-                        r'(\S+?)\s*=\s*["\']?([^"\'\s]+)["\']?', attrs_line)
-                    for k, v in attrs:
+                    for m in self._ATTR_RE.finditer(attrs_line):
+                        k = m.group(1)
+                        v = m.group(2) or m.group(3) or ''
+                        v = v.replace('\\"', '"').replace('\\\\', '\\')
                         if k.lower() == 'url-tvg':
                             for part in v.split(','):
                                 part = part.strip()
@@ -234,7 +248,9 @@ class PlaylistHeaderManager:
     def _escape_attr(v: str) -> str:
         if v is None:
             return ""
-        return str(v).replace('\\', '\\\\').replace('"', '\\"').replace('\n', ' ')
+        return (str(v).replace('\\', '\\\\')
+                .replace('"', '\\"')
+                .replace('\n', ' '))
 
     def update_epg_sources(self, sources: List[str]):
         self.epg_sources = list(sources)
@@ -258,9 +274,8 @@ class PlaylistHeaderManager:
         self.header_lines = [l for l in self.header_lines
                              if not l.startswith('#EXTM3U')]
         parts = ["#EXTM3U"]
-        epg_sources = list(self.epg_sources)
-        if epg_sources:
-            escaped = ",".join(self._escape_attr(x) for x in epg_sources)
+        if self.epg_sources:
+            escaped = ",".join(self._escape_attr(x) for x in self.epg_sources)
             parts.append(f'url-tvg="{escaped}"')
         for k, v in self.custom_attributes.items():
             parts.append(f'{self._escape_attr(k)}="{self._escape_attr(v)}"')

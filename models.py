@@ -2,14 +2,16 @@
 """ChannelData, Metadata, Link, Status, EPG-модели."""
 
 from __future__ import annotations
+
 import threading
 from contextlib import suppress
 from datetime import datetime
-from typing import Optional, Dict, Any, Tuple, List
 from enum import Enum
+from typing import Any, Dict, Optional, Tuple
+
 from PyQt6.QtGui import QColor
-from constants import (DEFAULT_GROUP, StatusText, URL_FG_COLORS,
-    EPG_ALLOWED_META_FIELDS)
+
+from constants import DEFAULT_GROUP, StatusText, URL_FG_COLORS
 from paths import logger, parse_datetime
 from utils import ChannelNameNormalizer
 
@@ -63,10 +65,10 @@ class ChannelLink:
         self.url: str = ""
         self.extinf: str = ""
         self.user_agent: str = ""
-        self.extvlcopt_lines: List[str] = []
+        self.extvlcopt_lines: list = []
         self.extra_headers: Dict[str, str] = {}
         self.has_url: bool = True
-        self.alternative_urls: List[str] = []
+        self.alternative_urls: list = []
         self.link_source: str = ""
 
     def copy(self) -> 'ChannelLink':
@@ -234,6 +236,15 @@ class ChannelData:
         object.__setattr__(c, 'original_index', self.original_index)
         return c
 
+    @staticmethod
+    def _escape(v: str) -> str:
+        if not v:
+            return ""
+        s = str(v)
+        s = s.replace('\r', ' ').replace('\n', ' ').replace('\t', ' ')
+        s = s.replace('\\', '\\\\').replace('"', '\\"')
+        return s
+
     def update_extinf(self):
         parts = ["#EXTINF:-1"]
         if self.tvg_id:
@@ -263,15 +274,6 @@ class ChannelData:
         parts.append(f',{self.name}')
         self.link.extinf = ' '.join(parts)
 
-    @staticmethod
-    def _escape(v: str) -> str:
-        if not v:
-            return ""
-        s = str(v)
-        s = s.replace('\r', ' ').replace('\n', ' ').replace('\t', ' ')
-        s = s.replace('\\', '\\\\').replace('"', '\\"')
-        return s
-
     def parse_extvlcopt_headers(self):
         self.link.extra_headers = {}
         self.link.user_agent = ""
@@ -298,17 +300,19 @@ class ChannelData:
     def update_extvlcopt_from_headers(self):
         self.link.extvlcopt_lines = []
         if self.link.user_agent:
+            ua = self._escape(self.link.user_agent)
             self.link.extvlcopt_lines.append(
-                f'#EXTVLCOPT:http-user-agent="{self._escape(self.link.user_agent)}"')
+                f'#EXTVLCOPT:http-user-agent="{ua}"')
         for k, v in self.link.extra_headers.items():
             if k.lower() == 'user-agent':
                 continue
+            ev = self._escape(v)
             if k.lower() == 'referer':
                 self.link.extvlcopt_lines.append(
-                    f'#EXTVLCOPT:http-referrer="{self._escape(v)}"')
+                    f'#EXTVLCOPT:http-referrer="{ev}"')
             else:
                 self.link.extvlcopt_lines.append(
-                    f'#EXTVLCOPT:http-header="{k}: {self._escape(v)}"')
+                    f'#EXTVLCOPT:http-header="{k}: {ev}"')
 
     def get_url_foreground(self) -> QColor:
         if not self.has_valid_url:

@@ -1,16 +1,19 @@
 # -*- coding: utf-8 -*-
-"""EPGDatabase."""
+"""EPGDatabase — база XMLTV с кэшем и нечётким поиском."""
 
 from __future__ import annotations
-import re
+
 import gzip
-import requests
+import re
 import threading
-from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Set, Tuple
 from collections import defaultdict
+from datetime import datetime, timedelta
 from difflib import SequenceMatcher
+from typing import Any, Dict, List, Optional, Set, Tuple
 from xml.etree import ElementTree as ET
+
+import requests
+
 from constants import (EPG_MAX_BYTES, EPG_SOURCE_TIMEOUT_SEC,
     EPG_CACHE_TTL_HOURS, EPG_FUZZY_CACHE_LIMIT,
     EPG_FUZZY_MIN_LENGTH_DEFAULT, EPG_FUZZY_MIN_GAP_DEFAULT,
@@ -21,7 +24,6 @@ from utils import ChannelNameNormalizer, _StopToken, cancelled
 
 
 def _new_session() -> requests.Session:
-    """Простая сессия, как в генераторе."""
     s = requests.Session()
     s.headers.update({
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
@@ -41,7 +43,7 @@ class EPGDatabase:
         self._channel_info: Dict[str, EPGChannelInfo] = {}
         self._channel_info_norm: Dict[str, str] = {}
         self._channel_info_lock = threading.RLock()
-        self._fuzzy_cache: Dict[str, Optional[str]] = {}
+        self._fuzzy_cache: Dict[Tuple[str, float, int, float], Optional[str]] = {}
         self._fuzzy_cache_lock = threading.RLock()
 
         self._channel_info_by_token: Dict[str, Set[str]] = defaultdict(set)
@@ -79,9 +81,8 @@ class EPGDatabase:
     @property
     def is_loaded(self) -> bool:
         with self._lock:
-            has_entries = bool(self._entries)
-        if has_entries:
-            return True
+            if self._entries:
+                return True
         with self._channel_info_lock:
             return bool(self._channel_info)
 
@@ -100,10 +101,10 @@ class EPGDatabase:
         tokens = ChannelNameNormalizer.token_set(text)
         with self._token_cache_lock:
             if len(self._token_cache) >= EPG_FUZZY_CACHE_LIMIT:
+                # удалить первые 1/8 записей
                 drop = max(1, len(self._token_cache) // 8)
                 for _ in range(drop):
-                    self._token_cache.pop(
-                        next(iter(self._token_cache)), None)
+                    self._token_cache.pop(next(iter(self._token_cache)), None)
             self._token_cache[text] = tokens
         return tokens
 
@@ -147,6 +148,7 @@ class EPGDatabase:
 
         source_prio = self._get_source_priority(source)
         info_to_cache: List[Dict[str, Any]] = []
+
         with self._channel_info_lock:
             for ch_el in root.findall('channel'):
                 if cancelled(stop_token):
@@ -179,7 +181,8 @@ class EPGDatabase:
                     norm_dn = ChannelNameNormalizer.normalize(info.display_name)
                     if norm_dn and norm_dn not in self._channel_info_norm:
                         self._channel_info_norm[norm_dn] = cid
-                for token in self._tokens_for(norm_id) | self._tokens_for(norm_dn):
+                for token in (self._tokens_for(norm_id) |
+                              self._tokens_for(norm_dn)):
                     self._channel_info_by_token[token].add(cid)
                 info_to_cache.append({
                     'channel_id': cid,
@@ -218,16 +221,19 @@ class EPGDatabase:
                         'desc': e.desc,
                         'category': e.category,
                     })
+
         if self.cache_manager:
             if to_cache:
                 self.cache_manager.save_epg_entries(to_cache, source)
             if info_to_cache:
                 self.cache_manager.save_epg_channels(info_to_cache, source)
+
         with self._fuzzy_cache_lock:
             self._fuzzy_cache.clear()
         return count
 
-    def load_from_urls(self, urls: List[str], timeout: int = EPG_SOURCE_TIMEOUT_SEC,
+    def load_from_urls(self, urls: List[str],
+                       timeout: int = EPG_SOURCE_TIMEOUT_SEC,
                        stop_token: Optional['_StopToken'] = None
                        ) -> Tuple[int, List[str]]:
         total = 0
@@ -346,15 +352,14 @@ class EPGDatabase:
                           fuzzy_min_length: int = EPG_FUZZY_MIN_LENGTH_DEFAULT,
                           fuzzy_min_gap: float = EPG_FUZZY_MIN_GAP_DEFAULT
                           ) -> Optional[EPGChannelInfo]:
+        # 1) Прямые совпадения по tvg_id / tvg_name / name
         with self._channel_info_lock:
             if not self._channel_info:
                 return None
-
             if channel.meta.tvg_id:
                 info = self._channel_info.get(channel.meta.tvg_id)
                 if info:
                     return info
-
             if channel.meta.tvg_name:
                 norm = ChannelNameNormalizer.normalize(channel.meta.tvg_name)
                 if norm:
@@ -363,7 +368,6 @@ class EPGDatabase:
                         info = self._channel_info.get(cid)
                         if info:
                             return info
-
             if channel.meta.name:
                 norm = ChannelNameNormalizer.normalize(channel.meta.name)
                 if norm:
@@ -373,64 +377,72 @@ class EPGDatabase:
                         if info:
                             return info
 
-            if (fuzzy_threshold >= 1.0 or not channel.meta.name
-                    or not channel.meta.name.strip()):
-                return None
+        # 2) Нечёткий поиск
+        if (fuzzy_threshold >= 1.0 or not channel.meta.name
+                or not channel.meta.name.strip()):
+            return None
 
-            target = ChannelNameNormalizer.normalize(channel.meta.name)
-            if not target or len(target) < fuzzy_min_length:
-                return None
+        target = ChannelNameNormalizer.normalize(channel.meta.name)
+        if not target or len(target) < fuzzy_min_length:
+            return None
 
-            cache_key = (target, float(fuzzy_threshold),
-                         int(fuzzy_min_length), float(fuzzy_min_gap))
-            with self._fuzzy_cache_lock:
-                if cache_key in self._fuzzy_cache:
-                    cached_cid = self._fuzzy_cache[cache_key]
-                    return self._channel_info.get(cached_cid) if cached_cid else None
+        cache_key = (target, float(fuzzy_threshold),
+                     int(fuzzy_min_length), float(fuzzy_min_gap))
+        with self._fuzzy_cache_lock:
+            if cache_key in self._fuzzy_cache:
+                cached_cid = self._fuzzy_cache[cache_key]
+                if cached_cid is None:
+                    return None
+                with self._channel_info_lock:
+                    return self._channel_info.get(cached_cid)
 
-            target_tokens = self._tokens_for(target)
+        # Снимок кандидатов под lock, а тяжёлые вычисления — снаружи
+        target_tokens = self._tokens_for(target)
+        snapshot: List[Tuple[str, str]] = []
+        with self._channel_info_lock:
             if target_tokens:
                 cid_set: Set[str] = set()
-                with self._channel_info_lock:
-                    for t in target_tokens:
-                        cid_set |= self._channel_info_by_token.get(t, set())
-                    snapshot = [
-                        (c, ChannelNameNormalizer.normalize(
-                            self._channel_info[c].display_name or c))
-                        for c in cid_set if c in self._channel_info
-                    ]
+                for t in target_tokens:
+                    cid_set |= self._channel_info_by_token.get(t, set())
+                for c in cid_set:
+                    ci = self._channel_info.get(c)
+                    if ci is None:
+                        continue
+                    snapshot.append((c, ChannelNameNormalizer.normalize(
+                        ci.display_name or c)))
             else:
-                with self._channel_info_lock:
-                    snapshot = [(cid, norm)
-                                for norm, cid in self._channel_info_norm.items()]
+                for norm, cid in self._channel_info_norm.items():
+                    snapshot.append((cid, norm))
 
-            candidates: List[Tuple[float, str]] = []
-            for cid, norm_key in snapshot:
-                if not norm_key or len(norm_key) < fuzzy_min_length:
-                    continue
-                score = SequenceMatcher(None, target, norm_key).ratio()
-                if score >= fuzzy_threshold:
-                    candidates.append((score, cid))
+        candidates: List[Tuple[float, str]] = []
+        for cid, norm_key in snapshot:
+            if not norm_key or len(norm_key) < fuzzy_min_length:
+                continue
+            score = SequenceMatcher(None, target, norm_key).ratio()
+            if score >= fuzzy_threshold:
+                candidates.append((score, cid))
 
-            best_cid: Optional[str] = None
-            if candidates:
-                candidates.sort(reverse=True)
-                if len(candidates) == 1 or \
-                        (candidates[0][0] - candidates[1][0]) >= fuzzy_min_gap:
-                    best_cid = candidates[0][1]
-                    logger.info(
-                        f"EPG fuzzy match: '{channel.meta.name}' -> "
-                        f"cid={best_cid} score={candidates[0][0]:.3f}")
+        best_cid: Optional[str] = None
+        if candidates:
+            candidates.sort(reverse=True)
+            if len(candidates) == 1 or \
+                    (candidates[0][0] - candidates[1][0]) >= fuzzy_min_gap:
+                best_cid = candidates[0][1]
+                logger.info(
+                    f"EPG fuzzy match: '{channel.meta.name}' -> "
+                    f"cid={best_cid} score={candidates[0][0]:.3f}")
 
-            with self._fuzzy_cache_lock:
-                if len(self._fuzzy_cache) >= EPG_FUZZY_CACHE_LIMIT:
-                    drop = max(1, len(self._fuzzy_cache) // 8)
-                    for _ in range(drop):
-                        self._fuzzy_cache.pop(
-                            next(iter(self._fuzzy_cache)), None)
-                self._fuzzy_cache[cache_key] = best_cid
+        with self._fuzzy_cache_lock:
+            if len(self._fuzzy_cache) >= EPG_FUZZY_CACHE_LIMIT:
+                drop = max(1, len(self._fuzzy_cache) // 8)
+                for _ in range(drop):
+                    self._fuzzy_cache.pop(next(iter(self._fuzzy_cache)), None)
+            self._fuzzy_cache[cache_key] = best_cid
 
-            return self._channel_info.get(best_cid) if best_cid else None
+        if best_cid is None:
+            return None
+        with self._channel_info_lock:
+            return self._channel_info.get(best_cid)
 
     def get_channel_source(self, cid: str) -> str:
         with self._channel_info_lock:

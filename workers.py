@@ -1,27 +1,30 @@
 # -*- coding: utf-8 -*-
-"""BaseWorker + все воркеры."""
+"""BaseWorker и все воркеры."""
 
 from __future__ import annotations
-import time
-import threading
+
 import concurrent.futures
+import threading
+import time
 from contextlib import suppress
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple
+
 from PyQt6.QtCore import QThread, pyqtSignal
-from constants import (URL_CHECK_MAX_WORKERS, VLC_DEFAULT_CHECK_TIMEOUT,
+
+from config import Config, LinkReplacementSettings
+from constants import (URL_CHECK_MAX_WORKERS,
     CHECK_RESULT_CACHE_TTL_HOURS, SOURCE_CHECK_WORKERS_DEFAULT,
     SOURCE_CHECK_TIMEOUT_DEFAULT, SOURCE_CHECK_TRUST_SEC_DEFAULT,
     SOURCE_CHECK_BATCH_SIZE_DEFAULT, REPLACEMENT_MAX_WORKERS_DEFAULT,
     SEARCH_WORKER_MAX, EPG_FUZZY_ENABLED_DEFAULT,
     EPG_FUZZY_THRESHOLD_DEFAULT, EPG_FUZZY_MIN_LENGTH_DEFAULT,
     EPG_FUZZY_MIN_GAP_DEFAULT, EPG_SOURCE_TIMEOUT_SEC)
+from epg import EPGDatabase
 from models import ChannelData, LinkQuality
 from paths import logger
-from utils import URLUtils, _StopToken, cancelled
-from config import Config, LinkReplacementSettings
 from sources import LinkSource, LinkSourceManager
-from epg import EPGDatabase
+from utils import URLUtils, _StopToken
 
 
 class BaseWorker(QThread):
@@ -92,11 +95,8 @@ class LinkReplacementWorker(BaseWorker):
                     except Exception:
                         logger.exception("preload source")
             finally:
-                try:
+                with suppress(Exception):
                     ex.shutdown(wait=False, cancel_futures=True)
-                except TypeError:
-                    with suppress(Exception):
-                        ex.shutdown(wait=False)
             logger.info(
                 f"LinkReplacementWorker: предзагружено источников "
                 f"{len(sources)}")
@@ -153,11 +153,8 @@ class LinkReplacementWorker(BaseWorker):
                     except Exception:
                         logger.exception("replace worker")
             finally:
-                try:
+                with suppress(Exception):
                     ex.shutdown(wait=False, cancel_futures=True)
-                except TypeError:
-                    with suppress(Exception):
-                        ex.shutdown(wait=False)
 
             self.replacement_done.emit(self._replaced_count, total)
         except Exception as e:
@@ -226,7 +223,7 @@ class LinkReplacementWorker(BaseWorker):
                     return None
                 if s.is_blacklisted(url) or s.is_filtered_domain(url):
                     continue
-                if URLUtils._validate_url(url) is None:
+                if URLUtils.validate_url(url) is None:
                     logger.info(
                         f"[REPL] {channel.meta.name}: alive_hit "
                         f"urls={len(alive_urls)} "
@@ -241,12 +238,12 @@ class LinkReplacementWorker(BaseWorker):
             alts = self.source_manager.search_channel(
                 channel.meta.name, s, stop_token=self._stop_token,
                 config=self.config)
-            candidates: List[str] = []
-            candidates.extend(
+            candidates: List[str] = [
                 a.link.url for a in alts
                 if a.link.url and a.link.url.strip()
                 and not s.is_blacklisted(a.link.url)
-                and not s.is_filtered_domain(a.link.url))
+                and not s.is_filtered_domain(a.link.url)
+            ]
 
             seen: Set[str] = set()
             all_urls: List[str] = []
@@ -269,7 +266,7 @@ class LinkReplacementWorker(BaseWorker):
             for u in trusted:
                 if self.is_stopped():
                     return None
-                if URLUtils._validate_url(u) is None:
+                if URLUtils.validate_url(u) is None:
                     logger.info(
                         f"[REPL] {channel.meta.name}: "
                         f"trusted={len(trusted)} found_trusted, "
@@ -312,11 +309,18 @@ class SourceUrlCheckWorker(BaseWorker):
         self.channels = list(channels)
         self.cache_manager = cache_manager
         self.max_workers = max(1, min(int(max_workers), 32))
-        self.timeout = max(int(timeout), VLC_DEFAULT_CHECK_TIMEOUT)
+        self.timeout = max(int(timeout), 3)
         self.trust_sec = int(trust_sec)
         self.batch_size = max(1, int(batch_size))
+        self.verify_ssl = False
+        try:
+            from ksenia_window import ApplicationCore
+            self.verify_ssl = bool(
+                ApplicationCore.instance().config.get('verify_ssl', False))
+        except Exception:
+            pass
 
-        self._settings = None
+        self._settings: Optional[LinkReplacementSettings] = None
         self._bl_names: Set[str] = set()
         self._bl_tvgs: Set[str] = set()
         self._skip_count_channel = 0
@@ -334,8 +338,7 @@ class SourceUrlCheckWorker(BaseWorker):
         if self._settings is None:
             self._settings = core.link_replacement_settings
         try:
-            bl = core.blacklist_manager.get_all()
-            for bi in bl:
+            for bi in core.blacklist_manager.get_all():
                 n = (bi.get('name') or '').strip().lower()
                 t = (bi.get('tvg_id') or '').strip().lower()
                 if n:
@@ -427,9 +430,7 @@ class SourceUrlCheckWorker(BaseWorker):
             pending_lock = threading.Lock()
 
             def flush_batch(items):
-                if not items:
-                    return
-                if self.cache_manager is None:
+                if not items or self.cache_manager is None:
                     return
                 try:
                     self.cache_manager.save_check_results_batch(items)
@@ -454,9 +455,8 @@ class SourceUrlCheckWorker(BaseWorker):
                     return
                 try:
                     ok, rt, msg, code = URLUtils.check_url(
-                        url, self.timeout, verify_ssl=False,
-                        max_retries=0, retry_delay=0.0,
-                        stop_token=self._stop_token, pool_size=4)
+                        url, self.timeout, verify_ssl=self.verify_ssl,
+                        stop_token=self._stop_token)
                 except Exception as e:
                     ok, rt, msg, code = False, 0.0, \
                                           f"exception: {str(e)[:40]}", None
@@ -504,28 +504,20 @@ class SourceUrlCheckWorker(BaseWorker):
             try:
                 futures = [executor.submit(check_one, ch)
                            for ch in to_check]
-                last_emit_count = 0
+                last_emit = 0
                 for fut in concurrent.futures.as_completed(futures):
                     if self.is_stopped():
                         for f in futures:
                             f.cancel()
                         break
                     cur = checked
-                    if cur - last_emit_count >= 5 or cur == len(to_check):
-                        last_emit_count = cur
+                    if cur - last_emit >= 5 or cur == len(to_check):
+                        last_emit = cur
                         self.source_check_progress.emit(
                             self.source_name, cur, total)
-                    if cur % 500 == 0 and cur > 0:
-                        logger.info(
-                            f"[SourceUrlCheckWorker {self.source_name}] "
-                            f"checked={cur}/{len(to_check)}, "
-                            f"working={working}")
-                    time.sleep(0)
             finally:
-                try:
+                with suppress(Exception):
                     executor.shutdown(wait=False, cancel_futures=True)
-                except TypeError:
-                    executor.shutdown(wait=False)
 
             with pending_lock:
                 leftover = pending[:]
@@ -548,7 +540,7 @@ class SourcesRefreshWorker(BaseWorker):
 
     Трёхфазная шкала прогресса (0..100):
       • Фаза 1 (0..40%)  — загрузка источников
-      • Фаза 2 (40..90%) — проверка URL (агрегируется по всем источникам)
+      • Фаза 2 (40..90%) — проверка URL
       • Фаза 3 (90..100%) — rebuild_alive_index
     """
 
@@ -568,9 +560,8 @@ class SourcesRefreshWorker(BaseWorker):
         self.manager = manager
         self.config = config
         self.check_urls = bool(check_urls)
-        self._child_workers: List['SourceUrlCheckWorker'] = []
+        self._child_workers: List[SourceUrlCheckWorker] = []
 
-        # Агрегация прогресса фазы 2
         self._phase2_lock = threading.Lock()
         self._phase2_weights: Dict[str, int] = {}
         self._phase2_checked: Dict[str, int] = {}
@@ -607,11 +598,8 @@ class SourcesRefreshWorker(BaseWorker):
                 except Exception:
                     logger.exception("_run_in_pool")
         finally:
-            try:
+            with suppress(Exception):
                 ex.shutdown(wait=False, cancel_futures=True)
-            except TypeError:
-                with suppress(Exception):
-                    ex.shutdown(wait=False)
 
     def _load_one(self, source: LinkSource):
         self.manager.invalidate_cache(source.name)
@@ -633,7 +621,6 @@ class SourcesRefreshWorker(BaseWorker):
             self.source_checked.emit(name, working, total)
 
     def _on_child_progress(self, name: str, cur: int, tot: int):
-        """Агрегирует прогресс дочерних воркеров в общий диапазон 40..90%."""
         with self._phase2_lock:
             weight = self._phase2_weights.get(name, tot)
             self._phase2_checked[name] = min(int(cur), int(weight))
@@ -644,7 +631,6 @@ class SourcesRefreshWorker(BaseWorker):
         pct = self.PHASE1_END + int(checked_sum / total_sum * span)
         if pct > self.PHASE2_END:
             pct = self.PHASE2_END
-        # Дросселирование: не эмитим, если процент не изменился
         if pct <= self._last_phase2_pct:
             return
         self._last_phase2_pct = pct
@@ -661,7 +647,7 @@ class SourcesRefreshWorker(BaseWorker):
                 self.all_done.emit(0, 0)
                 return
 
-            # === ФАЗА 1: загрузка источников (0..40%) ===
+            # === ФАЗА 1: загрузка ===
             loaded: List[Tuple[LinkSource, List[ChannelData]]] = []
             span1 = self.PHASE1_END
             for cnt, src, chs in self._run_in_pool(
@@ -682,7 +668,6 @@ class SourcesRefreshWorker(BaseWorker):
                 return
 
             if not self.check_urls:
-                # Без проверки URL — сразу к фазе 3
                 self._phase3_rebuild(loaded)
                 self.all_done.emit(success, total)
                 return
@@ -696,7 +681,7 @@ class SourcesRefreshWorker(BaseWorker):
             batch_size = int(self.config.get(
                 'source_check_batch_size', SOURCE_CHECK_BATCH_SIZE_DEFAULT))
 
-            # === ФАЗА 2: проверка URL (40..90%) ===
+            # === ФАЗА 2: проверка URL ===
             workers: List[SourceUrlCheckWorker] = []
             for src, chs in loaded:
                 if self.is_stopped():
@@ -721,7 +706,6 @@ class SourcesRefreshWorker(BaseWorker):
                 workers.append(w)
             self._child_workers = workers
 
-            # Настраиваем веса и общий знаменатель для агрегации
             with self._phase2_lock:
                 self._phase2_weights = {}
                 self._phase2_checked = {}
@@ -731,13 +715,11 @@ class SourcesRefreshWorker(BaseWorker):
                 self._phase2_total = sum(self._phase2_weights.values())
                 self._last_phase2_pct = self.PHASE1_END
 
-            # Если проверять нечего — сразу к фазе 3
             if not workers or self._phase2_total == 0:
                 self._phase3_rebuild(loaded)
                 self.all_done.emit(success, total)
                 return
 
-            # Эмитим стартовое значение фазы 2
             self.progress.emit(
                 self.PHASE1_END, self.PHASE3_END,
                 f"[2/3] Проверка URL: 0/{self._phase2_total}")
@@ -747,7 +729,6 @@ class SourcesRefreshWorker(BaseWorker):
                     break
                 w.start()
 
-            # Ожидание завершения дочерних воркеров
             while any(w.isRunning() for w in workers):
                 if self.is_stopped():
                     for w in workers:
@@ -760,7 +741,6 @@ class SourcesRefreshWorker(BaseWorker):
                 with suppress(Exception):
                     w.wait(5000)
 
-            # Гарантируем достижение границы фазы 2
             self._last_phase2_pct = self.PHASE2_END
             self.progress.emit(
                 self.PHASE2_END, self.PHASE3_END,
@@ -770,7 +750,7 @@ class SourcesRefreshWorker(BaseWorker):
                 self.all_done.emit(success, total)
                 return
 
-            # === ФАЗА 3: rebuild_alive_index (90..100%) ===
+            # === ФАЗА 3: rebuild_alive_index ===
             self._phase3_rebuild(loaded)
 
             self.all_done.emit(success, total)
@@ -783,8 +763,8 @@ class SourcesRefreshWorker(BaseWorker):
             self._child_workers = []
             self.worker_done.emit()
 
-    def _phase3_rebuild(self, loaded: List[Tuple[LinkSource, List[ChannelData]]]):
-        """Rebuild индексов с прогрессом 90..100%."""
+    def _phase3_rebuild(self,
+                        loaded: List[Tuple[LinkSource, List[ChannelData]]]):
         if not loaded:
             self.progress.emit(
                 self.PHASE3_END, self.PHASE3_END, "[3/3] Готово")
@@ -839,6 +819,7 @@ class EPGMetadataApplyWorker(BaseWorker):
     def __init__(self, channels: List[ChannelData], epg_db: EPGDatabase,
                  config: Optional[Config] = None):
         super().__init__()
+        # Сохраняем только uid + имя + tvg_id + tvg_name (не весь объект)
         self._channels = [(ch.uid, ch.meta.name or "",
                            ch.meta.tvg_id or "",
                            ch.meta.tvg_name or "")
@@ -881,6 +862,8 @@ class EPGMetadataApplyWorker(BaseWorker):
             sources: Dict[int, str] = {}
             processed = 0
 
+            # Переиспользуем один объект ChannelData
+            tmp = ChannelData()
             for uid, name, tvg_id, tvg_name in self._channels:
                 if self.is_stopped():
                     break
@@ -890,7 +873,6 @@ class EPGMetadataApplyWorker(BaseWorker):
                         int(processed / total * 100), 100,
                         f"EPG-метаданные: {processed}/{total}")
 
-                tmp = ChannelData()
                 tmp.meta.name = name
                 tmp.meta.tvg_id = tvg_id
                 tmp.meta.tvg_name = tvg_name

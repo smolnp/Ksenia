@@ -2,12 +2,14 @@
 """Config, LinkReplacementSettings."""
 
 from __future__ import annotations
-import os
-import json
+
 import copy
+import json
+import os
 import threading
 from contextlib import suppress
 from typing import Any, Dict, Optional
+
 from constants import (URL_CHECK_MAX_WORKERS, FALLBACK_DAYS_DEFAULT,
     EPG_CACHE_TTL_HOURS, CHECK_RESULT_CACHE_TTL_HOURS,
     EPG_FUZZY_ENABLED_DEFAULT, EPG_FUZZY_THRESHOLD_DEFAULT,
@@ -84,6 +86,11 @@ class Config:
         'source_check_trust_sec': SOURCE_CHECK_TRUST_SEC_DEFAULT,
         'source_check_batch_size': SOURCE_CHECK_BATCH_SIZE_DEFAULT,
         'apply_filters_on_file_open': True,
+        'sources_finder_bootstrap_defaults_on_empty': True,
+        'sources_finder_auto_load_after_add': True,
+        'sources_finder_include_github': True,
+        'sources_finder_include_m3uguide': True,
+        'sources_finder_include_fast': True,
     }
 
     def __init__(self, config_path: Optional[str] = None):
@@ -94,7 +101,7 @@ class Config:
         self.config_path = config_path
         self.config: Dict[str, Any] = copy.deepcopy(self.DEFAULT)
         self._lock = threading.RLock()
-        self._types: Dict[str, type] = _build_config_types(self.DEFAULT)
+        self._types = _build_config_types(self.DEFAULT)
         self._load()
 
     def _coerce(self, key: str, value: Any) -> Any:
@@ -137,10 +144,6 @@ class Config:
                 data = json.load(f)
             if isinstance(data, dict):
                 for k, v in data.items():
-                    if k in ('whitelisted_ips', 'whitelisted_domains',
-                             'prioritize_whitelisted',
-                             'blacklisted_domains', 'blacklisted_ips'):
-                        continue
                     self.config[k] = self._coerce(k, v)
                 logger.info(f"Config: загружено {len(data)} ключей")
         except json.JSONDecodeError:
@@ -195,6 +198,8 @@ def _build_config_types(default: Dict[str, Any]) -> Dict[str, type]:
 
 
 class LinkReplacementSettings:
+    """Прокси к Config: атрибуты читаются/пишутся как поля Config."""
+
     __slots__ = ('_config',)
 
     def __init__(self, config: Config):
@@ -225,11 +230,8 @@ class LinkReplacementSettings:
     def is_filtered_domain(self, url: str) -> bool:
         if not url:
             return False
-        try:
-            from utils import URLUtils
-            host = URLUtils.extract_host(url) or ''
-        except Exception:
-            host = ''
+        from utils import URLUtils
+        host = URLUtils.extract_host(url) or ''
         if host:
             for d in list(self.temporary_domains) + list(self.unsafe_domains):
                 dn = (d or '').strip().lower().strip('.')
@@ -239,10 +241,10 @@ class LinkReplacementSettings:
                     return True
             return False
         u = url.lower()
-        return any((d or '').lower() in u
-                   for d in self.temporary_domains) or \
-               any((d or '').lower() in u
-                   for d in self.unsafe_domains)
+        return (any((d or '').lower() in u
+                    for d in self.temporary_domains) or
+                any((d or '').lower() in u
+                    for d in self.unsafe_domains))
 
     def get_replace_timeout(self) -> int:
         if self._config.get('fast_replacement_mode', True):

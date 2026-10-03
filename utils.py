@@ -2,20 +2,22 @@
 """URLUtils, ChannelNameNormalizer, _StopToken."""
 
 from __future__ import annotations
+
+import ipaddress
 import re
-import time
 import socket
 import threading
-import ipaddress
-from contextlib import suppress
+import time
 from difflib import SequenceMatcher
-from typing import Optional, Tuple, Set
+from typing import Optional, Set, Tuple
 from urllib.parse import urlparse
+
 import requests
 import urllib3
+
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 from constants import MAX_URL_LENGTH, StatusText
-from paths import logger
 
 
 class ChannelNameNormalizer:
@@ -230,7 +232,7 @@ class URLUtils:
         return f"⚠️ HTTP {status_code}", status_code
 
     @staticmethod
-    def _url_error(url: str) -> Optional[str]:
+    def validate_url(url: str) -> Optional[str]:
         """None = URL валиден. Строка = текст ошибки."""
         try:
             p = urlparse(url)
@@ -256,12 +258,13 @@ class URLUtils:
                 return "URL без пути на нестандартном порту"
         return None
 
-    _validate_url = _url_error
-
     @staticmethod
-    def _check_url_single(url, timeout, verify_ssl, user_agent="",
-                          referrer="", extra_headers=None):
-        """Дословная копия NetworkValidator.test_network_connectivity."""
+    def _check_url_single(url: str, timeout: int, verify_ssl: bool,
+                          user_agent: str = "", referrer: str = "",
+                          extra_headers=None
+                          ) -> Tuple[Optional[bool], Optional[float],
+                                     str, Optional[int]]:
+        """Единственный реальный HTTP-чек ссылки в проекте."""
         try:
             parsed = urlparse(url)
             hostname = parsed.hostname
@@ -269,7 +272,7 @@ class URLUtils:
                 try:
                     socket.gethostbyname(hostname)
                 except socket.gaierror:
-                    return False, 0, "DNS резолвинг не удался", None
+                    return False, 0.0, "DNS резолвинг не удался", None
 
             start_time = time.time()
             session = requests.Session()
@@ -289,7 +292,7 @@ class URLUtils:
             try:
                 with session.get(
                     url, timeout=timeout, allow_redirects=True,
-                    verify=False, stream=True,
+                    verify=verify_ssl, stream=True,
                 ) as response:
                     response_time = time.time() - start_time
                     code = response.status_code
@@ -303,28 +306,26 @@ class URLUtils:
             except requests.Timeout:
                 return False, timeout, "Превышен таймаут", None
             except requests.ConnectionError:
-                return False, 0, "Ошибка соединения", None
+                return False, 0.0, "Ошибка соединения", None
             except Exception as e:
-                return False, 0, f"Ошибка: {str(e)[:60]}", None
+                return False, 0.0, f"Ошибка: {str(e)[:60]}", None
             finally:
                 try:
                     session.close()
                 except Exception:
                     pass
         except Exception as e:
-            return False, 0, f"Критическая ошибка: {str(e)[:60]}", None
+            return False, 0.0, f"Критическая ошибка: {str(e)[:60]}", None
 
     @staticmethod
     def check_url(url: str, timeout: int = 3,
                   verify_ssl: bool = False,
-                  max_retries: int = 0,
-                  retry_delay: float = 0.5,
-                  stop_token=None,
-                  pool_size: int = 4,
+                  stop_token: Optional['_StopToken'] = None,
                   user_agent: str = "",
                   referrer: str = "",
                   extra_headers=None
-                  ) -> Tuple[Optional[bool], Optional[float], str, Optional[int]]:
+                  ) -> Tuple[Optional[bool], Optional[float],
+                             str, Optional[int]]:
         """ЕДИНСТВЕННЫЙ механизм проверки ссылок в Ksenia."""
         if not url or not url.strip():
             return False, None, "Пустой URL", None

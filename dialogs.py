@@ -1,55 +1,55 @@
 # -*- coding: utf-8 -*-
-"""Все QDialog-классы + IconProvider + фабрики."""
+"""Все QDialog-классы + IconProvider + фабрики + HelpBrowser."""
 
 from __future__ import annotations
+
+import json
 import os
 import re
-import json
-import time
 import threading
+import time
 import weakref
 from contextlib import suppress
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Set, Tuple, Callable
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 
-from PyQt6.QtCore import Qt, QPoint, pyqtSignal, QThread
-from PyQt6.QtGui import (QAction, QKeySequence, QColor, QFont, QBrush,
-    QTextCharFormat, QSyntaxHighlighter, QIcon)
-from PyQt6.QtWidgets import (QDialog, QDialogButtonBox, QVBoxLayout,
-    QHBoxLayout, QFormLayout, QLabel, QLineEdit, QPushButton,
-    QComboBox, QSpinBox, QDoubleSpinBox, QCheckBox, QRadioButton,
-    QButtonGroup, QGroupBox, QTableWidget, QTableWidgetItem,
-    QHeaderView, QAbstractItemView, QListWidget, QMessageBox,
-    QProgressBar, QFrame, QTextEdit, QPlainTextEdit, QInputDialog,
-    QStyle, QMenu, QSlider, QApplication,
-    QWidget, QTabWidget)
+from PyQt6.QtCore import (Qt, QPoint, QTimer, QUrl, pyqtSignal, QThread)
+from PyQt6.QtGui import (QAction, QBrush, QColor, QDesktopServices,
+    QFont, QIcon, QKeySequence, QShortcut)
+from PyQt6.QtWidgets import (QAbstractItemView, QApplication,
+    QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
+    QDoubleSpinBox, QFormLayout, QFrame, QGroupBox, QHBoxLayout,
+    QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget,
+    QListWidgetItem, QMenu, QMessageBox, QPlainTextEdit, QProgressBar,
+    QPushButton, QRadioButton, QSlider, QSpinBox, QSplitter,
+    QStyle, QTabWidget, QTableWidget, QTableWidgetItem, QTextBrowser,
+    QTextEdit, QVBoxLayout, QWidget)
 
-from constants import (OK_CANCEL_BB, CLOSE_BB, YES_NO, M3U_FILTER,
-    JSON_FILTER, CSV_FILTER, ALL_FILTER, DEFAULT_GROUP,
-    GROUP_FILTER_ALL, THEME_ICON_NEGATIVE_TTL_SEC,
-    DUPLICATE_DIALOG_MAX_ROWS, APP_VERSION, DONATION_WALLET,
-    DONATION_URL, EPG_FUZZY_ENABLED_DEFAULT, EPG_FUZZY_THRESHOLD_DEFAULT,
-    EPG_FUZZY_MIN_LENGTH_DEFAULT, EPG_FUZZY_MIN_GAP_DEFAULT,
-    SOURCE_CHECK_WORKERS_DEFAULT, SOURCE_CHECK_TIMEOUT_DEFAULT,
-    SOURCE_CHECK_TRUST_SEC_DEFAULT, SOURCE_CHECK_BATCH_SIZE_DEFAULT,
-    CHECK_RESULT_CACHE_TTL_HOURS, EPG_CACHE_TTL_HOURS,
-    REPLACEMENT_MAX_WORKERS_DEFAULT,
-    URL_CHECK_MAX_WORKERS, VLC_DEFAULT_CHECK_TIMEOUT,
-    FALLBACK_DAYS_DEFAULT)
-from models import ChannelData
-from paths import (logger, error_box, warn_box, info_box, confirm,
-    confirm_three, open_file_dialog, save_file_dialog, open_dir_dialog,
-    open_external)
-from utils import URLUtils
+from constants import (ALL_FILTER, APP_VERSION, CHECK_RESULT_CACHE_TTL_HOURS,
+    CLOSE_BB, CSV_FILTER, DEFAULT_GROUP, DONATION_URL, DONATION_WALLET,
+    DUPLICATE_DIALOG_MAX_ROWS, EPG_CACHE_TTL_HOURS,
+    EPG_FUZZY_ENABLED_DEFAULT, EPG_FUZZY_MIN_GAP_DEFAULT,
+    EPG_FUZZY_MIN_LENGTH_DEFAULT, EPG_FUZZY_THRESHOLD_DEFAULT,
+    FALLBACK_DAYS_DEFAULT, GROUP_FILTER_ALL, JSON_FILTER, M3U_FILTER,
+    OK_CANCEL_BB, REPLACEMENT_MAX_WORKERS_DEFAULT,
+    SOURCE_CHECK_BATCH_SIZE_DEFAULT, SOURCE_CHECK_TIMEOUT_DEFAULT,
+    SOURCE_CHECK_TRUST_SEC_DEFAULT, SOURCE_CHECK_WORKERS_DEFAULT,
+    SOURCES_FINDER_MAX_GITHUB_DEFAULT,
+    SOURCES_FINDER_MAX_M3UGUIDE_DEFAULT,
+    SOURCES_FINDER_UPDATE_INTERVAL_HOURS, THEME_ICON_NEGATIVE_TTL_SEC,
+    URL_CHECK_MAX_WORKERS, VLC_DEFAULT_CHECK_TIMEOUT, YES_NO)
+from blacklists import (DomainUserAgentManager, DomainUserAgentRule)
 from config import Config
+from diff_utils import (DiffLine, DiffOp, channels_only, diff_lines,
+    diff_stats, normalize_lines, to_unified_diff)
+from models import ChannelData
+from paths import (Paths, confirm, confirm_three, error_box, info_box,
+    logger, open_external, open_file_dialog, save_file_dialog, warn_box)
 from sources import LinkSource, LinkSourceManager
-from blacklists import (DomainUserAgentManager, DomainBlacklistRule,
-    DomainUserAgentRule)
 from undo import SimpleDuplicateFinder
+from utils import URLUtils
 from workers import SourcesRefreshWorker
-from diff_utils import (DiffOp, DiffLine, diff_lines, diff_stats,
-    to_unified_diff, normalize_lines, channels_only)
 
 try:
     import shiboken6
@@ -59,9 +59,9 @@ except ImportError:
     _HAS_SHIBOKEN = False
 
 
-# ---------------------------------------------------------------------
-# Цвета подсветки diff
-# ---------------------------------------------------------------------
+# =====================================================================
+# Вспомогательные функции
+# =====================================================================
 _COLOR_ADD_BG = QColor(220, 255, 220)
 _COLOR_DEL_BG = QColor(255, 220, 220)
 _COLOR_REPL_BG = QColor(255, 250, 200)
@@ -89,6 +89,9 @@ def _is_gui_thread() -> bool:
         return True
 
 
+# =====================================================================
+# IconProvider
+# =====================================================================
 class IconProvider:
     _icons_enabled: bool = True
     _cache: Dict[Tuple[str, int], QIcon] = {}
@@ -111,16 +114,15 @@ class IconProvider:
 
     @classmethod
     def _theme_icon(cls, theme_name: str) -> Optional[QIcon]:
-        if not theme_name:
-            return None
-        if not _is_gui_thread():
+        if not theme_name or not _is_gui_thread():
             return None
         now = time.time()
         with cls._cache_lock:
             entry = cls._theme_available_cache.get(theme_name)
             if entry is not None:
                 available, ts = entry
-                if available is False and (now - ts) < THEME_ICON_NEGATIVE_TTL_SEC:
+                if (available is False
+                        and (now - ts) < THEME_ICON_NEGATIVE_TTL_SEC):
                     return None
         try:
             icon = QIcon.fromTheme(theme_name)
@@ -137,9 +139,7 @@ class IconProvider:
     @classmethod
     def get(cls, sp: Optional[QStyle.StandardPixmap] = None,
             theme_name: str = "") -> QIcon:
-        if not cls._icons_enabled:
-            return QIcon()
-        if not _is_gui_thread():
+        if not cls._icons_enabled or not _is_gui_thread():
             return QIcon()
         key = (theme_name, int(sp) if sp is not None else -1)
         with cls._cache_lock:
@@ -178,6 +178,7 @@ class IconProvider:
 
 class _NumericItem(QTableWidgetItem):
     """QTableWidgetItem с числовым сравнением для сортировки."""
+
     def __init__(self, value: int):
         super().__init__(str(value))
         self._value = int(value)
@@ -187,15 +188,15 @@ class _NumericItem(QTableWidgetItem):
         if isinstance(other, _NumericItem):
             return self._value < other._value
         try:
-            other_val = int(other.text())
-            return self._value < other_val
+            return self._value < int(other.text())
         except (ValueError, AttributeError):
             return super().__lt__(other)
 
 
+# =====================================================================
+# BaseDialog + фабрики
+# =====================================================================
 class BaseDialog(QDialog):
-    __slots__ = ('root',)
-
     def __init__(self, title: str, parent=None,
                  size: Tuple[int, int] = (400, 300)):
         super().__init__(parent)
@@ -256,7 +257,7 @@ def make_action(parent, text: str, slot: Callable,
 
 
 def fill_channels_table(table: QTableWidget,
-                        channels: List['ChannelData'],
+                        channels: List[ChannelData],
                         max_url: int = 120):
     table.setRowCount(len(channels))
     for i, ch in enumerate(channels):
@@ -311,38 +312,340 @@ def json_export_dialog(parent, title: str, default_name: str,
         return False
 
 
+# =====================================================================
+# HelpBrowser — встроенный просмотрщик справки
+# =====================================================================
+class HelpBrowser(QDialog):
+    """Встроенный просмотрщик справки (index.html + соседние файлы).
+
+    Стиль DEFAULT_CSS применяется ко всем документам через
+    document().setDefaultStyleSheet(). Файлы справки НЕ должны
+    содержать собственных <style>.
+    """
+
+    DEFAULT_CSS = """
+        html, body, div, h1, h2, h3, h4, h5, h6, p, pre,
+        ol, ul, li, table, thead, tbody, tr, th, td,
+        blockquote, code, kbd, span, a, hr {
+            margin: 0;
+            padding: 0;
+        }
+        body {
+            background-color: #fbfbfe;
+            color: #222222;
+            font-family: "Open Sans", "Segoe UI", "Noto Sans", Arial, sans-serif;
+            font-size: 15px;
+            line-height: 1.55;
+            margin: 28px 36px;
+        }
+        a { color: #00538a; text-decoration: none; }
+        a:hover { color: #001066; text-decoration: underline; }
+        p { margin: 0 0 1.2em 0; padding-top: 0.4em; }
+
+        kbd {
+            font-family: "Consolas", "Menlo", "Courier New", monospace;
+            font-weight: bold;
+            background-color: #dcdcd5;
+            padding: 2px 5px;
+            color: #222222;
+        }
+        span.code {
+            font-family: "Consolas", "Menlo", "Courier New", monospace;
+            font-size: 13px;
+            background-color: #dcdcd5;
+            padding: 2px 5px;
+            color: #222222;
+        }
+        ul, ol { margin: 1em 0 1.4em 1.5em; padding: 0; line-height: 140%; }
+        li { margin: 0 0 0.5em 0; padding: 0; }
+
+        h1, h2, h3, h4, h5, h6 {
+            margin: 0.93em 0 0.2em 0;
+            color: #0a2a5c;
+            font-weight: bold;
+        }
+        h1 {
+            font-weight: normal;
+            font-size: 1.8em;
+            padding: 4px 0 8px 0;
+            border-bottom: 2px solid #5198cc;
+            margin-bottom: 12px;
+        }
+        h2 {
+            font-size: 1.5em;
+            padding: 4px 0 6px 0;
+            border-bottom: 1px solid rgba(53, 86, 129, 0.3);
+            margin-top: 34px;
+        }
+        h3 { font-weight: 600; font-size: 1.25em; margin-top: 22px; }
+        h4 { font-size: 1.1em; font-style: italic; margin-top: 16px; }
+        h5 { font-size: 1.02em; font-style: italic; margin-top: 12px; }
+        h6 { font-size: 0.85em; text-transform: uppercase; }
+
+        pre {
+            font-family: "Consolas", "Menlo", "Liberation Mono", monospace;
+            font-size: 13px;
+            background-color: #10131e;
+            color: #e6e6e6;
+            padding: 12px 14px;
+            margin: 10px 0 16px 0;
+            white-space: pre-wrap;
+            border: 1px solid #303030;
+        }
+        pre code { background: none; color: inherit; padding: 0; font-size: 13px; }
+        code {
+            font-family: "Consolas", "Menlo", "Liberation Mono", monospace;
+            font-size: 13px;
+            background-color: #eef0f3;
+            color: #222222;
+            padding: 1px 5px;
+        }
+
+        blockquote, .box-text {
+            background-color: rgba(51, 56, 71, 0.08);
+            border-left: 4px solid #5198cc;
+            padding: 10px 14px;
+            margin: 12px 0;
+        }
+        blockquote p { margin: 0; }
+        .important {
+            background-color: #fec8c8;
+            border-left: 4px solid #b30000;
+            padding: 10px 14px;
+            margin: 12px 0;
+        }
+        .important p { margin: 0; }
+        .note {
+            background-color: #dde6f4;
+            border-left: 4px solid #5198cc;
+            padding: 10px 14px;
+            margin: 12px 0;
+        }
+        .note p { margin: 0; }
+
+        table {
+            border-collapse: collapse;
+            width: 100%;
+            margin: 12px 0 20px 0;
+            font-size: 0.94em;
+        }
+        th, td {
+            border: 1px solid #6cc0ff;
+            padding: 6px 10px;
+            text-align: left;
+            vertical-align: top;
+        }
+        th {
+            background-color: #10131e;
+            color: #f0f0f0;
+            font-weight: bold;
+        }
+        hr { border: none; border-top: 1px solid #bbcaff; margin: 28px 0; }
+        .meta { color: #57606a; font-size: 13px; margin: 4px 0 20px 0; }
+        .meta strong { color: #222222; }
+    """
+
+    def __init__(self, index_path: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Справка — Ksenia M3U Editor")
+        self.resize(1000, 720)
+        self.root = QVBoxLayout(self)
+
+        self.index_path = os.path.abspath(index_path)
+        self.help_dir = os.path.dirname(self.index_path)
+        self.start_page = os.path.basename(self.index_path)
+
+        if not os.path.isfile(self.index_path):
+            error_box(self,
+                      f"Файл справки не найден:\n{self.index_path}",
+                      "Справка")
+            QTimer.singleShot(0, self.reject)
+            return
+
+        # Верхняя панель
+        nav = QHBoxLayout()
+        self.btn_back = QPushButton("← Назад")
+        self.btn_fwd = QPushButton("→ Вперёд")
+        self.btn_home = QPushButton("🏠 Домой")
+        self.btn_refresh = QPushButton("🔄")
+        self.btn_refresh.setToolTip("Обновить страницу (F5)")
+        self.btn_back.setEnabled(False)
+        self.btn_fwd.setEnabled(False)
+
+        nav.addWidget(self.btn_back)
+        nav.addWidget(self.btn_fwd)
+        nav.addWidget(self.btn_home)
+        nav.addWidget(self.btn_refresh)
+        nav.addStretch()
+
+        self.path_label = QLabel("")
+        self.path_label.setStyleSheet("color: gray; font-size: 11px;")
+        nav.addWidget(self.path_label)
+        self.root.addLayout(nav)
+
+        # Splitter: оглавление + содержимое
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+
+        self.toc = QListWidget()
+        self.toc.setMaximumWidth(280)
+        self.toc.itemClicked.connect(self._on_toc_click)
+        splitter.addWidget(self.toc)
+
+        self.viewer = QTextBrowser()
+        self.viewer.setOpenExternalLinks(False)
+        self.viewer.setOpenLinks(False)
+        self.viewer.anchorClicked.connect(self._on_anchor)
+        self.viewer.backwardAvailable.connect(self.btn_back.setEnabled)
+        self.viewer.forwardAvailable.connect(self.btn_fwd.setEnabled)
+        self.viewer.sourceChanged.connect(self._on_source_changed)
+        self.viewer.document().setDefaultStyleSheet(self.DEFAULT_CSS)
+        splitter.addWidget(self.viewer)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+
+        self.root.addWidget(splitter, 1)
+
+        self.btn_back.clicked.connect(self.viewer.backward)
+        self.btn_fwd.clicked.connect(self.viewer.forward)
+        self.btn_home.clicked.connect(self._go_home)
+        self.btn_refresh.clicked.connect(self._reload)
+
+        QShortcut(QKeySequence("Alt+Left"), self,
+                  activated=self.viewer.backward)
+        QShortcut(QKeySequence("Alt+Right"), self,
+                  activated=self.viewer.forward)
+        QShortcut(QKeySequence("F5"), self, activated=self._reload)
+        QShortcut(QKeySequence("Home"), self, activated=self._go_home)
+
+        self._fill_toc()
+        self._go_home()
+
+        bb = QDialogButtonBox(CLOSE_BB)
+        bb.rejected.connect(self.reject)
+        self.root.addWidget(bb)
+
+    # --- Навигация ---
+    def _go_home(self):
+        url = QUrl.fromLocalFile(self.index_path)
+        self.viewer.setSource(url)
+        QTimer.singleShot(
+            0, lambda: self.viewer.verticalScrollBar().setValue(0))
+
+    def _reload(self):
+        cur = self.viewer.source()
+        if cur.isEmpty():
+            self._go_home()
+            return
+        self.viewer.setSource(QUrl())
+        self.viewer.setSource(cur)
+
+    def _on_source_changed(self, url: QUrl):
+        name = url.fileName() or ""
+        self.path_label.setText(name)
+        self._sync_toc_selection(url)
+
+    def _on_anchor(self, url: QUrl):
+        if url.scheme() in ("http", "https", "mailto"):
+            QDesktopServices.openUrl(url)
+            return
+        if url.scheme() == "" and url.path() == "":
+            self.viewer.scrollToAnchor(url.fragment())
+            return
+        if url.scheme() == "":
+            base_dir = os.path.dirname(
+                self.viewer.source().toLocalFile() or self.index_path)
+            target = os.path.normpath(
+                os.path.join(base_dir, url.path()))
+            new_url = QUrl.fromLocalFile(target)
+            if url.fragment():
+                new_url.setFragment(url.fragment())
+            self.viewer.setSource(new_url)
+            if url.fragment():
+                self.viewer.scrollToAnchor(url.fragment())
+            return
+        QDesktopServices.openUrl(url)
+
+    # --- Оглавление ---
+    def _fill_toc(self):
+        if not os.path.isfile(self.index_path):
+            return
+        try:
+            with open(self.index_path, "r", encoding="utf-8") as f:
+                html = f.read()
+        except Exception:
+            return
+        pattern = re.compile(
+            r'<h2[^>]*id=["\']([^"\']+)["\'][^>]*>(.*?)</h2>',
+            re.DOTALL | re.IGNORECASE)
+        for match in pattern.finditer(html):
+            anchor = match.group(1)
+            title = re.sub(r"<[^>]+>", "", match.group(2)).strip()
+            if not title:
+                continue
+            item = QListWidgetItem(title)
+            item.setData(Qt.ItemDataRole.UserRole, anchor)
+            self.toc.addItem(item)
+
+    def _on_toc_click(self, item: QListWidgetItem):
+        anchor = item.data(Qt.ItemDataRole.UserRole)
+        if not anchor:
+            return
+        current = self.viewer.source().toLocalFile()
+        if current and os.path.normpath(current) == \
+                os.path.normpath(self.index_path):
+            self.viewer.scrollToAnchor(anchor)
+            return
+        url = QUrl.fromLocalFile(self.index_path)
+        url.setFragment(anchor)
+        self.viewer.setSource(url)
+        self.viewer.scrollToAnchor(anchor)
+
+    def _sync_toc_selection(self, url: QUrl):
+        frag = url.fragment()
+        for i in range(self.toc.count()):
+            item = self.toc.item(i)
+            if item.data(Qt.ItemDataRole.UserRole) == frag:
+                self.toc.setCurrentItem(item)
+                return
+
+
+# =====================================================================
+# SupportDialog, HelpDialog
+# =====================================================================
 class SupportDialog(BaseDialog):
     def __init__(self, parent=None):
         super().__init__("Поддержка проекта", parent, size=(500, 400))
         self.setWindowModality(Qt.WindowModality.ApplicationModal)
         self.setMinimumWidth(500)
-        layout = self.root
+        l = self.root
         title = QLabel("☕ Поддержать проект")
         f = title.font()
         f.setPointSize(16)
         f.setBold(True)
         title.setFont(f)
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(title)
+        l.addWidget(title)
         info = QLabel(
             "Если вам нравится этот инструмент и вы хотите поддержать его развитие,\n"
             "вы можете отправить добровольное пожертвование.\n\n"
             "Спасибо за вашу поддержку! 💝")
         info.setWordWrap(True)
         info.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(info)
+        l.addWidget(info)
         btn = QPushButton("💰 Отправить перевод")
         btn.setMinimumHeight(50)
         btn.clicked.connect(lambda: open_external(DONATION_URL))
-        layout.addWidget(btn)
+        l.addWidget(btn)
         wallet_label = QLabel(f"Кошелёк: <b>{DONATION_WALLET}</b> (ЮMoney)")
         wallet_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         wallet_label.setTextFormat(Qt.TextFormat.RichText)
-        layout.addWidget(wallet_label)
+        l.addWidget(wallet_label)
         self.add_close()
 
 
 class HelpDialog(BaseDialog):
+    """Расширенный диалог справки: О проекте, Клавиши, Лицензия, Поддержка."""
+
     def __init__(self, parent=None):
         super().__init__("Справка", parent, size=(700, 600))
         self.setMinimumWidth(700)
@@ -365,7 +668,10 @@ class HelpDialog(BaseDialog):
             "<tr><td><b>Версия:</b></td><td>" + APP_VERSION + "</td></tr>"
             "<tr><td><b>Лицензия:</b></td>"
             "<td>GNU GPL v3.0</td></tr>"
-            "</table>"))
+            "</table>"
+            "<p style='margin-top:1em;'>"
+            "<b>F1</b> — открыть встроенное руководство пользователя."
+            "</p>"))
         gl.addStretch()
         tabs.addTab(general, "О проекте")
 
@@ -374,6 +680,7 @@ class HelpDialog(BaseDialog):
         shl.addWidget(self._html_label(
             "<h3>Горячие клавиши</h3>"
             "<ul>"
+            "<li><b>F1</b> — руководство пользователя</li>"
             "<li><b>F11</b> — полноэкранный режим</li>"
             "<li><b>Ctrl+N</b> — новый плейлист</li>"
             "<li><b>Ctrl+O</b> — открыть</li>"
@@ -381,7 +688,6 @@ class HelpDialog(BaseDialog):
             "<li><b>Ctrl+Z / Ctrl+Y</b> — отменить/повторить</li>"
             "<li><b>Ctrl+C / X / V</b> — копировать/вырезать/вставить</li>"
             "<li><b>Delete</b> — удалить канал</li>"
-            "<li><b>F1</b> — справка</li>"
             "</ul>"))
         shl.addStretch()
         tabs.addTab(shortcuts, "Клавиши")
@@ -389,15 +695,13 @@ class HelpDialog(BaseDialog):
         lt_tab = QWidget()
         lt_l = QVBoxLayout(lt_tab)
         lt_l.setContentsMargins(8, 8, 8, 8)
-
         lt_header = QLabel("GNU General Public License v3.0")
-        _lh_font = lt_header.font()
-        _lh_font.setPointSize(14)
-        _lh_font.setBold(True)
-        lt_header.setFont(_lh_font)
+        _f = lt_header.font()
+        _f.setPointSize(14)
+        _f.setBold(True)
+        lt_header.setFont(_f)
         lt_header.setTextFormat(Qt.TextFormat.RichText)
         lt_l.addWidget(lt_header)
-
         lt_text = QPlainTextEdit()
         lt_text.setReadOnly(True)
         lt_text.setPlainText(
@@ -413,10 +717,8 @@ class HelpDialog(BaseDialog):
             "for more details.\n\n"
             "You should have received a copy of the GNU General "
             "Public License along with this program. If not, see "
-            "<https://www.gnu.org/licenses/>.\n"
-        )
+            "<https://www.gnu.org/licenses/>.\n")
         lt_l.addWidget(lt_text, 1)
-
         lt_link = QLabel(
             "<a href='https://www.gnu.org/licenses/gpl-3.0.html'>"
             "Полный текст лицензии GPLv3</a>")
@@ -446,55 +748,13 @@ class HelpDialog(BaseDialog):
         return lbl
 
 
-class M3USyntaxHighlighter(QSyntaxHighlighter):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.rules: List[Tuple[re.Pattern, QTextCharFormat]] = []
-
-        def add(pattern: str, color: str, bold: bool = False,
-                italic: bool = False, underline: bool = False):
-            fmt = QTextCharFormat()
-            fmt.setForeground(QColor(color))
-            if bold:
-                fmt.setFontWeight(int(QFont.Weight.Bold))
-            if italic:
-                fmt.setFontItalic(True)
-            if underline:
-                fmt.setUnderlineStyle(
-                    QTextCharFormat.UnderlineStyle.SingleUnderline)
-            self.rules.append((re.compile(pattern), fmt))
-
-        add(r'^#EXTINF.*', "#FF6B6B", bold=True)
-        add(r'^#EXTVLCOPT.*', "#4ECDC4", italic=True)
-        add(r'^#EXTGRP.*', "#9B59B6")
-        add(r'^#(?!EXTINF|EXTVLCOPT|EXTGRP).*', "#95A5A6", italic=True)
-        add(r'^https?://[^\s]+', "#2ECC71", underline=True)
-        add(r'^rtmp://[^\s]+', "#E74C3C")
-        add(r'^udp://[^\s]+', "#F39C12")
-        add(r'^rtsp://[^\s]+', "#E67E22")
-        add(r'\b(tvg-id|tvg-name|tvg-logo|group-title|tvg-country|'
-            r'tvg-language|tvg-shift|catchup|catchup-source|catchup-days|'
-            r'tvg-rec|tvg-chno|audio-track)="[^"]*"', "#3498DB")
-
-    def highlightBlock(self, text: str):
-        for pattern, fmt in self.rules:
-            for m in pattern.finditer(text):
-                self.setFormat(m.start(), m.end() - m.start(), fmt)
-
-
-class EnhancedTextEdit(QPlainTextEdit):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setFont(QFont("Courier New", 10))
-        self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-        self.highlighter = M3USyntaxHighlighter(self.document())
-
-
+# =====================================================================
+# PlaylistHeaderDialog
+# =====================================================================
 class PlaylistHeaderDialog(BaseDialog):
-    def __init__(self, header_manager: 'PlaylistHeaderManager', parent=None):
+    def __init__(self, header_manager, parent=None):
         super().__init__("Редактор заголовка плейлиста", parent,
                          size=(600, 450))
-        self._original = header_manager
         self.header_manager = header_manager.copy()
         self._setup_ui()
         self._load_current()
@@ -640,6 +900,9 @@ class PlaylistHeaderDialog(BaseDialog):
         super().accept()
 
 
+# =====================================================================
+# RemoveMetadataDialog, MassEditDialog
+# =====================================================================
 class RemoveMetadataDialog(BaseDialog):
     def __init__(self, parent=None):
         super().__init__("Удаление метаданных", parent, size=(400, 320))
@@ -699,7 +962,6 @@ class MassEditDialog(BaseDialog):
                   self.tvg_logo_check, self.group_check):
             gl.addWidget(w)
         l.addWidget(g)
-
         self.ua_edit = QLineEdit()
         self.ua_edit.setPlaceholderText("Оставьте пустым, чтобы удалить")
         self.tvg_id_edit = QLineEdit()
@@ -711,7 +973,6 @@ class MassEditDialog(BaseDialog):
             ("TVG-Logo:", self.tvg_logo_edit),
             ("Group-title:", self.group_edit),
         ]))
-
         self.add_ok_cancel()
 
     def get_changes(self) -> Dict[str, str]:
@@ -735,6 +996,9 @@ class MassEditDialog(BaseDialog):
         super().accept()
 
 
+# =====================================================================
+# LinkReplacementSettingsDialog
+# =====================================================================
 class LinkReplacementSettingsDialog(BaseDialog):
     """Настройки замены ссылок (вкладки: Поиск, Нормализация,
     Автозамена, Сеть, Фильтрация, EPG)."""
@@ -749,6 +1013,7 @@ class LinkReplacementSettingsDialog(BaseDialog):
         layout = self.root
         tabs = QTabWidget()
 
+        # --- Поиск ---
         search_tab = QWidget()
         f1 = QFormLayout(search_tab)
         self.search_type_combo = QComboBox()
@@ -773,6 +1038,7 @@ class LinkReplacementSettingsDialog(BaseDialog):
         f1.addRow(self.use_fuzzy_check)
         tabs.addTab(search_tab, "Поиск")
 
+        # --- Нормализация ---
         norm_tab = QWidget()
         f2 = QFormLayout(norm_tab)
         self.ignore_special_check = QCheckBox("Игнорировать спецсимволы")
@@ -784,6 +1050,7 @@ class LinkReplacementSettingsDialog(BaseDialog):
             f2.addRow(w)
         tabs.addTab(norm_tab, "Нормализация")
 
+        # --- Автозамена ---
         auto_tab = QWidget()
         f3 = QFormLayout(auto_tab)
         self.auto_broken_check = QCheckBox("Заменять битые ссылки")
@@ -867,9 +1134,9 @@ class LinkReplacementSettingsDialog(BaseDialog):
         info_fast.setWordWrap(True)
         info_fast.setStyleSheet("color: gray; font-style: italic;")
         f3.addRow(info_fast)
-
         tabs.addTab(auto_tab, "Автозамена")
 
+        # --- Сеть ---
         net_tab = QWidget()
         f4 = QFormLayout(net_tab)
         self.timeout_spin = QSpinBox()
@@ -891,21 +1158,17 @@ class LinkReplacementSettingsDialog(BaseDialog):
         f4.addRow(self.verify_ssl_check)
         tabs.addTab(net_tab, "Сеть")
 
+        # --- Фильтрация ---
         filt_tab = QWidget()
         f5 = QFormLayout(filt_tab)
         self.use_ip_filter_check = QCheckBox("Использовать IP/домен-фильтры")
         f5.addRow(self.use_ip_filter_check)
-
         info_bl = QLabel(
             "ЧС домен/IP управляется отдельно. По умолчанию: "
             "ОЧИЩАЕТ ссылку, канал сохраняется.")
         info_bl.setWordWrap(True)
         info_bl.setStyleSheet("color: gray; font-style: italic;")
         f5.addRow(info_bl)
-
-        open_bl_btn = QPushButton("Открыть менеджер ЧС домен/IP")
-        open_bl_btn.clicked.connect(self._open_domain_blacklist)
-        f5.addRow(open_bl_btn)
 
         self.temporary_domains_edit = QTextEdit()
         self.temporary_domains_edit.setMaximumHeight(50)
@@ -916,6 +1179,7 @@ class LinkReplacementSettingsDialog(BaseDialog):
         f5.addRow("Небезопасные домены:", self.unsafe_domains_edit)
         tabs.addTab(filt_tab, "Фильтрация")
 
+        # --- EPG-метаданные ---
         epg_tab = QWidget()
         f6 = QFormLayout(epg_tab)
         self.epg_overwrite_check = QCheckBox(
@@ -963,11 +1227,6 @@ class LinkReplacementSettingsDialog(BaseDialog):
                   self.max_urls_per_channel_spin,
                   self.cache_trust_spin):
             w.setEnabled(bool(checked))
-
-    def _open_domain_blacklist(self):
-        from ksenia_window import ApplicationCore
-        dlg = DomainBlacklistDialog(ApplicationCore.instance(), self)
-        dlg.exec()
 
     def _load(self):
         c = self.config
@@ -1123,6 +1382,9 @@ class LinkReplacementSettingsDialog(BaseDialog):
         super().accept()
 
 
+# =====================================================================
+# DuplicateFinderDialog
+# =====================================================================
 class DuplicateFinderDialog(BaseDialog):
     duplicates_removed = pyqtSignal(int)
 
@@ -1137,7 +1399,6 @@ class DuplicateFinderDialog(BaseDialog):
 
     def _setup_ui(self):
         l = self.root
-
         self.stats_label = QLabel()
         l.addWidget(self.stats_label)
 
@@ -1187,11 +1448,8 @@ class DuplicateFinderDialog(BaseDialog):
             f"<b>Дубликатов по URL:</b> {report['total_url_duplicates']} | "
             f"<b>Дубликатов по названию:</b> "
             f"{report['total_name_duplicates']}")
-
-        by_url = report['by_url']
-        self._fill_dup_table(self.url_table, by_url)
-        by_name = report['by_name']
-        self._fill_dup_table(self.name_table, by_name)
+        self._fill_dup_table(self.url_table, report['by_url'])
+        self._fill_dup_table(self.name_table, report['by_name'])
 
     @staticmethod
     def _fill_dup_table(table: QTableWidget,
@@ -1239,6 +1497,9 @@ class DuplicateFinderDialog(BaseDialog):
         info_box(self, f"Удалено: {removed}", "Готово")
 
 
+# =====================================================================
+# ComparePlaylistsDialog
+# =====================================================================
 class ComparePlaylistsDialog(BaseDialog):
     """Построчный diff двух плейлистов (как git diff)."""
 
@@ -1458,6 +1719,9 @@ class ComparePlaylistsDialog(BaseDialog):
             error_box(self, str(e))
 
 
+# =====================================================================
+# BlockDomainDialog, DomainBlacklistDialog
+# =====================================================================
 class BlockDomainDialog(BaseDialog):
     def __init__(self, value: str, all_channels: List[ChannelData],
                  parent=None):
@@ -1492,9 +1756,8 @@ class BlockDomainDialog(BaseDialog):
             select_mode=QAbstractItemView.SelectionMode.ExtendedSelection)
         layout.addWidget(self.preview)
 
-        self.bb = self.add_ok_cancel("Заблокировать и очистить ссылки")
+        self.add_ok_cancel("Заблокировать и очистить ссылки")
 
-        self.subdomain_check.blockSignals(True)
         if self._is_ip:
             self.subdomain_check.setChecked(False)
             self.subdomain_check.setEnabled(False)
@@ -1502,7 +1765,6 @@ class BlockDomainDialog(BaseDialog):
                 "Для IP-адресов поддомены не применяются")
         else:
             self.subdomain_check.setChecked(True)
-        self.subdomain_check.blockSignals(False)
         self.subdomain_check.toggled.connect(self._on_toggled)
 
         self._refresh()
@@ -1532,10 +1794,8 @@ class BlockDomainDialog(BaseDialog):
     def get_result(self) -> Tuple[str, bool, str, List[ChannelData]]:
         include = (False if self._is_ip
                    else self.subdomain_check.isChecked())
-        return (self._normalized,
-                include,
-                self.note_edit.text().strip(),
-                list(self._current))
+        return (self._normalized, include,
+                self.note_edit.text().strip(), list(self._current))
 
 
 class DomainBlacklistDialog(BaseDialog):
@@ -1671,6 +1931,9 @@ class DomainBlacklistDialog(BaseDialog):
             info_box(self, f"Сохранено правил: {len(items)}", "Экспорт")
 
 
+# =====================================================================
+# LinkSourceEditDialog
+# =====================================================================
 class LinkSourceEditDialog(BaseDialog):
     def __init__(self, parent=None, source: Optional[LinkSource] = None,
                  existing_names: Optional[Set[str]] = None):
@@ -1811,6 +2074,9 @@ class LinkSourceEditDialog(BaseDialog):
             super().accept()
 
 
+# =====================================================================
+# DomainUserAgentEditDialog, DomainUserAgentDialog
+# =====================================================================
 class DomainUserAgentEditDialog(BaseDialog):
     def __init__(self, parent=None,
                  rule: Optional[DomainUserAgentRule] = None):
@@ -1872,6 +2138,7 @@ class DomainUserAgentDialog(BaseDialog):
         info.setWordWrap(True)
         info.setStyleSheet("color: gray;")
         layout.addWidget(info)
+
         self.rules_table = make_table(
             ["Домен", "User-Agent", "Вкл"],
             stretch_last=False,
@@ -1998,14 +2265,228 @@ class DomainUserAgentDialog(BaseDialog):
             info_box(self, "Изменений не требуется")
 
 
-class LinkSourceManagerDialog(BaseDialog):
-    """Менеджер источников: одна кнопка «🔄 Обновить всё».
+# =====================================================================
+# SourcesFinderDialog
+# =====================================================================
+class SourcesFinderDialog(BaseDialog):
+    """Диалог авто-поиска источников."""
 
-    Трёхфазная шкала прогресса (0..100), эмитится SourcesRefreshWorker:
-      • Фаза 1 (0..40%)  — загрузка источников
-      • Фаза 2 (40..90%) — проверка URL
-      • Фаза 3 (90..100%) — rebuild_alive_index
-    """
+    def __init__(self, parent=None):
+        super().__init__("🔍 Поиск источников автоматически",
+                         parent, size=(760, 560))
+        self._worker = None
+        self._found: List[Dict[str, Any]] = []
+        self._worker_cls = None
+        try:
+            from generator import SourcesFinderWorker
+            self._worker_cls = SourcesFinderWorker
+        except ImportError as e:
+            logger.warning(f"generator недоступен: {e}")
+        self._setup_ui()
+
+    def _setup_ui(self):
+        l = self.root
+        info = QLabel(
+            "Автоматический поиск URL-ов плейлистов в интернете.\n"
+            "Найденные источники будут добавлены в менеджер источников\n"
+            "с флагом «Автообновление» и сразу загружены в кэш.")
+        info.setWordWrap(True)
+        info.setStyleSheet("color: gray;")
+        l.addWidget(info)
+
+        g = QGroupBox("Что искать")
+        gl = QVBoxLayout(g)
+        self.github_check = QCheckBox(
+            "GitHub (известные репозитории + поиск)")
+        self.github_check.setChecked(True)
+        gl.addWidget(self.github_check)
+        self.m3uguide_check = QCheckBox("m3u.guide")
+        self.m3uguide_check.setChecked(True)
+        gl.addWidget(self.m3uguide_check)
+        self.fast_check = QCheckBox(
+            "FAST-каналы (Pluto, Samsung, Plex, ...)")
+        self.fast_check.setChecked(True)
+        gl.addWidget(self.fast_check)
+
+        opts = QHBoxLayout()
+        opts.addWidget(QLabel("Макс. GitHub:"))
+        self.max_github_spin = QSpinBox()
+        self.max_github_spin.setRange(1, 100)
+        self.max_github_spin.setValue(SOURCES_FINDER_MAX_GITHUB_DEFAULT)
+        opts.addWidget(self.max_github_spin)
+        opts.addWidget(QLabel("Макс. m3u.guide:"))
+        self.max_m3uguide_spin = QSpinBox()
+        self.max_m3uguide_spin.setRange(1, 50)
+        self.max_m3uguide_spin.setValue(SOURCES_FINDER_MAX_M3UGUIDE_DEFAULT)
+        opts.addWidget(self.max_m3uguide_spin)
+        opts.addStretch()
+        gl.addLayout(opts)
+        l.addWidget(g)
+
+        self.progress_label = QLabel("Готов к поиску")
+        self.progress_label.setStyleSheet("color: #555;")
+        l.addWidget(self.progress_label)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 0)
+        self.progress_bar.setVisible(False)
+        l.addWidget(self.progress_bar)
+
+        l.addWidget(QLabel("Найденные источники:"))
+        self.table = make_table(
+            ["✓", "Название", "Тип", "URL"],
+            stretch_last=False,
+            select_rows=False)
+        h = self.table.horizontalHeader()
+        h.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        h.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        h.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        h.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        self.table.verticalHeader().setVisible(False)
+        l.addWidget(self.table, 1)
+
+        btn_row = QHBoxLayout()
+        self.search_btn = QPushButton("🔍 Начать поиск")
+        self.search_btn.clicked.connect(self._start_search)
+        self.search_btn.setEnabled(self._worker_cls is not None)
+        btn_row.addWidget(self.search_btn)
+
+        self.stop_btn = QPushButton("⏹ Остановить")
+        self.stop_btn.setEnabled(False)
+        self.stop_btn.clicked.connect(self._stop_search)
+        btn_row.addWidget(self.stop_btn)
+
+        self.select_all_btn = QPushButton("Выбрать все")
+        self.select_all_btn.clicked.connect(lambda: self._set_all(True))
+        btn_row.addWidget(self.select_all_btn)
+
+        self.deselect_all_btn = QPushButton("Снять все")
+        self.deselect_all_btn.clicked.connect(lambda: self._set_all(False))
+        btn_row.addWidget(self.deselect_all_btn)
+        btn_row.addStretch()
+        l.addLayout(btn_row)
+
+        bb = QDialogButtonBox(OK_CANCEL_BB)
+        bb.button(QDialogButtonBox.StandardButton.Ok).setText(
+            "Добавить выбранные и загрузить")
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        l.addWidget(bb)
+
+        if self._worker_cls is None:
+            self.progress_label.setText(
+                "⚠️ Модуль generator.py не найден — поиск недоступен")
+
+    def _set_all(self, checked: bool):
+        for row in range(self.table.rowCount()):
+            it = self.table.item(row, 0)
+            if it is not None:
+                it.setCheckState(
+                    Qt.CheckState.Checked if checked
+                    else Qt.CheckState.Unchecked)
+
+    def _start_search(self):
+        if self._worker_cls is None:
+            warn_box(self, "Модуль generator.py не найден")
+            return
+        if self._worker is not None and self._worker.isRunning():
+            return
+        self._found = []
+        self.table.setRowCount(0)
+        self.progress_label.setText("⏳ Поиск...")
+        self.progress_bar.setVisible(True)
+        self.search_btn.setEnabled(False)
+        self.stop_btn.setEnabled(True)
+
+        self._worker = self._worker_cls(
+            include_github=self.github_check.isChecked(),
+            include_m3uguide=self.m3uguide_check.isChecked(),
+            include_fast=self.fast_check.isChecked(),
+            max_github=self.max_github_spin.value(),
+            max_m3uguide=self.max_m3uguide_spin.value(),
+        )
+        self._worker.progress.connect(self._on_progress)
+        self._worker.found.connect(self._on_found)
+        self._worker.finished.connect(self._on_finished)
+        self._worker.error.connect(self._on_error)
+        self._worker.start()
+
+    def _stop_search(self):
+        if self._worker is not None and self._worker.isRunning():
+            self._worker.stop()
+
+    def _on_progress(self, msg: str):
+        self.progress_label.setText(msg)
+
+    def _on_found(self, items: list):
+        self._found = list(items)
+        self._fill_table()
+
+    def _on_finished(self, items: list):
+        self._found = list(items)
+        self._fill_table()
+        self.progress_bar.setVisible(False)
+        self.search_btn.setEnabled(True)
+        self.stop_btn.setEnabled(False)
+        self.progress_label.setText(
+            f"✓ Найдено источников: {len(self._found)}")
+
+    def _on_error(self, msg: str):
+        self.progress_bar.setVisible(False)
+        self.search_btn.setEnabled(True)
+        self.stop_btn.setEnabled(False)
+        self.progress_label.setText(f"✗ Ошибка: {msg}")
+        error_box(self, msg, "Ошибка поиска")
+
+    def _fill_table(self):
+        self.table.setRowCount(len(self._found))
+        for i, item in enumerate(self._found):
+            chk = QTableWidgetItem()
+            chk.setFlags(Qt.ItemFlag.ItemIsUserCheckable |
+                         Qt.ItemFlag.ItemIsEnabled)
+            chk.setCheckState(Qt.CheckState.Checked)
+            self.table.setItem(i, 0, chk)
+
+            name_item = QTableWidgetItem(item.get('name') or '')
+            name_item.setData(Qt.ItemDataRole.UserRole, item)
+            self.table.setItem(i, 1, name_item)
+
+            type_item = QTableWidgetItem(item.get('source') or '')
+            type_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table.setItem(i, 2, type_item)
+
+            url_item = QTableWidgetItem(item.get('url') or '')
+            url_item.setToolTip(item.get('url') or '')
+            self.table.setItem(i, 3, url_item)
+
+    def get_selected_items(self) -> List[Dict[str, Any]]:
+        result: List[Dict[str, Any]] = []
+        for row in range(self.table.rowCount()):
+            chk = self.table.item(row, 0)
+            if chk is None or chk.checkState() != Qt.CheckState.Checked:
+                continue
+            name_item = self.table.item(row, 1)
+            if name_item is None:
+                continue
+            data = name_item.data(Qt.ItemDataRole.UserRole)
+            if isinstance(data, dict):
+                result.append(data)
+        return result
+
+    def closeEvent(self, event):
+        if self._worker is not None and self._worker.isRunning():
+            with suppress(Exception):
+                self._worker.stop()
+            self._worker.wait(3000)
+        self._worker = None
+        super().closeEvent(event)
+
+
+# =====================================================================
+# LinkSourceManagerDialog
+# =====================================================================
+class LinkSourceManagerDialog(BaseDialog):
+    """Менеджер источников: «🔄 Обновить всё» + «🔍 Найти источники»."""
 
     sources_updated = pyqtSignal()
 
@@ -2022,11 +2503,11 @@ class LinkSourceManagerDialog(BaseDialog):
 
     def _setup_ui(self):
         layout = self.root
-
         info_label = QLabel(
             "Обновление источника загружает каналы и проверяет все URL.\n"
             "Живые URL попадают в кэш url_status_cache, который используют\n"
-            "автозамена и точечная проверка «Ссылки → Проверить все ссылки».")
+            "автозамена и точечная проверка «Ссылки → Проверить все ссылки».\n"
+            "Если источников нет — нажмите «🔍 Найти источники автоматически».")
         info_label.setWordWrap(True)
         info_label.setStyleSheet("color: #555; font-style: italic;")
         layout.addWidget(info_label)
@@ -2040,23 +2521,44 @@ class LinkSourceManagerDialog(BaseDialog):
         self.sources_table.itemChanged.connect(self._on_item_changed)
         h = self.sources_table.horizontalHeader()
         for i in range(9):
-            h.setSectionResizeMode(i,
-                                   QHeaderView.ResizeMode.ResizeToContents)
+            h.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
         h.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         h.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         layout.addWidget(self.sources_table)
 
-        bl = QHBoxLayout()
+        bl1 = QHBoxLayout()
         for t, s in (("Добавить", self._add),
                      ("Редактировать", self._edit),
                      ("Удалить", self._remove),
-                     ("🔄 Обновить всё", self._refresh_all),
                      ("Импорт", self._import),
                      ("Экспорт", self._export)):
             b = QPushButton(t)
             b.clicked.connect(s)
-            bl.addWidget(b)
-        layout.addLayout(bl)
+            bl1.addWidget(b)
+        bl1.addStretch()
+        layout.addLayout(bl1)
+
+        bl2 = QHBoxLayout()
+        self.auto_find_btn = QPushButton("🔍 Найти источники автоматически")
+        self.auto_find_btn.setToolTip(
+            "Найти публичные плейлисты в интернете "
+            "(GitHub, m3u.guide, FAST)\n"
+            "и добавить их как источники с автообновлением.")
+        self.auto_find_btn.clicked.connect(self._auto_find_sources)
+        bl2.addWidget(self.auto_find_btn)
+
+        self.remove_generated_btn = QPushButton("🧹 Удалить найденные")
+        self.remove_generated_btn.setToolTip(
+            "Удалить все источники, добавленные авто-поиском.")
+        self.remove_generated_btn.clicked.connect(self._remove_generated)
+        bl2.addWidget(self.remove_generated_btn)
+
+        bl2.addStretch()
+
+        self.refresh_all_btn = QPushButton("🔄 Обновить всё")
+        self.refresh_all_btn.clicked.connect(self._refresh_all)
+        bl2.addWidget(self.refresh_all_btn)
+        layout.addLayout(bl2)
 
         self._progress_label = QLabel("")
         self._progress_label.setStyleSheet("color: #555;")
@@ -2098,7 +2600,15 @@ class LinkSourceManagerDialog(BaseDialog):
                                  else Qt.CheckState.Unchecked)
                 self.sources_table.setItem(i, 0, ei)
 
-                self.sources_table.setItem(i, 1, QTableWidgetItem(s.name))
+                name_text = s.name
+                if s.generated:
+                    name_text = f"✨ {name_text}"
+                ni = QTableWidgetItem(name_text)
+                ni.setData(Qt.ItemDataRole.UserRole, s.name)
+                if s.generated:
+                    ni.setToolTip("Источник добавлен авто-поиском")
+                self.sources_table.setItem(i, 1, ni)
+
                 self.sources_table.setItem(i, 2, QTableWidgetItem(
                     "Локальный" if s.source_type == "local" else "Онлайн"))
 
@@ -2141,6 +2651,18 @@ class LinkSourceManagerDialog(BaseDialog):
     def _existing_names(self) -> Set[str]:
         return {s.name for s in self.source_manager.get_all_sources()}
 
+    def _get_current_source_by_row(self, row: int) -> Optional[LinkSource]:
+        if row < 0:
+            return None
+        name_item = self.sources_table.item(row, 1)
+        if not name_item:
+            return None
+        raw = name_item.data(Qt.ItemDataRole.UserRole)
+        name = raw if isinstance(raw, str) else name_item.text()
+        if name.startswith("✨ "):
+            name = name[2:]
+        return self.source_manager.get_source_by_name(name)
+
     def _add(self):
         dlg = LinkSourceEditDialog(self,
                                    existing_names=self._existing_names())
@@ -2154,10 +2676,7 @@ class LinkSourceManagerDialog(BaseDialog):
         row = self.sources_table.currentRow()
         if row < 0:
             return
-        ni = self.sources_table.item(row, 1)
-        if not ni:
-            return
-        src = self.source_manager.get_source_by_name(ni.text())
+        src = self._get_current_source_by_row(row)
         if not src:
             return
         dlg = LinkSourceEditDialog(self, src)
@@ -2171,13 +2690,96 @@ class LinkSourceManagerDialog(BaseDialog):
         row = self.sources_table.currentRow()
         if row < 0:
             return
-        ni = self.sources_table.item(row, 1)
-        if not ni:
+        src = self._get_current_source_by_row(row)
+        if not src:
             return
-        if confirm(self, f"Удалить '{ni.text()}'?"):
-            if self.source_manager.remove_source(ni.text()):
+        if confirm(self, f"Удалить '{src.name}'?"):
+            if self.source_manager.remove_source(src.name):
                 self._load_sources()
                 self.sources_updated.emit()
+
+    def _auto_find_sources(self):
+        dlg = SourcesFinderDialog(self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        items = dlg.get_selected_items()
+        if not items:
+            info_box(self, "Ничего не выбрано")
+            return
+
+        existing_paths = {s.path for s in self.source_manager.get_all_sources()}
+        existing_names = {s.name for s in self.source_manager.get_all_sources()}
+
+        added = 0
+        skipped = 0
+        for item in items:
+            url = (item.get('url') or '').strip()
+            if not url or url in existing_paths:
+                skipped += 1
+                continue
+            base_name = item.get('name') or url
+            name = base_name
+            suffix = 2
+            while name in existing_names:
+                name = f"{base_name} #{suffix}"
+                suffix += 1
+
+            src = LinkSource()
+            src.name = name
+            src.path = url
+            src.source_type = "online"
+            src.priority = int(item.get('priority') or 5)
+            src.enabled = True
+            src.auto_update = True
+            src.update_interval_hours = SOURCES_FINDER_UPDATE_INTERVAL_HOURS
+            src.encoding = "utf-8"
+            src.apply_blacklist = True
+            src.apply_domain_blacklist = True
+            src.generated = True
+
+            if self.source_manager.add_source(src):
+                added += 1
+                existing_paths.add(url)
+                existing_names.add(name)
+
+        self._load_sources()
+        self.sources_updated.emit()
+
+        if added == 0:
+            info_box(self,
+                     f"Новых источников не добавлено "
+                     f"(пропущено: {skipped}).")
+            return
+
+        auto_load = bool(self.config.get(
+            'sources_finder_auto_load_after_add', True))
+        if auto_load or confirm(
+                self,
+                f"Добавлено источников: {added}.\n"
+                f"Пропущено (уже есть): {skipped}.\n\n"
+                f"Сразу загрузить их в кэш?"):
+            self._refresh_all()
+        else:
+            info_box(self,
+                     f"Источники добавлены в менеджер.\n"
+                     f"Загрузите их кнопкой «🔄 Обновить всё».",
+                     "Готово")
+
+    def _remove_generated(self):
+        generated = [s for s in self.source_manager.get_all_sources()
+                     if s.generated]
+        if not generated:
+            info_box(self, "Нет источников, добавленных авто-поиском.")
+            return
+        if not confirm(
+                self,
+                f"Удалить {len(generated)} источников, "
+                f"добавленных авто-поиском?"):
+            return
+        n = self.source_manager.remove_generated_sources()
+        self._load_sources()
+        self.sources_updated.emit()
+        info_box(self, f"Удалено: {n}", "Готово")
 
     def _refresh_all(self):
         self._channel_emit_counter = 0
@@ -2193,32 +2795,25 @@ class LinkSourceManagerDialog(BaseDialog):
             check_urls=True)
 
         def on_progress(value, total, text):
-            if self._progress_bar.maximum() != 100:
-                self._progress_bar.setRange(0, 100)
             v = max(0, min(100, int(value)))
             self._progress_bar.setValue(v)
             self._progress_bar.setFormat(f"{text} (%p%)")
             self._progress_bar.setVisible(True)
             self._progress_label.setText(text)
-            self._progress_bar.repaint()
-            self._progress_label.repaint()
 
         def on_source_checked(name, working, total):
             self._progress_label.setText(
                 f"✓ Проверено [{name}]: {working}/{total}")
-            self._progress_label.repaint()
 
         def on_channel_checked(source, name, ok, msg):
             mark = "✓" if ok else "✗"
             short = (name or "")[:60]
-            self._progress_label.setText(
-                f"{mark} [{source[:20]}] {short}")
+            self._progress_label.setText(f"{mark} [{source[:20]}] {short}")
             self._channel_emit_counter += 1
 
         def on_done(success, total):
             self._load_sources()
             self.sources_updated.emit()
-            self._progress_bar.setRange(0, 100)
             self._progress_bar.setValue(100)
             self._progress_bar.setFormat(
                 f"✓ Обновлено {success} из {total} (100%)")
@@ -2244,7 +2839,6 @@ class LinkSourceManagerDialog(BaseDialog):
         self._refresh_worker.all_done.connect(on_done)
         self._refresh_worker.error.connect(on_error)
         self._progress_label.setText("⏳ Обновление...")
-        self._progress_bar.setRange(0, 100)
         self._progress_bar.setValue(0)
         self._progress_bar.setFormat("Подготовка... %p%")
         self._progress_bar.setVisible(True)
@@ -2282,6 +2876,9 @@ class LinkSourceManagerDialog(BaseDialog):
         event.accept()
 
 
+# =====================================================================
+# LinkSelectionDialog, BlacklistDialog, PlaylistFromSourcesDialog
+# =====================================================================
 class LinkSelectionDialog(BaseDialog):
     def __init__(self, channel_name: str, alts: List[ChannelData],
                  parent=None):
@@ -2532,6 +3129,9 @@ class PlaylistFromSourcesDialog(BaseDialog):
         super().accept()
 
 
+# =====================================================================
+# GeneralSettingsDialog, CacheManagerDialog
+# =====================================================================
 class GeneralSettingsDialog(BaseDialog):
     def __init__(self, core: 'ApplicationCore', parent=None):
         super().__init__("Общие настройки", parent, size=(520, 700))
@@ -2563,8 +3163,7 @@ class GeneralSettingsDialog(BaseDialog):
 
         self.keep_dup_check = QCheckBox(
             "Сохранять дубликаты при дедупликации")
-        self.keep_dup_check.setChecked(
-            bool(c.get('keep_duplicates', False)))
+        self.keep_dup_check.setChecked(bool(c.get('keep_duplicates', False)))
         form.addRow(self.keep_dup_check)
 
         self.dedup_tvg_check = QCheckBox(
@@ -2637,12 +3236,71 @@ class GeneralSettingsDialog(BaseDialog):
             int(c.get('days_to_check', FALLBACK_DAYS_DEFAULT)))
         form.addRow("Дней для fallback:", self.days_to_check_spin)
 
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        form.addRow(sep)
+
+        form.addRow(QLabel("<b>Авто-поиск источников:</b>"))
+
+        self.sf_bootstrap_check = QCheckBox(
+            "Добавлять стартовый набор источников при первом запуске")
+        self.sf_bootstrap_check.setChecked(
+            bool(c.get('sources_finder_bootstrap_defaults_on_empty', True)))
+        self.sf_bootstrap_check.setToolTip(
+            "Только при пустом link_sources.json:\n"
+            "SlyNet, iptv-org, Free-TV, Spirt007, smolnp")
+        form.addRow(self.sf_bootstrap_check)
+
+        self.sf_auto_load_check = QCheckBox(
+            "Сразу загружать в кэш после авто-поиска")
+        self.sf_auto_load_check.setChecked(
+            bool(c.get('sources_finder_auto_load_after_add', True)))
+        form.addRow(self.sf_auto_load_check)
+
+        self.sf_github_check = QCheckBox("Включать GitHub в авто-поиск")
+        self.sf_github_check.setChecked(
+            bool(c.get('sources_finder_include_github', True)))
+        form.addRow(self.sf_github_check)
+
+        self.sf_m3uguide_check = QCheckBox("Включать m3u.guide в авто-поиск")
+        self.sf_m3uguide_check.setChecked(
+            bool(c.get('sources_finder_include_m3uguide', True)))
+        form.addRow(self.sf_m3uguide_check)
+
+        self.sf_fast_check = QCheckBox("Включать FAST в авто-поиск")
+        self.sf_fast_check.setChecked(
+            bool(c.get('sources_finder_include_fast', True)))
+        form.addRow(self.sf_fast_check)
+
+        self.sf_max_github_spin = QSpinBox()
+        self.sf_max_github_spin.setRange(1, 100)
+        self.sf_max_github_spin.setValue(
+            int(c.get('sources_finder_max_github',
+                      SOURCES_FINDER_MAX_GITHUB_DEFAULT)))
+        form.addRow("Макс. GitHub-источников:", self.sf_max_github_spin)
+
+        self.sf_max_m3uguide_spin = QSpinBox()
+        self.sf_max_m3uguide_spin.setRange(1, 50)
+        self.sf_max_m3uguide_spin.setValue(
+            int(c.get('sources_finder_max_m3uguide',
+                      SOURCES_FINDER_MAX_M3UGUIDE_DEFAULT)))
+        form.addRow("Макс. m3u.guide-источников:",
+                    self.sf_max_m3uguide_spin)
+
+        self.sf_update_interval_spin = QSpinBox()
+        self.sf_update_interval_spin.setRange(1, 720)
+        self.sf_update_interval_spin.setSuffix(" ч")
+        self.sf_update_interval_spin.setValue(
+            int(c.get('sources_finder_update_interval_hours',
+                      SOURCES_FINDER_UPDATE_INTERVAL_HOURS)))
+        form.addRow("Интервал авто-обновления:", self.sf_update_interval_spin)
+
         l.addLayout(form)
         self.add_ok_cancel()
 
     def apply(self):
         c = self.core.config
-        updates = {
+        c.update({
             'cell_font_size': self.font_size_spin.value(),
             'save_extvlcopt': self.save_extvlcopt_check.isChecked(),
             'limit_check_enabled': self.limit_check_check.isChecked(),
@@ -2661,8 +3319,22 @@ class GeneralSettingsDialog(BaseDialog):
             'auto_update_sources': self.auto_update_sources_check.isChecked(),
             'auto_backup_before_save': self.auto_backup_check.isChecked(),
             'days_to_check': self.days_to_check_spin.value(),
-        }
-        c.update(updates)
+            'sources_finder_bootstrap_defaults_on_empty':
+                self.sf_bootstrap_check.isChecked(),
+            'sources_finder_auto_load_after_add':
+                self.sf_auto_load_check.isChecked(),
+            'sources_finder_include_github':
+                self.sf_github_check.isChecked(),
+            'sources_finder_include_m3uguide':
+                self.sf_m3uguide_check.isChecked(),
+            'sources_finder_include_fast':
+                self.sf_fast_check.isChecked(),
+            'sources_finder_max_github': self.sf_max_github_spin.value(),
+            'sources_finder_max_m3uguide':
+                self.sf_max_m3uguide_spin.value(),
+            'sources_finder_update_interval_hours':
+                self.sf_update_interval_spin.value(),
+        })
         c.save()
         self.core.apply_auto_update_setting()
         self.core.settings_changed.emit()

@@ -1,23 +1,29 @@
 # -*- coding: utf-8 -*-
-"""Paths, _setup_logging, logger, диалоговые хелперы."""
+"""Пути, логирование, диалоговые хелперы."""
 
 from __future__ import annotations
+
+import logging
 import os
 import sys
-import logging
 import threading
 import webbrowser
-from contextlib import suppress
 from datetime import datetime
-from logging.handlers import RotatingFileHandler
+from logging.handlers import RotatingFileHandler, QueueHandler, QueueListener
 from typing import Optional
+import queue as _queue
+import atexit as _atexit
+
 from PyQt6.QtCore import QUrl
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import QFileDialog, QMessageBox
+
 from constants import M3U_FILTER, YES_NO
 
 
 class Paths:
+    """Все пути приложения."""
+
     @staticmethod
     def get_config_dir() -> str:
         if sys.platform.startswith("linux"):
@@ -35,27 +41,52 @@ class Paths:
     def get_log_path() -> str:
         return os.path.join(Paths.get_config_dir(), "editor.log")
 
+    @staticmethod
+    def get_app_dir() -> str:
+        """Корень проекта — папка, где лежит paths.py.
 
+        Для PyInstaller — временная распаковка (_MEIPASS) или папка .exe.
+        """
+        if getattr(sys, 'frozen', False):
+            meipass = getattr(sys, '_MEIPASS', None)
+            if meipass:
+                return meipass
+            return os.path.dirname(sys.executable)
+        return os.path.dirname(os.path.abspath(__file__))
+
+    @staticmethod
+    def get_help_dir() -> str:
+        """Папка help/ со встроенной справкой."""
+        return os.path.join(Paths.get_app_dir(), "help")
+
+    @staticmethod
+    def get_help_index() -> str:
+        """Полный путь к help/index.html."""
+        return os.path.join(Paths.get_help_dir(), "index.html")
+
+
+# =====================================================================
+# Логирование
+# =====================================================================
 _logging_initialized = False
 _logging_lock = threading.Lock()
 
 
-def _setup_logging():
+def _setup_logging() -> logging.Logger:
     global _logging_initialized
-    logger_ = logging.getLogger(__name__)
+    log = logging.getLogger(__name__)
     with _logging_lock:
         if _logging_initialized:
-            return logger_
-        logger_.setLevel(logging.INFO)
+            return log
+        log.setLevel(logging.INFO)
         fmt = logging.Formatter(
             '%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
         sh = logging.StreamHandler()
         sh.setFormatter(fmt)
-        logger_.addHandler(sh)
+        log.addHandler(sh)
+
         try:
-            import queue as _queue
-            from logging.handlers import QueueHandler, QueueListener
-            import atexit as _atexit
             config_dir = Paths.get_config_dir()
             os.makedirs(config_dir, exist_ok=True)
             log_path = Paths.get_log_path()
@@ -63,23 +94,29 @@ def _setup_logging():
                 log_path, maxBytes=2 * 1024 * 1024, backupCount=3,
                 encoding='utf-8')
             fh.setFormatter(fmt)
-            log_queue = _queue.Queue(-1)
+
+            log_queue: _queue.Queue = _queue.Queue(-1)
             qh = QueueHandler(log_queue)
             qh.setFormatter(fmt)
-            logger_.addHandler(qh)
-            _listener = QueueListener(log_queue, fh,
-                                      respect_handler_level=True)
-            _listener.start()
-            _atexit.register(_listener.stop)
+            log.addHandler(qh)
+
+            listener = QueueListener(log_queue, fh,
+                                     respect_handler_level=True)
+            listener.start()
+            _atexit.register(listener.stop)
         except Exception:
             pass
+
         _logging_initialized = True
-    return logger_
+    return log
 
 
 logger = _setup_logging()
 
 
+# =====================================================================
+# Диалоговые хелперы
+# =====================================================================
 def error_box(parent, msg, title: str = "Ошибка"):
     QMessageBox.critical(parent, title, str(msg))
 
@@ -134,26 +171,23 @@ def open_dir_dialog(parent, title: str = "Выбрать папку",
 
 
 def open_external(url: str):
-    if url:
-        webbrowser.open(url)
-
-
-def open_in_os(path_or_url: str):
-    if not path_or_url:
+    """Открыть URL/путь во внешнем приложении."""
+    if not url:
         return
-    if path_or_url.startswith(('http://', 'https://')):
-        webbrowser.open(path_or_url)
+    if url.startswith(('http://', 'https://', 'mailto:')):
+        webbrowser.open(url)
     else:
-        QDesktopServices.openUrl(QUrl.fromLocalFile(path_or_url))
+        QDesktopServices.openUrl(QUrl.fromLocalFile(url))
+
+
+# Алиас для совместимости
+open_in_os = open_external
 
 
 def parse_datetime(s, fmt: str = "%Y-%m-%d %H:%M:%S") -> Optional[datetime]:
-    if not s:
+    if not s or not isinstance(s, str):
         return None
-    if isinstance(s, str):
-        iso = s[:-1] + "+00:00" if s.endswith("Z") else s
-    else:
-        return None
+    iso = s[:-1] + "+00:00" if s.endswith("Z") else s
     for f in (fmt, None):
         try:
             return datetime.strptime(s, f) if f else datetime.fromisoformat(iso)

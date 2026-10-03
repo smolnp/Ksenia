@@ -2,22 +2,30 @@
 """UndoRedoManager, SimpleDuplicateFinder."""
 
 from __future__ import annotations
-import json
+
 import hashlib
+import json
 import threading
+from collections import defaultdict
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple
-from collections import defaultdict
+
 from constants import UNDO_MAX_STATES
 from models import ChannelData
 
 
 class UndoRedoManager:
+    """История изменений на уровне диффов.
+
+    Хранит только то, что реально изменилось: added/removed/changed + порядок.
+    Полные снимки всех каналов не сохраняются.
+    """
+
     def __init__(self, max_states: int = UNDO_MAX_STATES):
         self._undo_stack: List[Dict[str, Any]] = []
         self._redo_stack: List[Dict[str, Any]] = []
         self._max_states = max_states
-        self._last_snapshot: Dict[int, str] = {}
+        self._last_hash: Dict[int, str] = {}
         self._last_data: Dict[int, Dict[str, Any]] = {}
         self._last_order: List[int] = []
         self._initialized: bool = False
@@ -26,8 +34,9 @@ class UndoRedoManager:
     @staticmethod
     def _hash_channel(ch: ChannelData) -> str:
         mod = ch.modified_date
-        if ch._cached_hash is not None and ch._cached_hash_mod == mod:
-            return ch._cached_hash
+        cached = ch._cached_hash
+        if cached is not None and ch._cached_hash_mod == mod:
+            return cached
         d = ch.to_dict()
         h = hashlib.blake2b(
             json.dumps(d, sort_keys=True, default=str).encode('utf-8'),
@@ -50,13 +59,13 @@ class UndoRedoManager:
             new_snap, new_order = self._current_snapshot(channels)
 
             if not self._initialized:
-                self._last_snapshot = new_snap
+                self._last_hash = new_snap
                 self._last_data = {ch.uid: ch.to_dict() for ch in channels}
                 self._last_order = new_order
                 self._initialized = True
                 return
 
-            old_snap = self._last_snapshot
+            old_snap = self._last_hash
             old_order = list(self._last_order)
 
             added_uids = [uid for uid in new_snap if uid not in old_snap]
@@ -64,29 +73,25 @@ class UndoRedoManager:
             changed_uids = [uid for uid in new_snap
                             if uid in old_snap and old_snap[uid] != new_snap[uid]]
 
-            old_data_map = self._last_data
             channels_by_uid: Dict[int, ChannelData] = {ch.uid: ch for ch in channels}
+            old_data_map = self._last_data
 
-            new_data_map: Dict[int, Dict[str, Any]] = {}
+            added_data: List[Tuple[int, Dict[str, Any]]] = []
+            changed_data: List[Tuple[int, Dict[str, Any], Dict[str, Any]]] = []
             for uid in added_uids:
                 ch = channels_by_uid.get(uid)
                 if ch is not None:
-                    new_data_map[uid] = ch.to_dict()
+                    added_data.append((uid, ch.to_dict()))
             for uid in changed_uids:
                 ch = channels_by_uid.get(uid)
-                if ch is not None:
-                    new_data_map[uid] = ch.to_dict()
-
-            added_data = [(uid, new_data_map[uid]) for uid in added_uids
-                          if uid in new_data_map]
-            removed_data = [(uid, old_data_map[uid]) for uid in removed_uids
-                            if uid in old_data_map]
-            changed_data = []
-            for uid in changed_uids:
                 old_d = old_data_map.get(uid)
-                new_d = new_data_map.get(uid)
-                if old_d is not None and new_d is not None:
-                    changed_data.append((uid, old_d, new_d))
+                if ch is not None and old_d is not None:
+                    changed_data.append((uid, old_d, ch.to_dict()))
+
+            removed_data: List[Tuple[int, Dict[str, Any]]] = [
+                (uid, old_data_map[uid]) for uid in removed_uids
+                if uid in old_data_map
+            ]
 
             order_changed = (old_order != new_order)
             if not (added_data or removed_data or changed_data or order_changed):
@@ -100,8 +105,6 @@ class UndoRedoManager:
                 'changed': changed_data,
                 'old_order': old_order,
                 'new_order': new_order,
-                'old_snapshot': dict(old_snap),
-                'new_snapshot': dict(new_snap),
             }
 
             self._undo_stack.append(diff)
@@ -113,13 +116,15 @@ class UndoRedoManager:
             for uid in removed_uids:
                 new_last_data.pop(uid, None)
             for uid in added_uids:
-                if uid in new_data_map:
-                    new_last_data[uid] = new_data_map[uid]
+                ch = channels_by_uid.get(uid)
+                if ch is not None:
+                    new_last_data[uid] = ch.to_dict()
             for uid in changed_uids:
-                if uid in new_data_map:
-                    new_last_data[uid] = new_data_map[uid]
+                ch = channels_by_uid.get(uid)
+                if ch is not None:
+                    new_last_data[uid] = ch.to_dict()
             self._last_data = new_last_data
-            self._last_snapshot = new_snap
+            self._last_hash = new_snap
             self._last_order = new_order
 
     def undo(self) -> Optional[Dict[str, Any]]:
@@ -141,13 +146,9 @@ class UndoRedoManager:
             return diff
 
     def _restore_internal_state(self, diff: Dict[str, Any], reverse: bool):
-        target_snap = diff.get('old_snapshot' if reverse else 'new_snapshot')
         target_order = diff.get('old_order' if reverse else 'new_order')
-        if target_snap is not None:
-            self._last_snapshot = dict(target_snap)
-        if target_order is not None:
-            self._last_order = list(target_order)
         new_data: Dict[int, Dict[str, Any]] = dict(self._last_data)
+
         if reverse:
             for entry in diff.get('changed', []):
                 if len(entry) >= 3:
@@ -166,7 +167,17 @@ class UndoRedoManager:
                 new_data[uid] = d
             for uid, _d in diff.get('removed', []):
                 new_data.pop(uid, None)
+
         self._last_data = new_data
+        if target_order is not None:
+            self._last_order = list(target_order)
+        # Пересчитываем хэши из восстановленных данных
+        new_hash: Dict[int, str] = {}
+        for uid, d in new_data.items():
+            new_hash[uid] = hashlib.blake2b(
+                json.dumps(d, sort_keys=True, default=str).encode('utf-8'),
+                digest_size=8).hexdigest()
+        self._last_hash = new_hash
 
     def can_undo(self) -> bool:
         with self._lock:
@@ -179,7 +190,7 @@ class UndoRedoManager:
     def reset(self, channels: List[ChannelData]):
         with self._lock:
             snap, order = self._current_snapshot(channels)
-            self._last_snapshot = snap
+            self._last_hash = snap
             self._last_data = {ch.uid: ch.to_dict() for ch in channels}
             self._last_order = order
             self._initialized = True
@@ -189,7 +200,8 @@ class UndoRedoManager:
 
 class SimpleDuplicateFinder:
     @staticmethod
-    def find_duplicates_by_url(channels: List[ChannelData]) -> List[List[ChannelData]]:
+    def find_duplicates_by_url(channels: List[ChannelData]
+                               ) -> List[List[ChannelData]]:
         url_map: Dict[str, List[ChannelData]] = defaultdict(list)
         for ch in channels:
             if ch.has_valid_url:
@@ -259,15 +271,12 @@ class SimpleDuplicateFinder:
             result.append(ch)
         return result, removed
 
-    # >>> ДОБАВЛЕНО: быстрый поиск дубликатов по UID для фильтра-подсветки
     @staticmethod
-    def find_duplicate_uids(channels: List[ChannelData],
-                            use_tvg_id: bool = False
-                            ) -> Tuple[Set[int], Set[int]]:
-        """Вернуть (uids_by_name, uids_by_url).
-
-        Включает ВСЕ uid из групп, где больше одного канала.
-        """
+    def find_duplicate_uids_with_keys(
+            channels: List[ChannelData],
+            use_tvg_id: bool = False
+    ) -> Tuple[Set[int], Set[int], Dict[int, str], Dict[int, str]]:
+        """Вернуть (uids_by_name, uids_by_url, name_key_by_uid, url_key_by_uid)."""
         by_name: Dict[str, List[int]] = defaultdict(list)
         by_url: Dict[str, List[int]] = defaultdict(list)
         for ch in channels:
@@ -281,10 +290,18 @@ class SimpleDuplicateFinder:
 
         uids_name: Set[int] = set()
         uids_url: Set[int] = set()
-        for uids in by_name.values():
+        name_key_by_uid: Dict[int, str] = {}
+        url_key_by_uid: Dict[int, str] = {}
+
+        for key, uids in by_name.items():
             if len(uids) > 1:
                 uids_name.update(uids)
-        for uids in by_url.values():
+                for uid in uids:
+                    name_key_by_uid[uid] = key
+        for key, uids in by_url.items():
             if len(uids) > 1:
                 uids_url.update(uids)
-        return uids_name, uids_url
+                for uid in uids:
+                    url_key_by_uid[uid] = key
+
+        return uids_name, uids_url, name_key_by_uid, url_key_by_uid

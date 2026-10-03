@@ -5,6 +5,7 @@
 """
 
 from __future__ import annotations
+
 import difflib
 from enum import Enum
 from typing import Dict, List, Sequence
@@ -30,11 +31,7 @@ class DiffLine:
 
 
 def diff_lines(left: Sequence[str], right: Sequence[str]) -> List[DiffLine]:
-    """Построчный diff через difflib.SequenceMatcher.
-
-    Возвращает плоский список DiffLine, пригодный для отображения
-    в двухколоночном виде.
-    """
+    """Построчный diff через difflib.SequenceMatcher."""
     sm = difflib.SequenceMatcher(a=left, b=right, autojunk=False)
     result: List[DiffLine] = []
 
@@ -85,7 +82,7 @@ def to_unified_diff(left_lines: Sequence[str], right_lines: Sequence[str],
                     left_label: str = "current",
                     right_label: str = "other",
                     context: int = 3) -> str:
-    """Классический unified diff (как `diff -u` / `git diff`)."""
+    """Классический unified diff (как diff -u / git diff)."""
     return "".join(difflib.unified_diff(
         left_lines, right_lines,
         fromfile=left_label, tofile=right_label,
@@ -101,12 +98,13 @@ def normalize_lines(text: str, ignore_whitespace: bool = False) -> List[str]:
 
 
 def channels_only(lines: Sequence[str]) -> List[str]:
-    """Оставить только значимые строки M3U: #EXTINF и URL."""
+    """Оставить только значимые строки M3U: #EXTINF, #EXTVLCOPT и URL."""
     result: List[str] = []
     for ln in lines:
         s = ln.strip()
         if not s:
             continue
-        if s.startswith('#EXTINF:') or not s.startswith('#'):
+        if (s.startswith('#EXTINF:') or s.startswith('#EXTVLCOPT:')
+                or not s.startswith('#')):
             result.append(s)
     return result

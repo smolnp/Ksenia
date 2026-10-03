@@ -4,34 +4,21 @@
 
 Ранняя настройка:
   • PYTHONPYCACHEPREFIX → <config>/ksenia/pycache
-    Все .pyc-файлы проекта пишутся в конфиг-папку Ksenia,
-    а не в __pycache__ рядом с исходниками.
   • Удаление локального __pycache__ рядом с ksenia.py
-    (страховка от прямого запуска `python ksenia.py`).
 """
 
 from __future__ import annotations
 
+import faulthandler
 import os
-import sys
 import shutil
 import signal
-import faulthandler
+import sys
 from contextlib import suppress
 
 
-# =====================================================================
-# 1. Ранняя настройка путей Python-кэша (.pyc) ДО импорта проекта.
-# =====================================================================
-# PYTHONPYCACHEPREFIX влияет только на модули, импортированные ПОСЛЕ
-# его установки. Поэтому ставим максимально рано — до импорта
-# ksenia_window / config / constants / paths / models / dialogs / и т.д.
-#
-# Если переменная уже задана извне (лаунчер, IDE, systemd) — уважаем её.
-# =====================================================================
-
 def _get_ksenia_config_dir() -> str:
-    """Дублирует Paths.get_config_dir() из paths.py без импорта проекта."""
+    """Дублирует Paths.get_config_dir() без импорта проекта."""
     if sys.platform.startswith("linux"):
         config_home = os.environ.get(
             'XDG_CONFIG_HOME', os.path.expanduser('~/.config'))
@@ -45,15 +32,8 @@ def _get_ksenia_config_dir() -> str:
 
 
 def _setup_pycache_prefix() -> None:
-    """Устанавливает PYTHONPYCACHEPREFIX в конфиг-папку Ksenia.
-
-    Все .pyc проекта пойдут в <config>/ksenia/pycache/,
-    а не в __pycache__ рядом с исходниками.
-
-    Отключается флагом --no-pycache-prefix.
-    """
     if os.environ.get('PYTHONPYCACHEPREFIX'):
-        return  # уже задано извне (лаунчер, IDE, systemd) — не трогаем
+        return
     if '--no-pycache-prefix' in sys.argv:
         return
     try:
@@ -61,18 +41,10 @@ def _setup_pycache_prefix() -> None:
         os.makedirs(pycache_dir, exist_ok=True)
         os.environ['PYTHONPYCACHEPREFIX'] = pycache_dir
     except Exception:
-        # Не критично — останется стандартное поведение Python.
         pass
 
 
 def _cleanup_local_pycache() -> None:
-    """Удаляет __pycache__ рядом с ksenia.py (страховка).
-
-    Сам ksenia.py компилируется интерпретатором ДО выполнения первой
-    строки, поэтому __pycache__/ksenia.cpython-XXX.pyc успевает
-    появиться. Эта функция его убирает. Остальные модули проекта
-    уже идут в PYTHONPYCACHEPREFIX и в проекте не мусорят.
-    """
     try:
         here = os.path.dirname(os.path.abspath(__file__))
         pycache = os.path.join(here, "__pycache__")
@@ -82,18 +54,13 @@ def _cleanup_local_pycache() -> None:
         pass
 
 
-# --- Применяем настройку ДО импорта любых модулей проекта ---
 _setup_pycache_prefix()
 _cleanup_local_pycache()
 
 
-# =====================================================================
-# 2. Дальше — оригинальная точка входа Ksenia (без изменений логики).
-# =====================================================================
-
 faulthandler.enable()
 
-from ksenia_window import parse_cli_args, run_cli, MainWindow
+from ksenia_window import MainWindow, parse_cli_args, run_cli
 from constants import APP_VERSION
 from paths import logger
 
@@ -110,8 +77,8 @@ def _install_signal_handlers(app):
 
 def main():
     from PyQt6.QtWidgets import QApplication
-
     import argparse as _argparse
+
     _parser = _argparse.ArgumentParser(add_help=False)
     _parser.add_argument('--headless', action='store_true')
     _parser.add_argument('--no-pycache-prefix', action='store_true')

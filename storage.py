@@ -2,17 +2,18 @@
 """BaseJsonStore, StableStateManager, CacheManager."""
 
 from __future__ import annotations
-import os
-import json
-import time
-import sqlite3
-import shutil
+
 import atexit
 import hashlib
+import json
+import os
+import shutil
+import sqlite3
 import threading
+import time
 from contextlib import suppress
-from typing import Any, Dict, List, Optional, Set, Tuple
-from collections import defaultdict
+from typing import Any, Dict, List, Optional, Tuple
+
 from constants import (STABLE_STATE_FILE, CACHE_SCHEMA_VERSION,
     CHECK_RESULT_CACHE_TTL_HOURS, EPG_CACHE_TTL_HOURS)
 from paths import Paths, logger
@@ -33,10 +34,6 @@ class BaseJsonStore:
                 data = json.load(f)
             if isinstance(data, type(self._data)):
                 self._data = data
-            elif isinstance(self._data, list) and isinstance(data, dict):
-                self._data = list(data.values()) if data else []
-            elif isinstance(self._data, dict) and isinstance(data, list):
-                self._data = {}
         except Exception as e:
             logger.exception(f"Load {self.path}: {e}")
 
@@ -129,6 +126,9 @@ class CacheManager:
                 with suppress(Exception):
                     conn.close()
                 self._local.conn = None
+                with self._all_connections_lock:
+                    if conn in self._all_connections:
+                        self._all_connections.remove(conn)
             raise
 
     @classmethod
@@ -147,22 +147,6 @@ class CacheManager:
             atexit.register(_close_all)
             cls._atexit_registered = True
 
-    @classmethod
-    def _gc_connections(cls):
-        with cls._all_connections_lock:
-            cls._all_connections = [
-                c for c in cls._all_connections
-                if not cls._is_connection_dead(c)
-            ]
-
-    @staticmethod
-    def _is_connection_dead(c) -> bool:
-        try:
-            _ = c.in_transaction
-            return False
-        except Exception:
-            return True
-
     def _connect(self) -> sqlite3.Connection:
         with self._connect_lock:
             conn = getattr(self._local, 'conn', None)
@@ -176,8 +160,6 @@ class CacheManager:
                 self._local.conn = conn
                 with self._all_connections_lock:
                     self._all_connections.append(conn)
-                    if len(self._all_connections) % 16 == 0:
-                        self._gc_connections()
             return conn
 
     def _init_db(self):
@@ -275,40 +257,26 @@ class CacheManager:
         try:
             conn = self._connect()
             with conn:
-                if alive:
-                    conn.execute("""
-                        INSERT INTO url_status_cache
-                            (name, url, alive, response_ms, last_check,
-                             status_text, status_code,
-                             successes, failures)
-                        VALUES (?, ?, 1, ?, ?, ?, ?, 1, 0)
-                        ON CONFLICT(name, url) DO UPDATE SET
-                            alive = excluded.alive,
-                            response_ms = excluded.response_ms,
-                            last_check = excluded.last_check,
-                            status_text = excluded.status_text,
-                            status_code = excluded.status_code,
-                            successes = url_status_cache.successes + 1
-                    """, (name.lower(), url, response_ms, time.time(),
-                          status_text,
-                          status_code if status_code is not None else -1))
-                else:
-                    conn.execute("""
-                        INSERT INTO url_status_cache
-                            (name, url, alive, response_ms, last_check,
-                             status_text, status_code,
-                             successes, failures)
-                        VALUES (?, ?, 0, ?, ?, ?, ?, 0, 1)
-                        ON CONFLICT(name, url) DO UPDATE SET
-                            alive = excluded.alive,
-                            response_ms = excluded.response_ms,
-                            last_check = excluded.last_check,
-                            status_text = excluded.status_text,
-                            status_code = excluded.status_code,
-                            failures = url_status_cache.failures + 1
-                    """, (name.lower(), url, response_ms, time.time(),
-                          status_text,
-                          status_code if status_code is not None else -1))
+                succ = 1 if alive else 0
+                fail = 0 if alive else 1
+                conn.execute("""
+                    INSERT INTO url_status_cache
+                        (name, url, alive, response_ms, last_check,
+                         status_text, status_code,
+                         successes, failures)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(name, url) DO UPDATE SET
+                        alive = excluded.alive,
+                        response_ms = excluded.response_ms,
+                        last_check = excluded.last_check,
+                        status_text = excluded.status_text,
+                        status_code = excluded.status_code,
+                        successes = url_status_cache.successes + excluded.successes,
+                        failures = url_status_cache.failures + excluded.failures
+                """, (name.lower(), url, 1 if alive else 0, response_ms,
+                      time.time(), status_text,
+                      status_code if status_code is not None else -1,
+                      succ, fail))
         except Exception as e:
             logger.debug(f"save_check_result: {e}")
 
@@ -436,11 +404,11 @@ class CacheManager:
                     "DELETE FROM url_status_cache WHERE last_check < ?", (cutoff,))
                 n = cur.rowcount
                 cur3 = conn.execute(
-                    "DELETE FROM epg_entries WHERE cached_at > 0 AND cached_at < ?",
+                    "DELETE FROM epg_entries WHERE cached_at < ?",
                     (cutoff,))
                 n += cur3.rowcount
                 cur4 = conn.execute(
-                    "DELETE FROM epg_channels WHERE cached_at > 0 AND cached_at < ?",
+                    "DELETE FROM epg_channels WHERE cached_at < ?",
                     (cutoff,))
                 n += cur4.rowcount
                 return n
@@ -630,11 +598,12 @@ class CacheManager:
                     total += sz
                 except OSError:
                     continue
-            if total <= self.link_cache_max_bytes and len(files) <= self.link_cache_max_files:
+            if total <= self.link_cache_max_bytes and \
+                    len(files) <= self.link_cache_max_files:
                 return
             files.sort(key=lambda x: (x[1], x[2]))
-            target_bytes = self.link_cache_max_bytes * 0.8
-            target_files = int(self.link_cache_max_files * 0.8)
+            target_bytes = int(self.link_cache_max_bytes * 0.8)
+            target_files = max(1, int(self.link_cache_max_files * 0.8))
             while (total > target_bytes or len(files) > target_files) and files:
                 sz, _, p = files.pop(0)
                 with suppress(OSError):
@@ -678,16 +647,14 @@ class CacheManager:
             stats['epg_entries']['count'] = row[0] if row else 0
             cutoff_epg = now - epg_ttl_hours * 3600
             row = conn.execute(
-                "SELECT COUNT(*) FROM epg_entries "
-                "WHERE cached_at > 0 AND cached_at < ?",
+                "SELECT COUNT(*) FROM epg_entries WHERE cached_at < ?",
                 (cutoff_epg,)).fetchone()
             stats['epg_entries']['old_count'] = row[0] if row else 0
 
             row = conn.execute("SELECT COUNT(*) FROM epg_channels").fetchone()
             stats['epg_channels']['count'] = row[0] if row else 0
             row = conn.execute(
-                "SELECT COUNT(*) FROM epg_channels "
-                "WHERE cached_at > 0 AND cached_at < ?",
+                "SELECT COUNT(*) FROM epg_channels WHERE cached_at < ?",
                 (cutoff_epg,)).fetchone()
             stats['epg_channels']['old_count'] = row[0] if row else 0
 
