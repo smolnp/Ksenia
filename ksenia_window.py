@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Callable
 from collections import defaultdict
 from PyQt6.QtCore import (Qt, QTimer, QSettings, QPoint, pyqtSignal,
     QObject, QThread, QAbstractTableModel, QModelIndex, QUrl,
-    QCoreApplication)
+    QCoreApplication, QMimeData, QItemSelectionModel)
 from PyQt6.QtGui import QAction, QKeySequence, QColor, QFont, QShortcut, QIcon
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget,
     QVBoxLayout, QHBoxLayout, QTabWidget, QTableWidget,
@@ -472,6 +472,10 @@ class ChannelTableModel(QAbstractTableModel):
     COL_TVG_LOGO = 4
     COL_CATCHUP = 5
 
+    MIME_TYPE = "application/x-ksenia-channel-uids"
+
+    request_move = pyqtSignal(list, object)  # list[int], Optional[int]
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._channels: List[ChannelData] = []
@@ -643,11 +647,60 @@ class ChannelTableModel(QAbstractTableModel):
 
     def flags(self, index: QModelIndex):
         if not index.isValid():
-            return Qt.ItemFlag.NoItemFlags
+            return (Qt.ItemFlag.ItemIsDropEnabled |
+                    Qt.ItemFlag.ItemIsEnabled)
         f = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
         if index.column() != 0:
             f |= Qt.ItemFlag.ItemIsEditable
+        f |= Qt.ItemFlag.ItemIsDragEnabled
+        f |= Qt.ItemFlag.ItemIsDropEnabled
         return f
+
+    def supportedDropActions(self):
+        return Qt.DropAction.MoveAction
+
+    def supportedDragActions(self):
+        return Qt.DropAction.MoveAction
+
+    def mimeTypes(self):
+        return [self.MIME_TYPE]
+
+    def mimeData(self, indexes):
+        uids = sorted({self._filtered[i.row()].uid
+                       for i in indexes
+                       if i.isValid() and 0 <= i.row() < len(self._filtered)})
+        if not uids:
+            return None
+        mime = QMimeData()
+        mime.setData(self.MIME_TYPE,
+                     ",".join(map(str, uids)).encode('ascii'))
+        return mime
+
+    def dropMimeData(self, data, action, row, column, parent):
+        if not data.hasFormat(self.MIME_TYPE):
+            return False
+        if action == Qt.DropAction.IgnoreAction:
+            return True
+
+        raw = bytes(data.data(self.MIME_TYPE)).decode('ascii')
+        try:
+            uids = [int(x) for x in raw.split(',') if x.strip()]
+        except ValueError:
+            return False
+        if not uids:
+            return False
+
+        if parent.isValid():
+            target_row = parent.row()
+        else:
+            target_row = row  # -1 = в конец
+
+        ref_uid: Optional[int] = None
+        if 0 <= target_row < len(self._filtered):
+            ref_uid = self._filtered[target_row].uid
+
+        self.request_move.emit(uids, ref_uid)
+        return True
 
     def setData(self, index: QModelIndex, value,
                 role=Qt.ItemDataRole.EditRole):
@@ -819,6 +872,7 @@ class PlaylistTab(QWidget):
         self._setup_table()
         layout.addWidget(self.table)
         self.model.dataChanged.connect(self._on_model_data_changed)
+        self.model.request_move.connect(self._on_model_request_move)
         self.table.setContextMenuPolicy(
             Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(
@@ -858,6 +912,15 @@ class PlaylistTab(QWidget):
         self.table.setEditTriggers(
             QAbstractItemView.EditTrigger.DoubleClicked |
             QAbstractItemView.EditTrigger.EditKeyPressed)
+
+        # --- Drag & drop ---
+        self.table.setDragEnabled(True)
+        self.table.setAcceptDrops(True)
+        self.table.setDropIndicatorShown(True)
+        self.table.setDragDropMode(
+            QAbstractItemView.DragDropMode.InternalMove)
+        self.table.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.table.setDragDropOverwriteMode(False)
 
     def _on_sort_indicator_changed(self, column: int,
                                     order: Qt.SortOrder):
@@ -917,6 +980,23 @@ class PlaylistTab(QWidget):
         if self._sync_timer.isActive():
             self._sync_timer.stop()
         self._do_sync()
+
+    def _normalize_order(self):
+        """Перенумеровать original_index по текущему порядку all_channels.
+
+        Нужно после любого ручного перемещения/вставки/удаления, иначе
+        модель, сортирующая по колонке 0 (original_index), вернёт каналы
+        на старые места.
+
+        Дополнительно инвалидируем кэш хэша у каждого канала, чтобы
+        UndoRedoManager увидел изменение original_index (иначе diff
+        для drag & drop / перемещения окажется пустым).
+        """
+        for i, ch in enumerate(self.all_channels):
+            object.__setattr__(ch, 'original_index', i)
+            object.__setattr__(ch, '_cached_hash', None)
+            object.__setattr__(ch, '_cached_hash_mod', None)
+        self._needs_resort = False
 
     def refresh_view(self):
         self._suppress_state_save = True
@@ -1313,6 +1393,10 @@ class PlaylistTab(QWidget):
                 seen.add(ch.uid)
 
         self.all_channels = new_list
+        # Принудительно переиндексируем original_index по восстановленному
+        # порядку, чтобы модель сортировала корректно и diff для
+        # последующего undo/redo был осмысленным.
+        self._normalize_order()
         self.modified = True
         self.sync_to_core()
         self.refresh_view()
@@ -1572,6 +1656,7 @@ class PlaylistTab(QWidget):
         with self._edit_channels(description):
             self.all_channels[:] = [ch for ch in self.all_channels
                                     if ch.uid not in del_uids]
+            self._normalize_order()
         return len(targets)
 
     def _new_channel(self):
@@ -1582,6 +1667,7 @@ class PlaylistTab(QWidget):
         object.__setattr__(ch, 'original_index', -1)
         ch.update_extinf()
         self.all_channels.append(ch)
+        self._normalize_order()
         self.sync_to_core()
         with self._suppress_save():
             self.model.set_channels(self.all_channels)
@@ -1617,6 +1703,7 @@ class PlaylistTab(QWidget):
         self.save_state("Удаление канала")
         self.all_channels = [ch for ch in self.all_channels
                              if ch.uid not in uids]
+        self._normalize_order()
         self.sync_to_core()
         self.selected_channels = []
         self.current_channel = None
@@ -1748,6 +1835,7 @@ class PlaylistTab(QWidget):
             if ch in self.all_channels:
                 self.save_state("Добавление в ч.с.")
                 self.all_channels.remove(ch)
+                self._normalize_order()
                 self.sync_to_core()
                 with self._suppress_save():
                     self.model.set_channels(self.all_channels)
@@ -1799,6 +1887,7 @@ class PlaylistTab(QWidget):
             del_uids = {c.uid for c in chs}
             self.all_channels = [ch for ch in self.all_channels
                                  if ch.uid not in del_uids]
+            self._normalize_order()
             self.sync_to_core()
             with self._suppress_save():
                 self.model.set_channels(self.all_channels)
@@ -1879,6 +1968,7 @@ class PlaylistTab(QWidget):
         self.save_state("Вырезание канала")
         self.all_channels = [ch for ch in self.all_channels
                              if ch.uid not in uids]
+        self._normalize_order()
         self.sync_to_core()
         self.selected_channels = []
         self.current_channel = None
@@ -1896,37 +1986,139 @@ class PlaylistTab(QWidget):
             w.copied_channels = [ch.copy()
                                  for ch in self.selected_channels]
 
-    def _paste_channel(self):
+    def _paste_channel(self, row: int = -1):
         w = self.parent_window
         if w is None or not w.copied_channel:
             return
         self.save_state("Вставка канала")
         ch = w.copied_channel.copy()
         object.__setattr__(ch, 'original_index', -1)
-        if self.current_channel and self.current_channel in self.all_channels:
-            idx = self.all_channels.index(self.current_channel) + 1
+
+        ref_channel = None
+        if row >= 0:
+            ref_channel = self.channel_for_row(row)
+        if ref_channel is None:
+            ref_channel = self.current_channel
+
+        if ref_channel is not None and ref_channel in self.all_channels:
+            idx = self.all_channels.index(ref_channel) + 1
             self.all_channels.insert(idx, ch)
         else:
             self.all_channels.append(ch)
+
+        self._normalize_order()
         self.sync_to_core()
         with self._suppress_save():
             self.model.set_channels(self.all_channels)
 
-    def _paste_selected_channels(self):
+    def _paste_selected_channels(self, row: int = -1):
         w = self.parent_window
         if w is None or not w.copied_channels:
             return
         self.save_state("Вставка каналов")
-        base_idx = len(self.all_channels)
-        if self.current_channel and self.current_channel in self.all_channels:
-            base_idx = self.all_channels.index(self.current_channel) + 1
+
+        ref_channel = None
+        if row >= 0:
+            ref_channel = self.channel_for_row(row)
+        if ref_channel is None:
+            ref_channel = self.current_channel
+
+        if ref_channel is not None and ref_channel in self.all_channels:
+            base_idx = self.all_channels.index(ref_channel) + 1
+        else:
+            base_idx = len(self.all_channels)
+
         for offset, ch in enumerate(w.copied_channels):
             new = ch.copy()
             object.__setattr__(new, 'original_index', -1)
             self.all_channels.insert(base_idx + offset, new)
+
+        self._normalize_order()
         self.sync_to_core()
         with self._suppress_save():
             self.model.set_channels(self.all_channels)
+
+    def _on_model_request_move(self, uids: List[int],
+                                ref_uid: Optional[int]):
+        """Переставить каналы по запросу drag & drop."""
+        if not uids:
+            return
+        moving_set = set(uids)
+        moving = [ch for ch in self.all_channels if ch.uid in moving_set]
+        if not moving:
+            return
+
+        # Если перетаскиваем на себя — ничего не делаем
+        if ref_uid is not None and ref_uid in moving_set:
+            return
+
+        ref_channel = None
+        if ref_uid is not None:
+            ref_channel = next(
+                (ch for ch in self.all_channels if ch.uid == ref_uid), None)
+
+        # Фиксируем всё, что накопилось в debounce-очереди undo,
+        # чтобы предыдущая операция не потерялась.
+        if self._state_save_timer.isActive():
+            self._state_save_timer.stop()
+            self._do_save_state()
+
+        remaining = [ch for ch in self.all_channels
+                     if ch.uid not in moving_set]
+
+        if ref_channel is not None:
+            if ref_channel not in remaining:
+                # ref был среди перемещаемых — не двигаем
+                return
+            insert_idx = remaining.index(ref_channel)
+        else:
+            insert_idx = len(remaining)
+
+        new_list = (remaining[:insert_idx] +
+                    moving +
+                    remaining[insert_idx:])
+        self.all_channels = new_list
+
+        # Сброс сортировки на колонку 0, чтобы drop был виден
+        h = self.table.horizontalHeader()
+        if h.sortIndicatorSection() != 0:
+            h.blockSignals(True)
+            h.setSortIndicator(0, Qt.SortOrder.AscendingOrder)
+            h.blockSignals(False)
+            self.model._sort_column = 0
+            self.model._sort_order = Qt.SortOrder.AscendingOrder
+
+        self._normalize_order()
+        self.sync_to_core()
+        with self._suppress_save():
+            self.model.set_channels(self.all_channels)
+
+        # Немедленно фиксируем diff в undo — не через debounce,
+        # иначе повторные drag & drop могут «съесть» друг друга.
+        self._pending_state_desc = "Перемещение каналов (drag & drop)"
+        self._do_save_state()
+
+        self._reselect_uids(moving_set)
+
+    def _reselect_uids(self, uids: Set[int]):
+        """Выделить строки с указанными uid."""
+        self.table.clearSelection()
+        sel_model = self.table.selectionModel()
+        if sel_model is None:
+            return
+        first_idx = None
+        for r in range(self.model.rowCount()):
+            ch = self.model.channel_at(r)
+            if ch and ch.uid in uids:
+                idx = self.model.index(r, 0)
+                sel_model.select(
+                    idx,
+                    QItemSelectionModel.SelectionFlag.Select |
+                    QItemSelectionModel.SelectionFlag.Rows)
+                if first_idx is None:
+                    first_idx = idx
+        if first_idx is not None:
+            self.table.setCurrentIndex(first_idx)
 
     def _rename_groups(self):
         if not self.selected_channels:
@@ -1975,8 +2167,11 @@ class PlaylistTab(QWidget):
             return
         if idx > 0:
             with self._edit_channels("Перемещение вверх"):
-                self.all_channels[idx], self.all_channels[idx - 1] = \
-                    self.all_channels[idx - 1], self.all_channels[idx]
+                (self.all_channels[idx],
+                 self.all_channels[idx - 1]) = \
+                    (self.all_channels[idx - 1],
+                     self.all_channels[idx])
+                self._normalize_order()
 
     def _move_channel_down(self, row: int = -1):
         if row == -1:
@@ -1991,8 +2186,11 @@ class PlaylistTab(QWidget):
             return
         if idx < len(self.all_channels) - 1:
             with self._edit_channels("Перемещение вниз"):
-                self.all_channels[idx], self.all_channels[idx + 1] = \
-                    self.all_channels[idx + 1], self.all_channels[idx]
+                (self.all_channels[idx],
+                 self.all_channels[idx + 1]) = \
+                    (self.all_channels[idx + 1],
+                     self.all_channels[idx])
+                self._normalize_order()
 
     def _move_selected_up(self):
         if not self.selected_channels:
@@ -2014,6 +2212,7 @@ class PlaylistTab(QWidget):
                  self.all_channels[real_idx - 1]) = \
                     (self.all_channels[real_idx - 1],
                      self.all_channels[real_idx])
+        self._normalize_order()
         self.sync_to_core()
         with self._suppress_save():
             self.model.set_channels(self.all_channels)
@@ -2039,6 +2238,7 @@ class PlaylistTab(QWidget):
                  self.all_channels[real_idx + 1]) = \
                     (self.all_channels[real_idx + 1],
                      self.all_channels[real_idx])
+        self._normalize_order()
         self.sync_to_core()
         with self._suppress_save():
             self.model.set_channels(self.all_channels)
@@ -2416,6 +2616,7 @@ class PlaylistTab(QWidget):
         if removed > 0:
             with self._edit_channels("Применение ч.с. каналов"):
                 self.all_channels[:] = filtered
+                self._normalize_order()
         return removed
 
     def save_changes(self):
@@ -2679,6 +2880,7 @@ class PlaylistTab(QWidget):
         def on_duplicates_removed(removed: int):
             if removed > 0 and _is_qobject_valid(self):
                 self.save_state("Удаление дубликатов")
+                self._normalize_order()
                 self.sync_to_core()
                 with self._suppress_save():
                     self.model.set_channels(self.all_channels)
@@ -2779,7 +2981,8 @@ class PlaylistTab(QWidget):
         menu.addAction(self._act("Вырезать канал",
                                  self._cut_channel, menu))
         menu.addAction(self._act("Вставить канал",
-                                 self._paste_channel, menu))
+                                 lambda checked=False, r=row:
+                                     self._paste_channel(r), menu))
         menu.addSeparator()
         menu.addAction(self._act("Пакетное переименование групп",
                                  self._rename_groups, menu))
@@ -2815,7 +3018,9 @@ class PlaylistTab(QWidget):
         menu.addAction(self._act(f"Вырезать каналы ({cnt})",
                                  self._cut_selected_channels, menu))
         menu.addAction(self._act(f"Вставить каналы ({cnt})",
-                                 self._paste_selected_channels, menu))
+                                 lambda checked=False, r=min(rows):
+                                     self._paste_selected_channels(r),
+                                 menu))
         menu.addSeparator()
         menu.addAction(self._act(f"Массовая правка ({cnt})...",
                                  self._mass_edit_selected, menu))
@@ -2897,6 +3102,9 @@ class PlaylistTab(QWidget):
         with suppress(TypeError, RuntimeError):
             self.model.dataChanged.disconnect(
                 self._on_model_data_changed)
+        with suppress(TypeError, RuntimeError):
+            self.model.request_move.disconnect(
+                self._on_model_request_move)
 
 
 class MainWindow(QMainWindow):
@@ -2966,6 +3174,7 @@ class MainWindow(QMainWindow):
                 tab.flush_pending_state()
                 tab.save_state("Применение чёрного списка каналов")
                 tab.all_channels = filtered
+                tab._normalize_order()
                 tab.sync_to_core()
                 tab.refresh_view()
                 tab.flush_pending_state()
@@ -3108,11 +3317,6 @@ class MainWindow(QMainWindow):
         self._add_action(cm, "Удалить каналы без метаданных",
                          lambda: self._with_tab(
                              'delete_channels_without_metadata'))
-        cm.addSeparator()
-        self._add_action(cm, "Переместить вверх",
-                         lambda: self._with_tab('_move_channel_up'))
-        self._add_action(cm, "Переместить вниз",
-                         lambda: self._with_tab('_move_channel_down'))
         cm.addSeparator()
         self._add_action(cm, "Поиск дубликатов...",
                          self._show_duplicates)
@@ -3265,16 +3469,6 @@ class MainWindow(QMainWindow):
             "Повторить (Ctrl+Y)")
         self.toolbar_undo_action.setEnabled(False)
         self.toolbar_redo_action.setEnabled(False)
-        self._toolbar.addSeparator()
-
-        add("Переместить вверх",
-            lambda: self._with_tab('_move_channel_up'),
-            self._std_icon(SP.SP_ArrowUp, "go-up"),
-            "Переместить вверх")
-        add("Переместить вниз",
-            lambda: self._with_tab('_move_channel_down'),
-            self._std_icon(SP.SP_ArrowDown, "go-down"),
-            "Переместить вниз")
         self._toolbar.addSeparator()
 
         add("Копировать",
@@ -3582,6 +3776,7 @@ class MainWindow(QMainWindow):
             return
         tab = PlaylistTab(parent_window=self)
         tab.all_channels = channels
+        tab._normalize_order()
         tab.undo_manager.reset(tab.all_channels)
         tab.modified = True
 
@@ -3734,6 +3929,7 @@ class MainWindow(QMainWindow):
             new_chs = M3UParser.parse(content, os.path.basename(fp))
             tab.all_channels.extend(new_chs)
             tab.save_state("Импорт файла")
+            tab._normalize_order()
             tab.sync_to_core()
             with tab._suppress_save():
                 tab.model.set_channels(tab.all_channels)
@@ -4336,3 +4532,7 @@ def main():
     window.show()
     rc = app.exec()
     sys.exit(rc)
+
+
+if __name__ == "__main__":
+    main()
