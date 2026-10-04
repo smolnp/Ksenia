@@ -1,26 +1,34 @@
 # -*- coding: utf-8 -*-
-"""Встроенный VLC-плеер с расширенной медиа-информацией."""
+"""Встроенный VLC-плеер в отдельном процессе.
+
+GUI-процесс создаёт дочерний процесс с libvlc. Обмен — через
+multiprocessing.Queue. Это гарантирует, что зависание VLC
+не блокирует редактор.
+"""
 
 from __future__ import annotations
 
+import multiprocessing as mp
 import os
-import re
+import queue as _queue
 import sys
+import threading
+import time
 from contextlib import suppress
 from typing import Dict, List, Optional, Tuple
 
-from PyQt6.QtCore import QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QKeySequence, QShortcut
-from PyQt6.QtWidgets import (QComboBox, QHBoxLayout, QLabel, QLayout,
-    QPushButton, QSizePolicy, QSlider, QTreeWidget, QTreeWidgetItem,
-    QVBoxLayout, QWidget)
+from PyQt6.QtWidgets import (QComboBox, QHBoxLayout, QLabel, QVBoxLayout,
+    QPushButton, QSlider, QWidget)
 
-from constants import (VLC_INSTANCE_USER_AGENT,
-    VLC_PLAYER_DEFAULT_HEIGHT, VLC_PLAYER_DEFAULT_VOLUME,
-    VLC_PLAYER_DEFAULT_WIDTH)
+from constants import (PLAYER_CMD_QUEUE_TIMEOUT, PLAYER_PROCESS_JOIN_TIMEOUT_SEC,
+    PLAYER_PROCESS_TERMINATE_TIMEOUT_SEC, PLAYER_STATUS_POLL_MS,
+    VLC_INSTANCE_USER_AGENT, VLC_PLAYER_DEFAULT_HEIGHT,
+    VLC_PLAYER_DEFAULT_VOLUME, VLC_PLAYER_DEFAULT_WIDTH)
 from dialogs import BaseDialog, _is_qobject_valid
 from models import ChannelData
-from paths import info_box, logger, save_file_dialog, warn_box
+from paths import logger, warn_box
 
 try:
     import vlc
@@ -36,6 +44,9 @@ except Exception as e:
     _VLC_IMPORT_ERROR = str(e)
 
 
+# =====================================================================
+# Публичные хелперы (используются в ksenia_window.py)
+# =====================================================================
 def is_vlc_available() -> bool:
     return _HAS_VLC_MODULE
 
@@ -48,32 +59,234 @@ def get_vlc_error() -> str:
     return "Модуль python-vlc не установлен."
 
 
-def _fmt_duration(ms) -> str:
-    if not ms or ms <= 0:
-        return "—"
-    s = int(ms) // 1000
-    h, s = divmod(s, 3600)
-    m, s = divmod(s, 60)
-    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+# =====================================================================
+# Дочерний процесс: работа с libvlc
+# =====================================================================
+def _vlc_process_main(cmd_queue: mp.Queue, status_queue: mp.Queue):
+    """Главная функция дочернего процесса. Все вызовы VLC — здесь."""
+    try:
+        import vlc as _vlc
+    except Exception as e:
+        with suppress(Exception):
+            status_queue.put_nowait(
+                {'ready': False, 'error': f'vlc import: {e}'})
+        return
+
+    args = ["--quiet", "--video-on-top"]
+    if sys.platform.startswith("linux"):
+        args.append("--no-xlib")
+
+    instance = None
+    player = None
+    try:
+        instance = _vlc.Instance(*args)
+        if instance is None:
+            with suppress(Exception):
+                status_queue.put_nowait(
+                    {'ready': False, 'error': 'VLC Instance вернул None'})
+            return
+        instance.set_user_agent(VLC_INSTANCE_USER_AGENT,
+                                VLC_INSTANCE_USER_AGENT)
+        player = instance.media_player_new()
+    except Exception as e:
+        with suppress(Exception):
+            status_queue.put_nowait(
+                {'ready': False, 'error': f'vlc init: {e}'})
+        return
+
+    end_event = mp.Event()
+
+    def _on_end(*_a):
+        end_event.set()
+
+    with suppress(Exception):
+        player.event_manager().event_attach(
+            _vlc.EventType.MediaPlayerEndReached, _on_end)
+
+    state = {
+        'state': 'idle',
+        'size': '',
+        'fps': '',
+        'error': '',
+        'current_audio': -1,
+        'current_video': -1,
+    }
+    audio_tracks: List[Tuple[int, str]] = []
+    video_tracks: List[Tuple[int, str]] = []
+
+    def _collect_status() -> dict:
+        return {
+            'ready': True,
+            'state': state['state'],
+            'size': state['size'],
+            'fps': state['fps'],
+            'error': state['error'],
+            'audio_tracks': list(audio_tracks),
+            'video_tracks': list(video_tracks),
+            'current_audio': state['current_audio'],
+            'current_video': state['current_video'],
+        }
+
+    def _refresh_tracks():
+        nonlocal audio_tracks, video_tracks
+        try:
+            desc = player.audio_get_track_description() or []
+            audio_tracks = [
+                (t[0], t[1].decode('utf-8', 'replace')
+                 if isinstance(t[1], bytes) else str(t[1]))
+                for t in desc
+            ]
+        except Exception:
+            audio_tracks = []
+        try:
+            desc = player.video_get_track_description() or []
+            video_tracks = [
+                (t[0], t[1].decode('utf-8', 'replace')
+                 if isinstance(t[1], bytes) else str(t[1]))
+                for t in desc
+            ]
+        except Exception:
+            video_tracks = []
+
+    def _refresh_size_fps():
+        with suppress(Exception):
+            size = player.video_get_size(0)
+            if size and size[0] and size[1]:
+                state['size'] = f"{size[0]}x{size[1]}"
+            else:
+                state['size'] = ''
+        with suppress(Exception):
+            fps = player.get_fps()
+            if fps and fps > 0:
+                state['fps'] = f"{fps:.0f}"
+            else:
+                state['fps'] = ''
+
+    def _apply_play(msg: dict):
+        url = msg.get('url', '')
+        ua = msg.get('user_agent', '') or ''
+        extra = msg.get('extra_headers') or {}
+        if not url:
+            state['error'] = 'Пустой URL'
+            state['state'] = 'error'
+            return
+        with suppress(Exception):
+            player.set_media(None)
+        try:
+            media = instance.media_new(url)
+            for opt in (":network-caching=800",
+                        ":live-caching=800",
+                        ":http-reconnect=true",
+                        ":ipv4-timeout=5000"):
+                with suppress(Exception):
+                    media.add_option(opt)
+            if ua:
+                media.add_option(f":http-user-agent={ua}")
+            for k, v in extra.items():
+                if k.lower() == 'user-agent':
+                    continue
+                if k.lower() == 'referer':
+                    media.add_option(f":http-referrer={v}")
+                else:
+                    media.add_option(f":http-header={k}: {v}")
+            player.set_media(media)
+            player.play()
+            state['state'] = 'playing'
+            state['error'] = ''
+        except Exception as e:
+            state['error'] = str(e)
+            state['state'] = 'error'
+
+    # Основной цикл
+    last_publish = 0.0
+    poll_interval = max(0.05, PLAYER_STATUS_POLL_MS / 1000.0) * 2
+    while True:
+        if end_event.is_set():
+            end_event.clear()
+            state['state'] = 'ended'
+
+        try:
+            msg = cmd_queue.get(timeout=poll_interval)
+        except _queue.Empty:
+            msg = None
+        except (EOFError, OSError):
+            break
+
+        if msg is not None:
+            cmd = msg.get('cmd')
+            try:
+                if cmd == 'play':
+                    _apply_play(msg)
+                    _refresh_tracks()
+                elif cmd == 'pause':
+                    with suppress(Exception):
+                        player.pause()
+                    state['state'] = (
+                        'paused' if player.is_playing() else 'playing')
+                elif cmd == 'stop':
+                    with suppress(Exception):
+                        player.stop()
+                    with suppress(Exception):
+                        player.set_media(None)
+                    state['state'] = 'stopped'
+                elif cmd == 'volume':
+                    with suppress(Exception):
+                        player.audio_set_volume(int(msg.get('value', 100)))
+                elif cmd == 'aspect':
+                    with suppress(Exception):
+                        player.video_set_aspect_ratio(
+                            msg.get('value') or None)
+                elif cmd == 'audio':
+                    with suppress(Exception):
+                        player.audio_set_track(int(msg.get('value', -1)))
+                        state['current_audio'] = int(msg.get('value', -1))
+                elif cmd == 'video':
+                    with suppress(Exception):
+                        player.video_set_track(int(msg.get('value', -1)))
+                        state['current_video'] = int(msg.get('value', -1))
+                elif cmd == 'snapshot':
+                    with suppress(Exception):
+                        player.video_take_snapshot(
+                            0, msg.get('path', ''), 0, 0)
+                elif cmd == 'release':
+                    break
+            except Exception as e:
+                state['error'] = f'cmd {cmd}: {e}'
+
+        now = time.time()
+        if now - last_publish >= 0.5:
+            last_publish = now
+            _refresh_size_fps()
+            with suppress(Exception):
+                state['current_audio'] = player.audio_get_track()
+            with suppress(Exception):
+                state['current_video'] = player.video_get_track()
+            with suppress(Exception):
+                if state['state'] not in ('error', 'ended', 'stopped'):
+                    if player.is_playing() and state['state'] != 'paused':
+                        state['state'] = 'playing'
+            with suppress(Exception):
+                status_queue.put_nowait(_collect_status())
+
+    with suppress(Exception):
+        player.stop()
+    with suppress(Exception):
+        player.release()
+    with suppress(Exception):
+        instance.release()
+    with suppress(Exception):
+        status_queue.put_nowait({'ready': False, 'state': 'stopped'})
 
 
-def _fmt_bytes(b) -> str:
-    if not b or b <= 0:
-        return "0 B"
-    units = ("B", "KB", "MB", "GB")
-    f = float(b)
-    for u in units:
-        if f < 1024.0:
-            return f"{f:.1f} {u}"
-        f /= 1024.0
-    return f"{f:.1f} TB"
-
-
-class VlcPlayer(QWidget):
-    """Виджет-обёртка над VLC. Неблокирующее переключение каналов."""
+# =====================================================================
+# GUI-обёртка над дочерним процессом
+# =====================================================================
+class RemoteVlcPlayer(QWidget):
+    """Виджет-заглушка. Реальное видео — в отдельном окне VLC."""
 
     playback_error = pyqtSignal(str)
     end_reached = pyqtSignal()
+    status_updated = pyqtSignal(dict)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -81,464 +294,169 @@ class VlcPlayer(QWidget):
         self.setAutoFillBackground(True)
         self.setStyleSheet("background-color: black;")
 
-        self._vlc_instance = None
-        self._media_player = None
+        self._ctx = mp.get_context('spawn')
+        self._cmd_queue: Optional[mp.Queue] = None
+        self._status_queue: Optional[mp.Queue] = None
+        self._process: Optional[mp.Process] = None
+
+        self._last_status: dict = {}
         self._current_url = ""
         self._current_user_agent = ""
-        self._is_playing = False
-        self._event_attached = False
 
-        self._init_vlc()
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.placeholder = QLabel(
+            "🎬 VLC-плеер работает в отдельном процессе\n"
+            "и показывает видео в собственном окне.\n\n"
+            "Если окно плеера не видно — проверьте панель задач:\n"
+            "оно могло быть свёрнуто или скрыто за другими окнами.\n\n"
+            "Управляйте воспроизведением кнопками ниже —\n"
+            "редактор остаётся полностью рабочим.")
+        self.placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.placeholder.setStyleSheet(
+            "QLabel { color: #cccccc; font-size: 13px; "
+            "padding: 20px; background-color: #101010; }")
+        layout.addWidget(self.placeholder)
 
-    def _init_vlc(self):
+        self._status_timer = QTimer(self)
+        self._status_timer.setInterval(max(100, int(PLAYER_STATUS_POLL_MS)))
+        self._status_timer.timeout.connect(self._poll_status)
+
+        self._start_process()
+
+    def _start_process(self):
         if not _HAS_VLC_MODULE:
+            self.placeholder.setText(
+                "❌ python-vlc не установлен.\n\n" + get_vlc_error())
             return
         try:
-            args = ["--quiet"]
-            if sys.platform.startswith("linux"):
-                args.insert(0, "--no-xlib")
-            self._vlc_instance = vlc.Instance(*args)
-            if self._vlc_instance is None:
-                logger.error("VLC Instance вернул None")
-                return
-            self._vlc_instance.set_user_agent(
-                VLC_INSTANCE_USER_AGENT, VLC_INSTANCE_USER_AGENT)
-            self._media_player = self._vlc_instance.media_player_new()
+            self._cmd_queue = self._ctx.Queue()
+            self._status_queue = self._ctx.Queue()
+            self._process = self._ctx.Process(
+                target=_vlc_process_main,
+                args=(self._cmd_queue, self._status_queue),
+                daemon=True,
+                name="KseniaVlcProcess")
+            self._process.start()
+            self._status_timer.start()
+            logger.info(f"VLC-процесс запущен: pid={self._process.pid}")
+        except Exception as e:
+            logger.exception("Не удалось запустить VLC-процесс")
+            self.placeholder.setText(f"❌ Ошибка запуска VLC: {e}")
+
+    def _poll_status(self):
+        if self._status_queue is None:
+            return
+        drained = 0
+        try:
+            while drained < 20:
+                try:
+                    st = self._status_queue.get_nowait()
+                except _queue.Empty:
+                    break
+                drained += 1
+                self._last_status = st
+                if st.get('ready') is False and 'error' in st:
+                    self.playback_error.emit(st['error'])
+                elif st.get('state') == 'ended':
+                    self.end_reached.emit()
+                self.status_updated.emit(st)
         except Exception:
-            logger.exception("Ошибка инициализации VLC")
-            self._vlc_instance = None
-            self._media_player = None
+            logger.exception("VLC status poll")
+        if self._process is not None and not self._process.is_alive():
+            self._status_timer.stop()
 
     def is_vlc_ready(self) -> bool:
-        return self._media_player is not None
+        return self._process is not None and self._process.is_alive()
 
-    def _attach_end_event(self):
-        if self._event_attached or self._media_player is None:
+    def _send(self, msg: dict):
+        if self._cmd_queue is None:
             return
         try:
-            events = self._media_player.event_manager()
-            events.event_attach(
-                vlc.EventType.MediaPlayerEndReached,
-                lambda *a: self.end_reached.emit())
-            self._event_attached = True
-        except Exception:
-            logger.exception("event_attach EndReached")
+            self._cmd_queue.put_nowait(msg)
+        except Exception as e:
+            logger.debug(f"VLC cmd error: {e}")
 
     def play_url(self, url: str, user_agent: str = "",
                  extra_headers: Optional[Dict[str, str]] = None):
-        if not self.is_vlc_ready():
-            self.playback_error.emit("VLC не инициализирован")
-            return
-        if not url or not url.strip():
-            self.playback_error.emit("Пустой URL")
-            return
-        try:
-            with suppress(Exception):
-                self._media_player.set_media(None)
-
-            self._current_url = url
-            self._current_user_agent = user_agent or ""
-
-            media = self._vlc_instance.media_new(url)
-            for opt in (":network-caching=800",
-                        ":live-caching=800",
-                        ":http-reconnect=true",
-                        ":ipv4-timeout=5000"):
-                with suppress(Exception):
-                    media.add_option(opt)
-
-            if user_agent:
-                media.add_option(f":http-user-agent={user_agent}")
-            if extra_headers:
-                for k, v in extra_headers.items():
-                    if k.lower() == 'user-agent':
-                        continue
-                    if k.lower() == 'referer':
-                        media.add_option(f":http-referrer={v}")
-                    else:
-                        media.add_option(f":http-header={k}: {v}")
-
-            self._media_player.set_media(media)
-            if sys.platform.startswith("linux"):
-                self._media_player.set_xwindow(int(self.winId()))
-            elif sys.platform == "win32":
-                self._media_player.set_hwnd(int(self.winId()))
-            elif sys.platform == "darwin":
-                self._media_player.set_nsobject(int(self.winId()))
-
-            self._attach_end_event()
-            self._media_player.play()
-            self._is_playing = True
-        except Exception as e:
-            logger.exception("Ошибка воспроизведения VLC")
-            self.playback_error.emit(str(e))
-
-    def stop(self):
-        if self._media_player is not None:
-            with suppress(Exception):
-                self._media_player.stop()
-        self._is_playing = False
-        self._current_url = ""
+        self._current_url = url
+        self._current_user_agent = user_agent or ""
+        self._send({
+            'cmd': 'play',
+            'url': url,
+            'user_agent': user_agent or '',
+            'extra_headers': dict(extra_headers or {}),
+        })
 
     def pause(self):
-        if self._media_player is not None:
-            with suppress(Exception):
-                self._media_player.pause()
+        self._send({'cmd': 'pause'})
+
+    def stop(self):
+        self._send({'cmd': 'stop'})
 
     def set_volume(self, volume: int):
-        if self._media_player is not None:
-            with suppress(Exception):
-                self._media_player.audio_set_volume(max(0, min(100, volume)))
-
-    def get_metadata(self, meta_type: int) -> Optional[str]:
-        if self._media_player is None:
-            return None
-        with suppress(Exception):
-            media = self._media_player.get_media()
-            if media is None:
-                return None
-            v = media.get_meta(meta_type)
-            return v if v else None
-        return None
-
-    def _get_tracks(self, fn) -> List[Tuple[int, str]]:
-        if self._media_player is None:
-            return []
-        with suppress(Exception):
-            desc = fn()
-            if desc:
-                result = []
-                for t in desc:
-                    name = (t[1].decode('utf-8', errors='replace')
-                            if isinstance(t[1], bytes) else str(t[1]))
-                    result.append((t[0], name))
-                return result
-        return []
-
-    def get_audio_tracks(self) -> List[Tuple[int, str]]:
-        return self._get_tracks(
-            lambda: self._media_player.audio_get_track_description()
-            if self._media_player else None)
-
-    def get_video_tracks(self) -> List[Tuple[int, str]]:
-        return self._get_tracks(
-            lambda: self._media_player.video_get_track_description()
-            if self._media_player else None)
-
-    def get_subtitle_tracks(self) -> List[Tuple[int, str]]:
-        return self._get_tracks(
-            lambda: self._media_player.video_get_spu_description()
-            if self._media_player else None)
-
-    def set_audio_track(self, track_id: int):
-        if self._media_player is not None:
-            with suppress(Exception):
-                self._media_player.audio_set_track(track_id)
-
-    def set_video_track(self, track_id: int):
-        if self._media_player is not None:
-            with suppress(Exception):
-                self._media_player.video_set_track(track_id)
-
-    def set_subtitle_track(self, track_id: int):
-        if self._media_player is not None:
-            with suppress(Exception):
-                self._media_player.video_set_spu(track_id)
+        self._send({'cmd': 'volume', 'value': int(volume)})
 
     def set_aspect_ratio(self, ratio: str):
-        if self._media_player is not None:
-            with suppress(Exception):
-                self._media_player.video_set_aspect_ratio(ratio or None)
+        self._send({'cmd': 'aspect', 'value': ratio or ''})
+
+    def set_audio_track(self, track_id: int):
+        self._send({'cmd': 'audio', 'value': int(track_id)})
+
+    def set_video_track(self, track_id: int):
+        self._send({'cmd': 'video', 'value': int(track_id)})
 
     def take_snapshot(self, path: str) -> bool:
-        if self._media_player is None:
-            return False
-        with suppress(Exception):
-            return bool(self._media_player.video_take_snapshot(
-                0, path, 0, 0))
-        return False
+        self._send({'cmd': 'snapshot', 'path': path})
+        return True
 
-    def get_media_info(self) -> Dict[str, str]:
-        info: Dict[str, str] = {}
-        if not _HAS_VLC_MODULE or self._media_player is None:
-            return info
+    def get_video_info_text(self) -> str:
+        st = self._last_status
+        parts: List[str] = []
+        size = st.get('size') or ''
+        if size:
+            parts.append(size.replace('x', '×'))
+        fps = st.get('fps') or ''
+        if fps:
+            parts.append(f"{fps} fps")
+        return "  ·  ".join(parts)
 
-        meta_map = {
-            "Title": vlc.Meta.Title, "Artist": vlc.Meta.Artist,
-            "Album": vlc.Meta.Album, "Genre": vlc.Meta.Genre,
-            "Copyright": vlc.Meta.Copyright,
-            "Description": vlc.Meta.Description,
-            "Rating": vlc.Meta.Rating, "Date": vlc.Meta.Date,
-            "Setting": vlc.Meta.Setting, "URL": vlc.Meta.URL,
-            "Language": vlc.Meta.Language,
-            "NowPlaying": vlc.Meta.NowPlaying,
-            "Publisher": vlc.Meta.Publisher,
-            "EncodedBy": vlc.Meta.EncodedBy,
-            "ArtworkURL": vlc.Meta.ArtworkURL,
-            "TrackID": vlc.Meta.TrackID,
-            "TrackTotal": vlc.Meta.TrackTotal,
-            "Director": vlc.Meta.Director,
-            "Season": vlc.Meta.Season,
-            "Episode": vlc.Meta.Episode,
-            "ShowName": vlc.Meta.ShowName,
-            "Actors": vlc.Meta.Actors,
-        }
-        for label, mtype in meta_map.items():
+    def get_last_status(self) -> dict:
+        return dict(self._last_status)
+
+    def release(self):
+        """Корректно завершить дочерний процесс."""
+        self._status_timer.stop()
+        if self._cmd_queue is not None:
             with suppress(Exception):
-                v = self.get_metadata(mtype)
-                if v:
-                    info[f"Meta/{label}"] = v
-
-        with suppress(Exception):
-            media = self._media_player.get_media()
-            if media is not None:
-                dur = media.get_duration()
-                if dur and dur > 0:
-                    info["Media/Duration"] = _fmt_duration(dur)
-                mrl = media.get_mrl()
-                if mrl:
-                    info["Media/MRL"] = mrl[:200]
-
-        with suppress(Exception):
-            states = {
-                vlc.State.NothingSpecial: "NothingSpecial",
-                vlc.State.Opening: "Opening",
-                vlc.State.Buffering: "Buffering",
-                vlc.State.Playing: "Playing",
-                vlc.State.Paused: "Paused",
-                vlc.State.Stopped: "Stopped",
-                vlc.State.Ended: "Ended",
-                vlc.State.Error: "Error",
-            }
-            st = self._media_player.get_state()
-            info["Player/State"] = states.get(st, str(st))
-            info["Player/IsPlaying"] = str(
-                self._media_player.is_playing())
-            info["Player/CanPause"] = str(
-                self._media_player.can_pause())
-            info["Player/CanSeek"] = str(self._media_player.can_seek())
-            vol = self._media_player.audio_get_volume()
-            if vol is not None and vol >= 0:
-                info["Player/Volume"] = str(vol)
-
-        with suppress(Exception):
-            t = self._media_player.get_time()
-            if t is not None and t >= 0:
-                info["Playback/Time"] = _fmt_duration(t)
-            pos = self._media_player.get_position()
-            if pos is not None and pos >= 0:
-                info["Playback/Position"] = f"{pos * 100:.1f}%"
-
-        with suppress(Exception):
-            tr = self._media_player.audio_get_track()
-            desc = self._media_player.audio_get_track_description()
-            for tid, name in desc or []:
-                if tid == tr:
-                    nm = (name.decode('utf-8', 'replace')
-                          if isinstance(name, bytes) else str(name))
-                    info["Audio/Track"] = f"{tid}: {nm}"
-                    break
-
-        with suppress(Exception):
-            codec = self._media_player.audio_get_codec()
-            if codec:
-                info["Audio/Codec"] = str(codec)
-
-        with suppress(Exception):
-            tr = self._media_player.video_get_track()
-            desc = self._media_player.video_get_track_description()
-            for tid, name in desc or []:
-                if tid == tr:
-                    nm = (name.decode('utf-8', 'replace')
-                          if isinstance(name, bytes) else str(name))
-                    info["Video/Track"] = f"{tid}: {nm}"
-                    break
-
-        with suppress(Exception):
-            size = self._media_player.video_get_size(0)
-            if size and size[0] and size[1]:
-                info["Video/Size"] = f"{size[0]}x{size[1]}"
-
-        with suppress(Exception):
-            fps = self._media_player.get_fps()
-            if fps and fps > 0:
-                info["Video/FPS"] = f"{fps:.2f}"
-
-        with suppress(Exception):
-            ar = self._media_player.video_get_aspect_ratio()
-            if ar:
-                info["Video/Aspect"] = str(ar)
-
-        with suppress(Exception):
-            spu = self._media_player.video_get_spu()
-            desc = self._media_player.video_get_spu_description()
-            for tid, name in desc or []:
-                if tid == spu:
-                    nm = (name.decode('utf-8', 'replace')
-                          if isinstance(name, bytes) else str(name))
-                    info["Subtitle/Track"] = f"{tid}: {nm}"
-                    break
-
-        with suppress(Exception):
-            stats = self._media_player.get_stats()
-            if stats:
-                for k, v in stats.items():
-                    if k in ("read_bytes", "demux_read_bytes",
-                             "input_bitrate", "demux_bitrate"):
-                        continue
-                    info[f"Stats/{k}"] = str(v)
-                rb = stats.get("read_bytes")
-                if rb:
-                    info["Stats/read_bytes"] = _fmt_bytes(int(rb))
-                ib = stats.get("input_bitrate")
-                if ib:
-                    info["Stats/input_bitrate"] = f"{ib * 1000:.0f} kbps"
-
-        if self._current_url:
-            info["Stream/URL"] = self._current_url[:200]
-        if self._current_user_agent:
-            info["Stream/User-Agent"] = self._current_user_agent[:120]
-
-        return info
+                self._cmd_queue.put_nowait({'cmd': 'release'})
+        if self._process is not None:
+            self._process.join(timeout=PLAYER_PROCESS_JOIN_TIMEOUT_SEC)
+            if self._process.is_alive():
+                logger.warning("VLC-процесс не завершился, terminate()")
+                with suppress(Exception):
+                    self._process.terminate()
+                self._process.join(
+                    timeout=PLAYER_PROCESS_TERMINATE_TIMEOUT_SEC)
+            self._process = None
+        for q in (self._cmd_queue, self._status_queue):
+            if q is not None:
+                with suppress(Exception):
+                    q.close()
+                    q.join_thread()
+        self._cmd_queue = None
+        self._status_queue = None
 
     def closeEvent(self, event):
-        self.stop()
-        if self._media_player is not None:
-            with suppress(Exception):
-                self._media_player.release()
-            self._media_player = None
-        if self._vlc_instance is not None:
-            with suppress(Exception):
-                self._vlc_instance.release()
-            self._vlc_instance = None
+        self.release()
         super().closeEvent(event)
 
 
-class MediaInfoDialog(BaseDialog):
-    """Диалог медиа-информации с автообновлением раз в секунду."""
-
-    GROUP_ORDER = (
-        "Player", "Playback", "Media", "Stream",
-        "Video", "Audio", "Subtitle", "Stats",
-        "Meta", "Channel", "Общее",
-    )
-
-    def __init__(self, player: VlcPlayer, channel: Optional[ChannelData] = None,
-                 parent=None):
-        super().__init__("Медиа-инфо", parent, size=(640, 700))
-        self.player = player
-        self.channel = channel
-
-        self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(["Параметр", "Значение"])
-        self.tree.setColumnWidth(0, 240)
-        self.tree.setAlternatingRowColors(True)
-        self.tree.setUniformRowHeights(True)
-        self.root.addWidget(self.tree, 1)
-
-        row = QHBoxLayout()
-        self.refresh_btn = QPushButton("🔄 Обновить")
-        self.refresh_btn.clicked.connect(self.refresh)
-        row.addWidget(self.refresh_btn)
-
-        self.copy_btn = QPushButton("📋 Скопировать всё")
-        self.copy_btn.clicked.connect(self._copy_all)
-        row.addWidget(self.copy_btn)
-
-        self.pause_btn = QPushButton("⏸ Пауза авто")
-        self.pause_btn.setCheckable(True)
-        self.pause_btn.toggled.connect(self._on_pause)
-        row.addWidget(self.pause_btn)
-
-        row.addStretch()
-        self.root.addLayout(row)
-
-        self.add_close()
-
-        self._timer = QTimer(self)
-        self._timer.setInterval(1000)
-        self._timer.timeout.connect(self.refresh)
-        self._timer.start()
-        self.refresh()
-
-    def _on_pause(self, paused):
-        if paused:
-            self._timer.stop()
-            self.pause_btn.setText("▶ Возобновить")
-        else:
-            self._timer.start()
-            self.pause_btn.setText("⏸ Пауза авто")
-
-    def _collect(self) -> Dict[str, str]:
-        info: Dict[str, str] = {}
-        with suppress(Exception):
-            info.update(self.player.get_media_info())
-        ch = self.channel
-        if ch is not None:
-            info["Channel/Name"] = ch.meta.name or "—"
-            info["Channel/Group"] = ch.meta.group or "—"
-            if ch.meta.tvg_id:
-                info["Channel/TVG-ID"] = ch.meta.tvg_id
-            if ch.meta.tvg_name:
-                info["Channel/TVG-Name"] = ch.meta.tvg_name
-            if ch.meta.tvg_logo:
-                info["Channel/TVG-Logo"] = ch.meta.tvg_logo
-            if ch.link.url:
-                info["Channel/URL"] = ch.link.url[:200]
-            if ch.link.user_agent:
-                info["Channel/User-Agent"] = ch.link.user_agent[:120]
-            if ch.link.link_source:
-                info["Channel/Source"] = ch.link.link_source
-        return info
-
-    def refresh(self):
-        info = self._collect()
-        groups: Dict[str, List[Tuple[str, str]]] = {}
-        for k, v in info.items():
-            if "/" in k:
-                cat, field = k.split("/", 1)
-            else:
-                cat, field = "Общее", k
-            groups.setdefault(cat, []).append((field, str(v)))
-
-        expanded: Set[str] = set()
-        for i in range(self.tree.topLevelItemCount()):
-            top = self.tree.topLevelItem(i)
-            if top.isExpanded():
-                expanded.add(top.text(0))
-
-        self.tree.clear()
-        ordered = [c for c in self.GROUP_ORDER if c in groups]
-        for c in groups:
-            if c not in ordered:
-                ordered.append(c)
-
-        for cat in ordered:
-            top = QTreeWidgetItem([cat, ""])
-            top.setExpanded(cat in expanded or cat in ("Player", "Playback"))
-            f = top.font(0)
-            f.setBold(True)
-            top.setFont(0, f)
-            for field, val in groups[cat]:
-                child = QTreeWidgetItem([field, val])
-                child.setToolTip(1, val)
-                top.addChild(child)
-            self.tree.addTopLevelItem(top)
-
-    def _copy_all(self):
-        info = self._collect()
-        text = "\n".join(f"{k}: {v}" for k, v in info.items())
-        from PyQt6.QtWidgets import QApplication
-        QApplication.clipboard().setText(text)
-        info_box(self, "Скопировано в буфер обмена.", "Медиа-инфо")
-
-    def closeEvent(self, event):
-        self._timer.stop()
-        super().closeEvent(event)
-
-
+# =====================================================================
+# Диалог плеера
+# =====================================================================
 class EmbeddedPlayerDialog(BaseDialog):
-    """Встроенный плеер Ksenia Player."""
+    """Ksenia Player — управление VLC, работающим в отдельном процессе."""
 
     def __init__(self, channel: ChannelData, parent=None,
                  playlist: Optional[List[ChannelData]] = None):
@@ -557,19 +475,9 @@ class EmbeddedPlayerDialog(BaseDialog):
         self.channel = self.playlist[self.index]
 
         self.setWindowModality(Qt.WindowModality.NonModal)
-
-        self._normal_size = QSize(VLC_PLAYER_DEFAULT_WIDTH,
-                                  VLC_PLAYER_DEFAULT_HEIGHT)
-        self._resize_locked = False
-        self.setSizeGripEnabled(False)
-        with suppress(Exception):
-            self.root.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
         self.setMinimumSize(640, 480)
 
-        self.player = VlcPlayer(self)
-        self.player.setMinimumSize(320, 240)
-        self.player.setSizePolicy(QSizePolicy.Policy.Expanding,
-                                  QSizePolicy.Policy.Expanding)
+        self.player = RemoteVlcPlayer(self)
         self.root.addWidget(self.player, 1)
 
         controls = QHBoxLayout()
@@ -604,10 +512,20 @@ class EmbeddedPlayerDialog(BaseDialog):
         controls.addWidget(self.aspect_combo)
 
         controls.addSpacing(12)
-        self.info_btn = QPushButton("ℹ Медиа-инфо")
-        self.info_btn.setToolTip("Медиа-инфо (I)")
-        self.info_btn.clicked.connect(self._show_media_info)
-        controls.addWidget(self.info_btn)
+        self.video_info_label = QLabel("")
+        self.video_info_label.setMinimumWidth(140)
+        self.video_info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.video_info_label.setStyleSheet(
+            "QLabel {"
+            "  color: #000000;"
+            "  background-color: #e0e0e0;"
+            "  padding: 3px 10px;"
+            "  border-radius: 4px;"
+            "  font-family: 'Consolas', 'Menlo', monospace;"
+            "  font-size: 12px;"
+            "}")
+        self.video_info_label.setToolTip("Разрешение и частота кадров")
+        controls.addWidget(self.video_info_label)
 
         controls.addStretch()
         self.root.addLayout(controls)
@@ -622,23 +540,18 @@ class EmbeddedPlayerDialog(BaseDialog):
         self.video_combo.addItem("Видео: по умолчанию", -1)
         self.video_combo.currentIndexChanged.connect(self._on_video)
         tracks.addWidget(self.video_combo)
-
-        self.subtitle_combo = QComboBox()
-        self.subtitle_combo.addItem("Субтитры: выкл", -1)
-        self.subtitle_combo.currentIndexChanged.connect(self._on_sub)
-        tracks.addWidget(self.subtitle_combo)
         self.root.addLayout(tracks)
 
         self.add_close()
 
         self.player.playback_error.connect(self._on_error)
         self.player.end_reached.connect(self._on_end)
+        self.player.status_updated.connect(self._on_status)
 
         self._shortcuts: List[QShortcut] = []
         for keys, slot in (
             ("Ctrl+Right", self.play_next),
             ("Ctrl+Left", self.play_previous),
-            ("I", self._show_media_info),
             ("A", lambda: self.aspect_combo.setCurrentText("16:9")),
             ("Z", lambda: self.aspect_combo.setCurrentText("По умолчанию")),
             ("Space", self._toggle_pause),
@@ -649,28 +562,8 @@ class EmbeddedPlayerDialog(BaseDialog):
 
         self.player.set_volume(saved_vol)
         self._play_at(self.index)
-        self._info_dialog: Optional[MediaInfoDialog] = None
 
-    def resizeEvent(self, event):
-        if (self._resize_locked
-                and not self.isMaximized()
-                and not self.isFullScreen()
-                and event.size() != self._normal_size):
-            super().resizeEvent(event)
-            QTimer.singleShot(0, self._restore_size)
-            return
-        super().resizeEvent(event)
-
-    def _restore_size(self):
-        if not _is_qobject_valid(self) or self.isMaximized():
-            return
-        if self.size() != self._normal_size:
-            self.resize(self._normal_size)
-
-    def _unlock_resize(self):
-        self._resize_locked = False
-        self._restore_size()
-
+    # --- Плейлист ---
     def _play_at(self, index: int):
         if not _is_qobject_valid(self):
             return
@@ -679,27 +572,19 @@ class EmbeddedPlayerDialog(BaseDialog):
         self.index = index
         self.channel = self.playlist[index]
         self.setWindowTitle(f"Ksenia Player — {self.channel.meta.name}")
-
-        self._resize_locked = True
-        if not self.isMaximized() and self.size() != self._normal_size:
-            self.resize(self._normal_size)
-
         ua = self.channel.link.user_agent or ""
         extra = (dict(self.channel.link.extra_headers)
                  if self.channel.link.extra_headers else None)
         self.player.play_url(self.channel.link.url, ua, extra)
         self._update_nav()
-        QTimer.singleShot(500, self._refresh_tracks)
-        QTimer.singleShot(1500, self._refresh_tracks)
-        QTimer.singleShot(2000, self._unlock_resize)
 
     def play_next(self):
         if self.index < len(self.playlist) - 1:
-            QTimer.singleShot(50, lambda: self._play_at(self.index + 1))
+            self._play_at(self.index + 1)
 
     def play_previous(self):
         if self.index > 0:
-            QTimer.singleShot(50, lambda: self._play_at(self.index - 1))
+            self._play_at(self.index - 1)
 
     def _update_nav(self):
         if not _is_qobject_valid(self):
@@ -713,6 +598,7 @@ class EmbeddedPlayerDialog(BaseDialog):
         if self.index < len(self.playlist) - 1:
             self.play_next()
 
+    # --- Управление ---
     def _toggle_pause(self):
         if _is_qobject_valid(self):
             self.player.pause()
@@ -739,82 +625,4 @@ class EmbeddedPlayerDialog(BaseDialog):
         if not _is_qobject_valid(self) or idx <= 0:
             return
         tid = self.video_combo.itemData(idx)
-        if tid is not None and tid >= 0:
-            self.player.set_video_track(tid)
-
-    def _on_sub(self, idx):
-        if not _is_qobject_valid(self):
-            return
-        tid = self.subtitle_combo.itemData(idx)
-        if tid is not None:
-            self.player.set_subtitle_track(tid)
-
-    def _refresh_tracks(self):
-        if not _is_qobject_valid(self):
-            return
-        if self._resize_locked:
-            return
-        self.setUpdatesEnabled(False)
-        try:
-            audio = self.player.get_audio_tracks()
-            self.audio_combo.blockSignals(True)
-            self.audio_combo.clear()
-            self.audio_combo.addItem("Аудио: по умолчанию", -1)
-            for tid, name in audio:
-                self.audio_combo.addItem(f"Аудио: {name}", tid)
-            self.audio_combo.setVisible(len(audio) > 1)
-            self.audio_combo.blockSignals(False)
-
-            video = self.player.get_video_tracks()
-            self.video_combo.blockSignals(True)
-            self.video_combo.clear()
-            self.video_combo.addItem("Видео: по умолчанию", -1)
-            for tid, name in video:
-                self.video_combo.addItem(f"Видео: {name}", tid)
-            self.video_combo.setVisible(len(video) > 1)
-            self.video_combo.blockSignals(False)
-
-            subs = self.player.get_subtitle_tracks()
-            self.subtitle_combo.blockSignals(True)
-            self.subtitle_combo.clear()
-            self.subtitle_combo.addItem("Субтитры: выкл", -1)
-            for tid, name in subs:
-                self.subtitle_combo.addItem(f"Субтитры: {name}", tid)
-            self.subtitle_combo.setVisible(len(subs) > 1)
-            self.subtitle_combo.blockSignals(False)
-        finally:
-            self.setUpdatesEnabled(True)
-
-    def _show_media_info(self):
-        if not _is_qobject_valid(self):
-            return
-        if self._info_dialog is not None and self._info_dialog.isVisible():
-            self._info_dialog.raise_()
-            self._info_dialog.activateWindow()
-            self._info_dialog.refresh()
-            return
-        dlg = MediaInfoDialog(self.player, self.channel, self)
-        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
-        dlg.destroyed.connect(lambda: setattr(self, '_info_dialog', None))
-        self._info_dialog = dlg
-        dlg.show()
-
-    def _on_error(self, msg):
-        if _is_qobject_valid(self):
-            warn_box(self, msg, "Ошибка VLC")
-
-    def closeEvent(self, event):
-        for sc in self._shortcuts:
-            with suppress(Exception):
-                sc.activated.disconnect()
-            sc.setParent(None)
-            sc.deleteLater()
-        self._shortcuts.clear()
-        if _is_qobject_valid(self):
-            with suppress(Exception):
-                self.player.stop()
-        if self._info_dialog is not None:
-            with suppress(Exception):
-                self._info_dialog.close()
-            self._info_dialog = None
-        super().closeEvent(event)
+       
