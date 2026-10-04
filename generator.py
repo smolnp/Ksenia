@@ -132,11 +132,6 @@ def _check_source_health(url: str, *,
        Если Last-Modified нет — считаем «без даты» и допускаем.
     """
     res = _HealthResult(url)
-    session = requests.Session()
-    session.headers.update({
-        'User-Agent': 'Ksenia-M3U-Editor/SourceHealth',
-        'Accept': '*/*',
-    })
 
     headers: Dict[str, str] = {}
     status: Optional[int] = None
@@ -144,48 +139,60 @@ def _check_source_health(url: str, *,
 
     # --- HEAD ---
     try:
-        r = session.head(url, timeout=timeout,
-                         allow_redirects=True, verify=False)
-        status = r.status_code
-        headers = {k.lower(): v for k, v in r.headers.items()}
-    except requests.Timeout:
-        head_error = "timeout (HEAD)"
-    except requests.ConnectionError:
-        head_error = "connection error (HEAD)"
-    except Exception as e:
-        head_error = f"HEAD: {str(e)[:80]}"
-
-    # --- Fallback на GET ---
-    need_get = (
-        status is None
-        or status in (405, 501)
-        or 'last-modified' not in headers
-        or 'content-length' not in headers
-    )
-    if need_get:
-        try:
-            with session.get(url, timeout=timeout, stream=True,
-                             allow_redirects=True, verify=False) as r:
+        with requests.Session() as session:
+            session.headers.update({
+                'User-Agent': 'Ksenia-M3U-Editor/SourceHealth',
+                'Accept': '*/*',
+            })
+            try:
+                r = session.head(url, timeout=timeout,
+                                 allow_redirects=True, verify=False)
                 status = r.status_code
                 headers = {k.lower(): v for k, v in r.headers.items()}
-                if status == 200:
-                    buf = bytearray()
-                    for chunk in r.iter_content(chunk_size=8192):
-                        if stop_event is not None and stop_event.is_set():
-                            break
-                        buf.extend(chunk)
-                        if len(buf) >= max_bytes:
-                            break
-                    res.bytes_checked = len(buf)
-        except requests.Timeout:
-            if not head_error:
-                head_error = "timeout (GET)"
-        except requests.ConnectionError:
-            if not head_error:
-                head_error = "connection error (GET)"
-        except Exception as e:
-            if not head_error:
-                head_error = f"GET: {str(e)[:80]}"
+            except requests.Timeout:
+                head_error = "timeout (HEAD)"
+            except requests.ConnectionError:
+                head_error = "connection error (HEAD)"
+            except Exception as e:
+                head_error = f"HEAD: {str(e)[:80]}"
+
+            # --- Fallback на GET ---
+            need_get = (
+                status is None
+                or status in (405, 501)
+                or 'last-modified' not in headers
+                or 'content-length' not in headers
+            )
+            if need_get:
+                try:
+                    with session.get(url, timeout=timeout, stream=True,
+                                     allow_redirects=True,
+                                     verify=False) as r:
+                        status = r.status_code
+                        headers = {k.lower(): v
+                                   for k, v in r.headers.items()}
+                        if status == 200:
+                            buf = bytearray()
+                            for chunk in r.iter_content(chunk_size=8192):
+                                if (stop_event is not None
+                                        and stop_event.is_set()):
+                                    break
+                                buf.extend(chunk)
+                                if len(buf) >= max_bytes:
+                                    break
+                            res.bytes_checked = len(buf)
+                except requests.Timeout:
+                    if not head_error:
+                        head_error = "timeout (GET)"
+                except requests.ConnectionError:
+                    if not head_error:
+                        head_error = "connection error (GET)"
+                except Exception as e:
+                    if not head_error:
+                        head_error = f"GET: {str(e)[:80]}"
+    except Exception as e:
+        res.error = f"session: {str(e)[:80]}"
+        return res
 
     if status is None:
         res.error = head_error or "не удалось получить ответ"
@@ -284,7 +291,8 @@ class SourcesFinderWorker(QThread):
                     if self._is_stopped():
                         return
                     name = item.get('name', '') or ''
-                    if not (name.endswith('.m3u') or name.endswith('.m3u8')):
+                    if not (name.endswith('.m3u')
+                            or name.endswith('.m3u8')):
                         continue
                     url = item.get('download_url') or ''
                     if not url or url in seen_urls:
@@ -439,9 +447,9 @@ class SourcesFinderWorker(QThread):
                 futures = [ex.submit(_one, c) for c in candidates]
                 for fut in concurrent.futures.as_completed(futures):
                     if self._is_stopped():
-                        for f in futures:
-                            f.cancel()
-                        break
+                        # Не break, а продолжаем ждать завершения,
+                        # но не обрабатываем результаты.
+                        continue
                     try:
                         ok_item, rej_item = fut.result()
                     except Exception as e:
@@ -461,8 +469,8 @@ class SourcesFinderWorker(QThread):
         return valid, rejected
 
     def run(self):
+        session = self._session()
         try:
-            session = self._session()
             out: List[Dict[str, Any]] = []
             seen_urls: Set[str] = set()
 
@@ -484,7 +492,6 @@ class SourcesFinderWorker(QThread):
                 self.finished.emit([])
                 return
 
-            # Промежуточная выдача — список кандидатов до проверки
             self.found.emit([dict(c) for c in candidates])
 
             self.progress.emit(
@@ -500,7 +507,6 @@ class SourcesFinderWorker(QThread):
 
             def _key(x: Dict[str, Any]):
                 age = x.get('age_days')
-                # None → «без даты» → в середину
                 age_key = age if age is not None else 15.0
                 return (-(x.get('stars') or 0),
                         int(x.get('priority') or 5),
@@ -516,3 +522,8 @@ class SourcesFinderWorker(QThread):
         except Exception as e:
             logger.exception("SourcesFinderWorker")
             self.error.emit(str(e))
+        finally:
+            try:
+                session.close()
+            except Exception:
+                pass

@@ -153,8 +153,9 @@ class CacheManager:
             if conn is None:
                 conn = sqlite3.connect(
                     self.db_path, timeout=30, check_same_thread=False)
-                conn.execute("PRAGMA journal_mode=WAL")
+                # ФИКС #14: сначала busy_timeout, потом journal_mode
                 conn.execute("PRAGMA busy_timeout=30000")
+                conn.execute("PRAGMA journal_mode=WAL")
                 conn.execute("PRAGMA synchronous=NORMAL")
                 conn.row_factory = sqlite3.Row
                 self._local.conn = conn

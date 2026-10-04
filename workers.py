@@ -87,9 +87,12 @@ class LinkReplacementWorker(BaseWorker):
                         s, True, self.config, True, self._stop_token)
                     for s in sources
                 ]
+                # ФИКС #10: не break, а ждём завершения всех
                 for fut in concurrent.futures.as_completed(futures):
                     if self.is_stopped():
-                        break
+                        # Не break, чтобы дождаться завершения
+                        # уже запущенных задач.
+                        continue
                     try:
                         fut.result()
                     except Exception:
@@ -143,11 +146,10 @@ class LinkReplacementWorker(BaseWorker):
 
             try:
                 futures = [ex.submit(process_one, ch) for ch in self.channels]
+                # ФИКС #10: не break, а ждём завершения
                 for fut in concurrent.futures.as_completed(futures):
                     if self.is_stopped():
-                        for f in futures:
-                            f.cancel()
-                        break
+                        continue
                     try:
                         fut.result()
                     except Exception:
@@ -462,6 +464,9 @@ class SourceUrlCheckWorker(BaseWorker):
                                           f"exception: {str(e)[:40]}", None
                 if self.is_stopped():
                     return
+                # ФИКС #23: ok=None означает "отменено", не считаем
+                if ok is None:
+                    return
                 with lock:
                     checked += 1
                     if ok is True:
@@ -505,11 +510,10 @@ class SourceUrlCheckWorker(BaseWorker):
                 futures = [executor.submit(check_one, ch)
                            for ch in to_check]
                 last_emit = 0
+                # ФИКС #11: не break, а ждём завершения
                 for fut in concurrent.futures.as_completed(futures):
                     if self.is_stopped():
-                        for f in futures:
-                            f.cancel()
-                        break
+                        continue
                     cur = checked
                     if cur - last_emit >= 5 or cur == len(to_check):
                         last_emit = cur
@@ -536,13 +540,7 @@ class SourceUrlCheckWorker(BaseWorker):
 
 
 class SourcesRefreshWorker(BaseWorker):
-    """Объединённое «Обновить всё»: загрузка + проверка URL + rebuild.
-
-    Трёхфазная шкала прогресса (0..100):
-      • Фаза 1 (0..40%)  — загрузка источников
-      • Фаза 2 (40..90%) — проверка URL
-      • Фаза 3 (90..100%) — rebuild_alive_index
-    """
+    """Объединённое «Обновить всё»: загрузка + проверка URL + rebuild."""
 
     PHASE1_END = 40
     PHASE2_END = 90
@@ -590,9 +588,7 @@ class SourcesRefreshWorker(BaseWorker):
             futures = {ex.submit(worker_fn, item): item for item in items}
             for fut in concurrent.futures.as_completed(futures):
                 if self.is_stopped():
-                    for f in futures:
-                        f.cancel()
-                    break
+                    continue
                 try:
                     yield fut.result()
                 except Exception:
@@ -647,7 +643,6 @@ class SourcesRefreshWorker(BaseWorker):
                 self.all_done.emit(0, 0)
                 return
 
-            # === ФАЗА 1: загрузка ===
             loaded: List[Tuple[LinkSource, List[ChannelData]]] = []
             span1 = self.PHASE1_END
             for cnt, src, chs in self._run_in_pool(
@@ -681,7 +676,6 @@ class SourcesRefreshWorker(BaseWorker):
             batch_size = int(self.config.get(
                 'source_check_batch_size', SOURCE_CHECK_BATCH_SIZE_DEFAULT))
 
-            # === ФАЗА 2: проверка URL ===
             workers: List[SourceUrlCheckWorker] = []
             for src, chs in loaded:
                 if self.is_stopped():
@@ -750,7 +744,6 @@ class SourcesRefreshWorker(BaseWorker):
                 self.all_done.emit(success, total)
                 return
 
-            # === ФАЗА 3: rebuild_alive_index ===
             self._phase3_rebuild(loaded)
 
             self.all_done.emit(success, total)
@@ -819,7 +812,6 @@ class EPGMetadataApplyWorker(BaseWorker):
     def __init__(self, channels: List[ChannelData], epg_db: EPGDatabase,
                  config: Optional[Config] = None):
         super().__init__()
-        # Сохраняем только uid + имя + tvg_id + tvg_name (не весь объект)
         self._channels = [(ch.uid, ch.meta.name or "",
                            ch.meta.tvg_id or "",
                            ch.meta.tvg_name or "")
@@ -862,7 +854,6 @@ class EPGMetadataApplyWorker(BaseWorker):
             sources: Dict[int, str] = {}
             processed = 0
 
-            # Переиспользуем один объект ChannelData
             tmp = ChannelData()
             for uid, name, tvg_id, tvg_name in self._channels:
                 if self.is_stopped():

@@ -337,6 +337,8 @@ class LinkSourceManager:
                     break
             else:
                 return
+            # ФИКС #54: инвалидируем кэш alive-URLs
+            self._alive_index_cache.clear()
         self._persist()
 
     @staticmethod
@@ -361,18 +363,24 @@ class LinkSourceManager:
         except ValueError:
             return None
         session = _new_session()
-        for d in range(1, days + 1):
-            if cancelled(stop_token):
-                return None
-            prev = (base - timedelta(days=d)).strftime("%Y-%m-%d")
-            candidate = url.replace(m.group(0), prev, 1)
+        try:
+            for d in range(1, days + 1):
+                if cancelled(stop_token):
+                    return None
+                prev = (base - timedelta(days=d)).strftime("%Y-%m-%d")
+                candidate = url.replace(m.group(0), prev, 1)
+                try:
+                    with session.get(candidate, timeout=DEFAULT_TIMEOUT,
+                                     verify=False, stream=True) as r:
+                        if r.status_code == 200:
+                            return candidate
+                except Exception:
+                    continue
+        finally:
             try:
-                with session.get(candidate, timeout=DEFAULT_TIMEOUT,
-                                 verify=False, stream=True) as r:
-                    if r.status_code == 200:
-                        return candidate
+                session.close()
             except Exception:
-                continue
+                pass
         return None
 
     @staticmethod
@@ -472,6 +480,10 @@ class LinkSourceManager:
 
     def _store_loaded(self, name: str, path: str,
                       channels: List[ChannelData]):
+        # ФИКС #53: пропускаем источники с пустым именем
+        if not name:
+            logger.warning("_store_loaded: пустое имя источника, пропуск")
+            return
         index: Dict[str, List[ChannelData]] = defaultdict(list)
         for ch in channels:
             norm = ch.normalized_name()
@@ -687,12 +699,18 @@ class LinkSourceManager:
                 and config.get('use_link_cache', True)):
             self.cache_manager.put_link_cache(
                 source.path, [c.to_dict() for c in channels])
+
+        # Закрываем сессию (ФИКС #70 для sources.py)
+        try:
+            session.close()
+        except Exception:
+            pass
         return channels
 
     def _finalize_source(self, source: LinkSource,
                          channels: List[ChannelData]):
         source.total_links = len(channels)
-        source.total_with_url = sum(1 for c in channels if c.has_valid_url)
+        source.total_with_url = sum(1 for ch in channels if ch.has_valid_url)
         source.last_updated = datetime.now()
         self._persist()
 
@@ -810,9 +828,10 @@ class LinkSourceManager:
                        for s in enabled}
             for fut in concurrent.futures.as_completed(futures):
                 if cancelled(stop_token):
-                    for f in futures:
-                        f.cancel()
-                    break
+                    # Не break, а продолжаем собирать результаты,
+                    # но не запускаем новых задач. Уже запущенные
+                    # завершатся сами.
+                    continue
                 try:
                     channels = fut.result()
                 except Exception as e:

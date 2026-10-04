@@ -66,6 +66,12 @@ from workers import (EPGLoaderWorker, EPGMetadataApplyWorker,
     LinkReplacementWorker, SourceUrlCheckWorker, SourcesRefreshWorker)
 
 
+OK_CANCEL_BB = (QDialogButtonBox.StandardButton.Ok |
+                QDialogButtonBox.StandardButton.Cancel)
+YES_NO = (QMessageBox.StandardButton.Yes |
+          QMessageBox.StandardButton.No)
+
+
 # =====================================================================
 # ApplicationCore
 # =====================================================================
@@ -843,7 +849,7 @@ class ChannelTableModel(QAbstractTableModel):
             ch.link.extra_headers.clear()
             ch.status.reset()
             core.domain_user_agent_manager.apply_rules_to_channel(ch)
-            ch.update_extinf()  # важно: пересобираем EXTINF
+            ch.update_extinf()
             changed = True
         else:
             return False
@@ -864,7 +870,8 @@ class ChannelTableModel(QAbstractTableModel):
         if self._filtered:
             self.dataChanged.emit(
                 self.index(0, 0),
-                self.index(len(self._filtered) - 1, self.columnCount() - 1))
+                self.index(len(self._filtered) - 1,
+                           self.columnCount() - 1))
 
 
 # =====================================================================
@@ -1111,11 +1118,12 @@ class PlaylistTab(QWidget):
     def _edit_channels(self, description: str,
                        refresh: str = 'reset',
                        force_save: bool = False):
-        if force_save:
-            self.save_state(description)
-            self._do_save_state()
-        else:
-            self.save_state(description)
+        # ФИКС #40: сбрасываем таймер и сохраняем undo ДО изменений
+        if self._state_save_timer.isActive():
+            self._state_save_timer.stop()
+        self._do_save_state()
+        self.undo_manager.save_state(self.all_channels, description)
+        self._pending_state_desc = ""
         with self._suppress_save():
             yield self.all_channels
         self.sync_to_core()
@@ -1127,6 +1135,8 @@ class PlaylistTab(QWidget):
         self.groups_changed.emit()
 
     def _load_file(self, filepath: str):
+        # ФИКС #39: инвалидируем поколение EPG
+        self._epg_meta_generation += 1
         self._loading = True
         self._suppress_state_save = True
         try:
@@ -2289,6 +2299,13 @@ class PlaylistTab(QWidget):
         for r in range(self.model.rowCount()):
             ch = self.channel_for_row(r)
             if ch is self.current_channel:
+                self._add_link_from_sources(r)
+                return
+        # ФИКС #38: fallback — если current_channel не в фильтре,
+        # ищем по uid в all_channels
+        for r in range(self.model.rowCount()):
+            ch = self.channel_for_row(r)
+            if ch and ch.uid == self.current_channel.uid:
                 self._add_link_from_sources(r)
                 return
 
@@ -4052,10 +4069,9 @@ class MainWindow(QMainWindow):
                 self.group_combo.currentText() or GROUP_FILTER_ALL)
 
     def _on_groups_changed(self):
+        # ФИКС #2: всегда обновляем список групп, даже если сигнал
+        # от неактивной вкладки — чтобы комбобокс был актуален.
         if not _is_qobject_valid(self):
-            return
-        sender = self.sender()
-        if sender is not None and sender is not self.current_tab:
             return
         self._update_groups()
         if not self.duplicates_btn.isChecked() and self.current_tab:
@@ -4444,12 +4460,15 @@ class MainWindow(QMainWindow):
 
         self._disconnect_app_signals()
         self._save_settings()
-        super().closeEvent(event)
 
-        with suppress(Exception):
-            app = QApplication.instance()
-            if app is not None:
-                app.quit()
+        # ФИКС #37: вызываем super().closeEvent ДО app.quit(),
+        # и quit() только если событие принято.
+        super().closeEvent(event)
+        if event.isAccepted():
+            with suppress(Exception):
+                app = QApplication.instance()
+                if app is not None:
+                    app.quit()
 
 
 # =====================================================================

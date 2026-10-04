@@ -244,6 +244,11 @@ class URLUtils:
             return "URL слишком длинный"
         if p.scheme not in ('http', 'https'):
             return f"Неподдерживаемый протокол: {p.scheme}"
+        # ФИКС #95: p.port может бросить ValueError
+        try:
+            port = p.port
+        except ValueError:
+            return "Некорректный порт в URL"
         low_path = (p.path or '').lower()
         if low_path.startswith('/udp/') or '/udp/' in low_path:
             return "UDP через HTTP-прокси (не поддерживается)"
@@ -254,7 +259,7 @@ class URLUtils:
             if 'id=' in q and len(q) > 32:
                 return "Прокси-скрипт (не поток)"
         if not low_path or low_path == '/':
-            if p.port and p.port not in (80, 443, 8080, 8000, 8888):
+            if port and port not in (80, 443, 8080, 8000, 8888):
                 return "URL без пути на нестандартном порту"
         return None
 
@@ -269,8 +274,9 @@ class URLUtils:
             parsed = urlparse(url)
             hostname = parsed.hostname
             if hostname:
+                # ФИКС #98: используем getaddrinfo для поддержки IPv6
                 try:
-                    socket.gethostbyname(hostname)
+                    socket.getaddrinfo(hostname, None)
                 except socket.gaierror:
                     return False, 0.0, "DNS резолвинг не удался", None
 
@@ -326,11 +332,15 @@ class URLUtils:
                   extra_headers=None
                   ) -> Tuple[Optional[bool], Optional[float],
                              str, Optional[int]]:
-        """ЕДИНСТВЕННЫЙ механизм проверки ссылок в Ksenia."""
+        """ЕДИНСТВЕННЫЙ механизм проверки ссылок в Ksenia.
+
+        ФИКС #23: при отмене возвращаем (None, None, "Отменено", None),
+        чтобы вызывающий код мог отличить "не проверено" от "не работает".
+        """
         if not url or not url.strip():
             return False, None, "Пустой URL", None
         if stop_token is not None and stop_token.is_set():
-            return False, None, "Отменено", None
+            return None, None, "Отменено", None
         return URLUtils._check_url_single(
             url, timeout, verify_ssl,
             user_agent=user_agent, referrer=referrer,

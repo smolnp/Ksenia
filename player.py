@@ -45,7 +45,7 @@ except Exception as e:
 
 
 # =====================================================================
-# Публичные хелперы (используются в ksenia_window.py)
+# Публичные хелперы
 # =====================================================================
 def is_vlc_available() -> bool:
     return _HAS_VLC_MODULE
@@ -197,7 +197,6 @@ def _vlc_process_main(cmd_queue: mp.Queue, status_queue: mp.Queue):
             state['error'] = str(e)
             state['state'] = 'error'
 
-    # Основной цикл
     last_publish = 0.0
     poll_interval = max(0.05, PLAYER_STATUS_POLL_MS / 1000.0) * 2
     while True:
@@ -462,7 +461,8 @@ class EmbeddedPlayerDialog(BaseDialog):
                  playlist: Optional[List[ChannelData]] = None):
         super().__init__(
             f"Ksenia Player — {channel.meta.name}",
-            parent, size=(VLC_PLAYER_DEFAULT_WIDTH, VLC_PLAYER_DEFAULT_HEIGHT))
+            parent, size=(VLC_PLAYER_DEFAULT_WIDTH,
+                          VLC_PLAYER_DEFAULT_HEIGHT))
 
         from ksenia_window import ApplicationCore
         self.core = ApplicationCore.instance()
@@ -625,4 +625,64 @@ class EmbeddedPlayerDialog(BaseDialog):
         if not _is_qobject_valid(self) or idx <= 0:
             return
         tid = self.video_combo.itemData(idx)
-       
+        if tid is not None and tid >= 0:
+            self.player.set_video_track(tid)
+
+    # ФИКС #79: недостающий метод _on_status
+    def _on_status(self, st: dict):
+        """Обработка статуса от VLC-процесса."""
+        if not _is_qobject_valid(self):
+            return
+        # Обновление разрешения/fps
+        with suppress(Exception):
+            self.video_info_label.setText(
+                self.player.get_video_info_text())
+        # Обновление списка аудио-треков
+        audio_tracks = st.get('audio_tracks') or []
+        if audio_tracks:
+            self.audio_combo.blockSignals(True)
+            current_data = self.audio_combo.currentData()
+            self.audio_combo.clear()
+            self.audio_combo.addItem("Аудио: по умолчанию", -1)
+            for tid, name in audio_tracks:
+                self.audio_combo.addItem(name or f"Track {tid}", tid)
+            idx = self.audio_combo.findData(current_data)
+            if idx >= 0:
+                self.audio_combo.setCurrentIndex(idx)
+            self.audio_combo.blockSignals(False)
+        # Обновление списка видео-треков
+        video_tracks = st.get('video_tracks') or []
+        if video_tracks:
+            self.video_combo.blockSignals(True)
+            current_data = self.video_combo.currentData()
+            self.video_combo.clear()
+            self.video_combo.addItem("Видео: по умолчанию", -1)
+            for tid, name in video_tracks:
+                self.video_combo.addItem(name or f"Track {tid}", tid)
+            idx = self.video_combo.findData(current_data)
+            if idx >= 0:
+                self.video_combo.setCurrentIndex(idx)
+            self.video_combo.blockSignals(False)
+
+    def _on_error(self, msg: str):
+        if not _is_qobject_valid(self):
+            return
+        logger.warning(f"VLC player error: {msg}")
+
+    # ФИКС #34: освобождаем VLC-процесс при закрытии диалога
+    def closeEvent(self, event):
+        try:
+            if self.player is not None:
+                with suppress(Exception):
+                    self.player.release()
+        finally:
+            super().closeEvent(event)
+
+    def reject(self):
+        # Также освобождаем при reject() (закрытие по Esc / кнопке)
+        try:
+            if self.player is not None:
+                with suppress(Exception):
+                    self.player.release()
+        finally:
+            super().reject()

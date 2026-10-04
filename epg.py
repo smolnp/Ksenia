@@ -7,7 +7,7 @@ import gzip
 import re
 import threading
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional, Set, Tuple
 from xml.etree import ElementTree as ET
@@ -64,10 +64,10 @@ class EPGDatabase:
             self._channel_info_norm.clear()
             self._channel_info_source.clear()
             self._channel_info_priority.clear()
+            self._channel_info_by_token.clear()
         with self._fuzzy_cache_lock:
             self._fuzzy_cache.clear()
         with self._token_cache_lock:
-            self._channel_info_by_token.clear()
             self._token_cache.clear()
 
     def set_source_priority(self, url: str, priority: int):
@@ -92,6 +92,8 @@ class EPGDatabase:
             return bool(self._channel_info)
 
     def _tokens_for(self, text: str) -> Set[str]:
+        """Вычислить токены. ВАЖНО: не вызывать внутри _channel_info_lock,
+        чтобы избежать инверсии порядка блокировок."""
         if not text:
             return set()
         with self._token_cache_lock:
@@ -101,15 +103,20 @@ class EPGDatabase:
         tokens = ChannelNameNormalizer.token_set(text)
         with self._token_cache_lock:
             if len(self._token_cache) >= EPG_FUZZY_CACHE_LIMIT:
-                # удалить первые 1/8 записей
                 drop = max(1, len(self._token_cache) // 8)
                 for _ in range(drop):
-                    self._token_cache.pop(next(iter(self._token_cache)), None)
+                    self._token_cache.pop(
+                        next(iter(self._token_cache)), None)
             self._token_cache[text] = tokens
         return tokens
 
     @staticmethod
     def _parse_xmltv_time(s: str) -> Optional[datetime]:
+        """Парсить XMLTV-время. Возвращает naive-datetime в UTC.
+
+        ВАЖНО: для сохранения времени без двойного смещения
+        результат хранится в UTC и форматируется с суффиксом +0000.
+        """
         if not s:
             return None
         s = s.strip()
@@ -127,15 +134,22 @@ class EPGDatabase:
             except ValueError:
                 return None
         try:
-            return datetime.fromisoformat(s)
+            dt = datetime.fromisoformat(s)
+            if dt.tzinfo is not None:
+                dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+            return dt
         except ValueError:
             return None
 
     @staticmethod
     def _format_time(dt: Optional[datetime]) -> str:
+        """Форматировать datetime в XMLTV-формат с суффиксом +0000.
+
+        Так как _parse_xmltv_time возвращает UTC, суффикс +0000 корректен.
+        """
         if dt is None:
             return ""
-        return dt.strftime("%Y%m%d%H%M%S")
+        return dt.strftime("%Y%m%d%H%M%S") + " +0000"
 
     def load_from_xmltv(self, xml_text: str,
                         stop_token: Optional['_StopToken'] = None,
@@ -149,40 +163,46 @@ class EPGDatabase:
         source_prio = self._get_source_priority(source)
         info_to_cache: List[Dict[str, Any]] = []
 
+        # Собираем данные под lock, но токены вычисляем ЗАРАНЕЕ —
+        # чтобы не брать _token_cache_lock внутри _channel_info_lock.
+        channel_els = root.findall('channel')
+        precomputed: List[Tuple[str, EPGChannelInfo, str, str, Set[str]]] = []
+        for ch_el in channel_els:
+            if cancelled(stop_token):
+                break
+            cid = ch_el.get('id', '')
+            if not cid:
+                continue
+            info = EPGChannelInfo()
+            info.channel_id = cid
+            dn = ch_el.find('display-name')
+            if dn is not None and dn.text:
+                info.display_name = dn.text.strip()
+            icon = ch_el.find('icon')
+            if icon is not None:
+                info.icon = icon.get('src', '') or ''
+            lcn = ch_el.find('lcn')
+            if lcn is not None and lcn.text:
+                info.lcn = lcn.text.strip()
+            norm_id = ChannelNameNormalizer.normalize(cid)
+            norm_dn = (ChannelNameNormalizer.normalize(info.display_name)
+                       if info.display_name else "")
+            tokens = self._tokens_for(norm_id) | self._tokens_for(norm_dn)
+            precomputed.append((cid, info, norm_id, norm_dn, tokens))
+
         with self._channel_info_lock:
-            for ch_el in root.findall('channel'):
-                if cancelled(stop_token):
-                    break
-                cid = ch_el.get('id', '')
-                if not cid:
-                    continue
+            for cid, info, norm_id, norm_dn, tokens in precomputed:
                 existing_prio = self._channel_info_priority.get(cid, -1)
                 if cid in self._channel_info and existing_prio > source_prio:
                     continue
-                info = EPGChannelInfo()
-                info.channel_id = cid
-                dn = ch_el.find('display-name')
-                if dn is not None and dn.text:
-                    info.display_name = dn.text.strip()
-                icon = ch_el.find('icon')
-                if icon is not None:
-                    info.icon = icon.get('src', '') or ''
-                lcn = ch_el.find('lcn')
-                if lcn is not None and lcn.text:
-                    info.lcn = lcn.text.strip()
                 self._channel_info[cid] = info
                 self._channel_info_source[cid] = source
                 self._channel_info_priority[cid] = source_prio
-                norm_id = ChannelNameNormalizer.normalize(cid)
                 if norm_id and norm_id not in self._channel_info_norm:
                     self._channel_info_norm[norm_id] = cid
-                norm_dn = ""
-                if info.display_name:
-                    norm_dn = ChannelNameNormalizer.normalize(info.display_name)
-                    if norm_dn and norm_dn not in self._channel_info_norm:
-                        self._channel_info_norm[norm_dn] = cid
-                for token in (self._tokens_for(norm_id) |
-                              self._tokens_for(norm_dn)):
+                if norm_dn and norm_dn not in self._channel_info_norm:
+                    self._channel_info_norm[norm_dn] = cid
+                for token in tokens:
                     self._channel_info_by_token[token].add(cid)
                 info_to_cache.append({
                     'channel_id': cid,
@@ -239,46 +259,53 @@ class EPGDatabase:
         total = 0
         errors: List[str] = []
         session = _new_session()
-        for url in urls:
-            if cancelled(stop_token):
-                break
-            if not url:
-                continue
-            try:
-                with session.get(url, timeout=timeout, verify=False,
-                                 stream=True) as r:
-                    if r.status_code != 200:
-                        errors.append(f"{url}: HTTP {r.status_code}")
-                        continue
-                    buf = bytearray()
-                    truncated = False
-                    for chunk in r.iter_content(chunk_size=64 * 1024):
-                        if cancelled(stop_token):
-                            truncated = True
-                            break
-                        buf.extend(chunk)
-                        if len(buf) > EPG_MAX_BYTES:
-                            errors.append(f"{url}: превышен лимит")
-                            truncated = True
-                            break
-                    if truncated:
-                        continue
-                    content = bytes(buf)
-                    if url.endswith('.gz') or content[:2] == b'\x1f\x8b':
-                        try:
-                            content = gzip.decompress(content)
-                        except Exception as e:
-                            errors.append(f"{url}: gzip {e}")
+        try:
+            for url in urls:
+                if cancelled(stop_token):
+                    break
+                if not url:
+                    continue
+                try:
+                    with session.get(url, timeout=timeout, verify=False,
+                                     stream=True) as r:
+                        if r.status_code != 200:
+                            errors.append(f"{url}: HTTP {r.status_code}")
                             continue
-                    text = content.decode('utf-8', errors='replace')
-                    cnt = self.load_from_xmltv(text, stop_token, source=url)
-                    total += cnt
-                    if cnt:
-                        with self._lock:
-                            if url not in self._sources:
-                                self._sources.append(url)
-            except Exception as e:
-                errors.append(f"{url}: {str(e)[:100]}")
+                        buf = bytearray()
+                        truncated = False
+                        for chunk in r.iter_content(chunk_size=64 * 1024):
+                            if cancelled(stop_token):
+                                truncated = True
+                                break
+                            buf.extend(chunk)
+                            if len(buf) > EPG_MAX_BYTES:
+                                errors.append(f"{url}: превышен лимит")
+                                truncated = True
+                                break
+                        if truncated:
+                            continue
+                        content = bytes(buf)
+                        if url.endswith('.gz') or content[:2] == b'\x1f\x8b':
+                            try:
+                                content = gzip.decompress(content)
+                            except Exception as e:
+                                errors.append(f"{url}: gzip {e}")
+                                continue
+                        text = content.decode('utf-8', errors='replace')
+                        cnt = self.load_from_xmltv(text, stop_token,
+                                                   source=url)
+                        total += cnt
+                        if cnt:
+                            with self._lock:
+                                if url not in self._sources:
+                                    self._sources.append(url)
+                except Exception as e:
+                    errors.append(f"{url}: {str(e)[:100]}")
+        finally:
+            try:
+                session.close()
+            except Exception:
+                pass
         return total, errors
 
     def load_from_cache(self, max_age_hours: int = EPG_CACHE_TTL_HOURS) -> int:
@@ -302,42 +329,52 @@ class EPGDatabase:
 
         ch_rows = self.cache_manager.load_epg_channels(max_age_hours)
         if ch_rows:
+            # Предвычисляем токены ДО захвата _channel_info_lock
+            precomputed: List[Tuple[str, EPGChannelInfo, str, str,
+                                     Set[str], str]] = []
+            for r in ch_rows:
+                cid = r.get('channel_id', '')
+                if not cid:
+                    continue
+                info = EPGChannelInfo()
+                info.channel_id = cid
+                info.display_name = r.get('display_name', '') or ''
+                info.icon = r.get('icon', '') or ''
+                info.lcn = r.get('lcn', '') or ''
+                src = r.get('source', '') or ''
+                norm_id = ChannelNameNormalizer.normalize(cid)
+                norm_dn = (ChannelNameNormalizer.normalize(info.display_name)
+                           if info.display_name else "")
+                tokens = (self._tokens_for(norm_id)
+                          | self._tokens_for(norm_dn))
+                precomputed.append(
+                    (cid, info, norm_id, norm_dn, tokens, src))
+
             with self._channel_info_lock:
                 self._channel_info.clear()
                 self._channel_info_norm.clear()
                 self._channel_info_source.clear()
                 self._channel_info_priority.clear()
                 self._channel_info_by_token.clear()
-                for r in ch_rows:
-                    cid = r.get('channel_id', '')
-                    if not cid:
-                        continue
-                    info = EPGChannelInfo()
-                    info.channel_id = cid
-                    info.display_name = r.get('display_name', '') or ''
-                    info.icon = r.get('icon', '') or ''
-                    info.lcn = r.get('lcn', '') or ''
-                    src = r.get('source', '') or ''
+                for cid, info, norm_id, norm_dn, tokens, src in precomputed:
                     self._channel_info[cid] = info
                     self._channel_info_source[cid] = src
-                    self._channel_info_priority[cid] = self._get_source_priority(src)
-                    norm_id = ChannelNameNormalizer.normalize(cid)
+                    self._channel_info_priority[cid] = \
+                        self._get_source_priority(src)
                     if norm_id and norm_id not in self._channel_info_norm:
                         self._channel_info_norm[norm_id] = cid
-                    norm_dn = ""
-                    if info.display_name:
-                        norm_dn = ChannelNameNormalizer.normalize(info.display_name)
-                        if norm_dn and norm_dn not in self._channel_info_norm:
-                            self._channel_info_norm[norm_dn] = cid
-                    for token in (self._tokens_for(norm_id) |
-                                  self._tokens_for(norm_dn)):
+                    if norm_dn and norm_dn not in self._channel_info_norm:
+                        self._channel_info_norm[norm_dn] = cid
+                    for token in tokens:
                         self._channel_info_by_token[token].add(cid)
+        with self._fuzzy_cache_lock:
+            self._fuzzy_cache.clear()
         return sum(len(v) for v in tmp.values())
 
     def get_current(self, tvg_id: str) -> Optional[EPGEntry]:
         if not tvg_id:
             return None
-        now = datetime.now()
+        now = datetime.utcnow()
         with self._lock:
             entries = list(self._entries.get(tvg_id, []))
         best: Optional[EPGEntry] = None
@@ -352,7 +389,7 @@ class EPGDatabase:
                           fuzzy_min_length: int = EPG_FUZZY_MIN_LENGTH_DEFAULT,
                           fuzzy_min_gap: float = EPG_FUZZY_MIN_GAP_DEFAULT
                           ) -> Optional[EPGChannelInfo]:
-        # 1) Прямые совпадения по tvg_id / tvg_name / name
+        # 1) Прямые совпадения
         with self._channel_info_lock:
             if not self._channel_info:
                 return None
@@ -396,7 +433,7 @@ class EPGDatabase:
                 with self._channel_info_lock:
                     return self._channel_info.get(cached_cid)
 
-        # Снимок кандидатов под lock, а тяжёлые вычисления — снаружи
+        # Вычисляем токены ДО захвата _channel_info_lock
         target_tokens = self._tokens_for(target)
         snapshot: List[Tuple[str, str]] = []
         with self._channel_info_lock:
@@ -436,7 +473,8 @@ class EPGDatabase:
             if len(self._fuzzy_cache) >= EPG_FUZZY_CACHE_LIMIT:
                 drop = max(1, len(self._fuzzy_cache) // 8)
                 for _ in range(drop):
-                    self._fuzzy_cache.pop(next(iter(self._fuzzy_cache)), None)
+                    self._fuzzy_cache.pop(
+                        next(iter(self._fuzzy_cache)), None)
             self._fuzzy_cache[cache_key] = best_cid
 
         if best_cid is None:

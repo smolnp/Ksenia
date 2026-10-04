@@ -18,12 +18,18 @@ _EXTINF_ATTRS = (
     'catchup-days', 'tvg-rec', 'tvg-chno', 'audio-track',
 )
 
+# ФИКС #8: атрибуты должны начинаться с границы слова, чтобы не удалять
+# часть имени канала. Используем negative lookbehind (?<![\w-]).
 _ATTR_RE = re.compile(
-    r'(' + '|'.join(re.escape(a) for a in _EXTINF_ATTRS) + r')\s*=\s*'
+    r'(?<![\w-])(' + '|'.join(re.escape(a) for a in _EXTINF_ATTRS) + r')\s*=\s*'
     r'(?:"((?:[^"\\]|\\.)*)"|\'((?:[^\'\\]|\\.)*)\'|([^\s,]+))'
 )
+
+# ФИКС #7, #8: то же для очистки — не удалять атрибутоподобные
+# фрагменты внутри имени канала.
 _EXTINF_CLEAN_RE = re.compile(
-    r'(?:' + '|'.join(re.escape(a) for a in _EXTINF_ATTRS) + r')\s*=\s*'
+    r'(?<![\w-])(?:'
+    + '|'.join(re.escape(a) for a in _EXTINF_ATTRS) + r')\s*=\s*'
     r'(?:"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'|[^\s,]+)\s*'
 )
 
@@ -31,11 +37,18 @@ _EXTINF_CLEAN_RE = re.compile(
 class M3UParser:
     @classmethod
     def extract_name(cls, line: str) -> str:
+        """Извлечь имя канала из строки #EXTINF.
+
+        ФИКС #7: используем rsplit(',', 1) для случая, когда в имени
+        есть запятая (например, "НТВ, HD"). rsplit гарантирует, что
+        запятая-разделитель — последняя, а не первая.
+        """
         if ',' not in line:
             return ""
         clean = _EXTINF_CLEAN_RE.sub('', line)
-        parts = clean.split(',', 1)
-        return parts[1].strip() if len(parts) > 1 else ""
+        # rsplit по последней запятой
+        parts = clean.rsplit(',', 1)
+        return parts[-1].strip() if len(parts) > 1 else ""
 
     @classmethod
     def parse_attrs(cls, line: str) -> Dict[str, str]:
@@ -116,7 +129,6 @@ class M3UParser:
                 i += 1
                 continue
             if not line.startswith('#EXTINF:'):
-                # любые другие комментарии просто сбрасывают неиспользованные vlcopts
                 if line.startswith('#'):
                     pending_vlcopts = []
                 i += 1
