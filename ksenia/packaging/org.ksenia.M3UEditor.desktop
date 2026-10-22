@@ -1,0 +1,22 @@
+#!/usr/bin/env xdg-open
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Ksenia M3U Editor
+Name[ru]=Ksenia M3U Editor
+GenericName=IPTV playlist editor
+GenericName[ru]=Редактор IPTV плейлистов
+Comment=Edit and check IPTV playlists in M3U/M3U8 format
+Comment[ru]=Редактирование и проверка IPTV плейлистов M3U/M3U8
+Exec=ksenia-m3u-editor %F
+TryExec=ksenia-m3u-editor
+Icon=org.ksenia.M3UEditor
+Terminal=false
+Categories=AudioVideo;Player;TV;Utility;
+Keywords=iptv;m3u;m3u8;playlist;tv;epg;
+Keywords[ru]=iptv;m3u;m3u8;плейлист;тв;epg;
+StartupNotify=true
+StartupWMClass=KseniaM3UEditor
+MimeType=audio/x-mpegurl;application/vnd.apple.mpegurl;application/x-mpegurl;
+X-KDE-StartupNotify=true
+X-GNOME-UsesNotifications=false

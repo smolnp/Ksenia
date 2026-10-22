@@ -1,0 +1,148 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>org.ksenia.M3UEditor</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+
+  <name>Ksenia M3U Editor</name>
+  <summary>Edit and check IPTV playlists in M3U/M3U8 format</summary>
+  <summary xml:lang="ru">Редактор IPTV плейлистов M3U/M3U8</summary>
+
+  <description>
+    <p>
+      Ksenia M3U Editor is a desktop IPTV playlist editor for the
+      M3U/M3U8 format. It supports multiple playlists in tabs,
+      multithreaded URL checking, automatic replacement of broken
+      URLs from a live URL cache, channel and domain/IP blacklists,
+      per-domain User-Agent rules, EPG (XMLTV) with fuzzy search,
+      and a built-in mpv player.
+    </p>
+    <p>
+      The application is a neutral tool: it does not contain any
+      built-in links to IPTV playlists or EPG sources. Users add
+      their own sources manually (local files or URLs) or find
+      them through a live GitHub API search performed at runtime.
+      Responsibility for using specific sources lies with the user
+      and is determined by the laws of their country.
+    </p>
+    <p>
+      The application follows the system Qt theme and icon theme,
+      so it integrates well with LXQt, KDE Plasma, GNOME, and
+      Windows.
+    </p>
+    <p xml:lang="ru">
+      Ksenia M3U Editor — десктопный редактор IPTV-плейлистов
+      формата M3U/M3U8. Поддерживает несколько плейлистов во
+      вкладках, многопоточную проверку ссылок, автозамену битых
+      ссылок из кэша живых URL, чёрные списки каналов и
+      домен/IP, правила User-Agent по доменам, EPG (XMLTV) с
+      нечётким поиском, встроенный mpv-плеер.
+    </p>
+    <p xml:lang="ru">
+      Приложение является нейтральным инструментом: оно не
+      содержит встроенных ссылок на IPTV-плейлисты или EPG.
+      Пользователь добавляет свои источники вручную (локальные
+      файлы или URL) либо находит их через live-поиск по GitHub
+      API в момент выполнения. Ответственность за использование
+      конкретных источников лежит на пользователе и
+      определяется законодательством его страны.
+    </p>
+    <p xml:lang="ru">
+      Приложение следует системной теме Qt и системной теме
+      иконок, поэтому хорошо интегрируется с LXQt, KDE Plasma,
+      GNOME и Windows.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">org.ksenia.M3UEditor.desktop</launchable>
+
+  <url type="homepage">https://github.com/smolnp/Ksenia</url>
+  <url type="bugtracker">https://github.com/smolnp/Ksenia/issues</url>
+
+  <developer_name>SmolNP (Nikolai Smolyaninov)</developer_name>
+
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <release version="0.4.0" date="2025-12-01">
+      <description>
+        <p>Removed all built-in IPTV/EPG source links.</p>
+        <p>Auto-search is now a live GitHub API query only.</p>
+        <p>Removed bootstrap default sources.</p>
+        <p>Removed FAST sources list.</p>
+        <p>Removed m3u.guide hardcoded URLs (now via API).</p>
+        <p>Removed known-repos list.</p>
+        <p>DEFAULT_EPG_URL is now empty.</p>
+        <p>Added Reset button in all settings dialogs.</p>
+        <p>Added Export/Import settings in JSON.</p>
+        <p>Removed duplicate epg_overwrite_metadata setting.</p>
+        <p>Removed dead settings (limit_check_*, bootstrap).</p>
+        <p>fast_replacement_mode now disables verify_candidates.</p>
+        <p>search_type disables thresholds in exact mode.</p>
+        <p>epg_fuzzy_enabled disables EPG thresholds.</p>
+        <p>allow_duplicate_urls is now actually checked.</p>
+        <p>default_epg_url is now validated as http(s) URL.</p>
+        <p>TTL changes invalidate cache entries.</p>
+        <p>Column widths moved from QSettings to Config.</p>
+        <p xml:lang="ru">Удалены все встроенные ссылки на IPTV/EPG-источники.</p>
+        <p xml:lang="ru">Авто-поиск теперь только live-запрос к GitHub API.</p>
+        <p xml:lang="ru">Удалён бутстрап стартовых источников.</p>
+        <p xml:lang="ru">Удалён список FAST-источников.</p>
+        <p xml:lang="ru">Удалены хардкод-ссылки m3u.guide (теперь через API).</p>
+        <p xml:lang="ru">Удалён список known-repos.</p>
+        <p xml:lang="ru">DEFAULT_EPG_URL теперь пустой.</p>
+        <p xml:lang="ru">Добавлена кнопка «Сбросить» во всех настройках.</p>
+        <p xml:lang="ru">Добавлен экспорт/импорт настроек в JSON.</p>
+        <p xml:lang="ru">Убран дубль epg_overwrite_metadata.</p>
+        <p xml:lang="ru">Убраны мёртвые настройки (limit_check_*, bootstrap).</p>
+        <p xml:lang="ru">fast_replacement_mode теперь отключает verify_candidates.</p>
+        <p xml:lang="ru">search_type дизейблит пороги в режиме exact.</p>
+        <p xml:lang="ru">epg_fuzzy_enabled дизейблит пороги EPG.</p>
+        <p xml:lang="ru">allow_duplicate_urls теперь реально проверяется.</p>
+        <p xml:lang="ru">default_epg_url валидируется как http(s) URL.</p>
+        <p xml:lang="ru">TTL-изменения инвалидируют кэш.</p>
+        <p xml:lang="ru">Ширины столбцов перенесены из QSettings в Config.</p>
+      </description>
+    </release>
+  </releases>
+
+  <provides>
+    <binary>ksenia-m3u-editor</binary>
+    <mediatype>audio/x-mpegurl</mediatype>
+    <mediatype>application/vnd.apple.mpegurl</mediatype>
+  </provides>
+
+  <categories>
+    <category>AudioVideo</category>
+    <category>Player</category>
+    <category>TV</category>
+    <category>Utility</category>
+  </categories>
+
+  <keywords>
+    <keyword>iptv</keyword>
+    <keyword>m3u</keyword>
+    <keyword>m3u8</keyword>
+    <keyword>playlist</keyword>
+    <keyword>tv</keyword>
+    <keyword>epg</keyword>
+  </keywords>
+
+  <screenshots>
+    <screenshot type="default">
+      <image type="source">https://raw.githubusercontent.com/smolnp/Ksenia/main/screenshots/main-window.png</image>
+      <caption>Главное окно редактора</caption>
+      <caption xml:lang="en">Main window</caption>
+    </screenshot>
+    <screenshot>
+      <image type="source">https://raw.githubusercontent.com/smolnp/Ksenia/main/screenshots/player.png</image>
+      <caption>Встроенный плеер mpv</caption>
+      <caption xml:lang="en">Built-in mpv player</caption>
+    </screenshot>
+    <screenshot>
+      <image type="source">https://raw.githubusercontent.com/smolnp/Ksenia/main/screenshots/sources.png</image>
+      <caption>Менеджер источников</caption>
+      <caption xml:lang="en">Sources manager</caption>
+    </screenshot>
+  </screenshots>
+</component>
