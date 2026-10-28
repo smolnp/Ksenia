@@ -1,11 +1,7 @@
-# -*- coding: utf-8 -*-
-"""Все воркеры в одном модуле.
-
-FIX (0.3.2): LinkReplacementWorker принимает epg_db и передаёт
-его в find_matches_for_channel / get_alive_urls_for_keys, чтобы
-автозамена искала замены не только по meta.name, но и по
-tvg_id / tvg_name / epg_alternative_names / EPG display-name.
-"""
+# Copyright (C) 2025 SmolNP
+# SPDX-License-Identifier: GPL-3.0-or-later
+# См. LICENSE в корне проекта.
+"""Все воркеры в одном модуле."""
 from __future__ import annotations
 
 import concurrent.futures
@@ -151,6 +147,12 @@ class LinkReplacementWorker(BaseWorker):
             return
         with self._used_urls_lock:
             self._used_urls.discard(url)
+
+    @staticmethod
+    def _is_url_valid(url: str) -> bool:
+        if not url or not url.strip():
+            return False
+        return URLUtils.validate_url(url) is None
 
     def _verify_candidates(self, urls: List[str]) -> Optional[str]:
         if not urls:
@@ -317,7 +319,6 @@ class LinkReplacementWorker(BaseWorker):
 
     def _find_replacement(self, channel: ChannelData
                           ) -> Optional[Tuple[str, bool]]:
-        t0 = time.perf_counter()
         try:
             s = self.settings
             if s.is_channel_blacklisted(channel.meta.name,
@@ -326,8 +327,6 @@ class LinkReplacementWorker(BaseWorker):
             max_urls = s.get_max_urls_per_channel()
             verify_enabled = s.get_verify_candidates_enabled()
 
-            # FIX: search_keys с EPG — единый набор для всех
-            # этапов (alive / matches / verify).
             search_keys = channel.search_keys(
                 s, epg_db=self.epg_db)
 
@@ -343,7 +342,7 @@ class LinkReplacementWorker(BaseWorker):
                 u for u in alive_urls
                 if u and not s.is_blacklisted(u)
                 and not s.is_filtered_domain(u)
-                and URLUtils.validate_url(u) is None]
+                and self._is_url_valid(u)]
 
             if alive_urls:
                 if (len(alive_urls) > 1 and verify_enabled
@@ -359,7 +358,8 @@ class LinkReplacementWorker(BaseWorker):
             alt_urls = [a for a in channel.link.alternative_urls
                         if a and a.strip()
                         and not s.is_blacklisted(a)
-                        and not s.is_filtered_domain(a)]
+                        and not s.is_filtered_domain(a)
+                        and self._is_url_valid(a)]
 
             matches = self.source_manager.find_matches_for_channel(
                 channel, s,
@@ -370,7 +370,8 @@ class LinkReplacementWorker(BaseWorker):
             candidates = [a.link.url for a in matches
                           if a.link.url and a.link.url.strip()
                           and not s.is_blacklisted(a.link.url)
-                          and not s.is_filtered_domain(a.link.url)]
+                          and not s.is_filtered_domain(a.link.url)
+                          and self._is_url_valid(a.link.url)]
             seen: Set[str] = set()
             all_urls = []
             for u in alt_urls + candidates:
@@ -381,7 +382,7 @@ class LinkReplacementWorker(BaseWorker):
                 return None
             all_urls = all_urls[:max_urls]
 
-            trusted, unknown = self._filter_urls_by_cache(
+            trusted, _unknown = self._filter_urls_by_cache(
                 all_urls, channel.meta.name.lower())
 
             if trusted:
@@ -578,14 +579,13 @@ class SourceUrlCheckWorker(BaseWorker):
                 ch.status.status_text = st_txt
                 ch.touch()
 
-            emit_counter[0] += 1
-            if emit_counter[0] % self._CHANNEL_EMIT_EVERY == 0:
-                with suppress(Exception):
-                    self.channel_checked.emit(
-                        self.source_name, bool(ok),
-                        ch.meta.name or "")
-
             with pending_lock:
+                emit_counter[0] += 1
+                if emit_counter[0] % self._CHANNEL_EMIT_EVERY == 0:
+                    with suppress(Exception):
+                        self.channel_checked.emit(
+                            self.source_name, bool(ok),
+                            ch.meta.name or "")
                 if ok is not None:
                     pending.append((
                         ch.meta.name, url, bool(ok),
@@ -646,6 +646,7 @@ class SourcesRefreshWorker(BaseWorker):
         self.config = config
         self.check_urls = bool(check_urls)
         self._child_workers: List[SourceUrlCheckWorker] = []
+        self._child_lock = threading.Lock()
         self._settings_snapshot = settings_snapshot or {}
         self._bl_index = blacklist_index or BlacklistIndex(set(), set())
         self._settings = settings
@@ -658,7 +659,9 @@ class SourcesRefreshWorker(BaseWorker):
 
     def stop(self):
         super().stop()
-        for w in getattr(self, '_child_workers', []):
+        with self._child_lock:
+            children = list(self._child_workers)
+        for w in children:
             with suppress(Exception):
                 if w.isRunning():
                     w.stop()
@@ -767,7 +770,8 @@ class SourcesRefreshWorker(BaseWorker):
                 lambda n, alive, m, s=src.name:
                     self.channel_checked.emit(s, n, alive, m))
             workers.append(w)
-        self._child_workers = workers
+        with self._child_lock:
+            self._child_workers = list(workers)
 
         with self._phase2_lock:
             self._phase2_weights = {}
@@ -881,9 +885,6 @@ class EPGMetadataApplyWorker(BaseWorker):
                  config: Optional[Config] = None,
                  settings: Optional[LinkReplacementSettings] = None):
         super().__init__()
-        # FIX: сохраняем полный снимок канала (uid, name,
-        # tvg_id, tvg_name, alternative_names), чтобы матчинг
-        # учитывал alternative_names после первого применения.
         self._channels = [
             (ch.uid, ch.meta.name or "",
              ch.meta.tvg_id or "", ch.meta.tvg_name or "",

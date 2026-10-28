@@ -1,6 +1,7 @@
-# -*- coding: utf-8 -*-
-"""PlayerController — управление встроенным mpv-плеером
-для PlaylistTab."""
+# Copyright (C) 2025 SmolNP
+# SPDX-License-Identifier: GPL-3.0-or-later
+# См. LICENSE в корне проекта.
+"""PlayerController — управление встроенным mpv-плеером."""
 from __future__ import annotations
 
 import weakref

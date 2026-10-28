@@ -1,4 +1,6 @@
-# -*- coding: utf-8 -*-
+# Copyright (C) 2025 SmolNP
+# SPDX-License-Identifier: GPL-3.0-or-later
+# См. LICENSE в корне проекта.
 """ApplicationCore — глобальное состояние приложения."""
 from __future__ import annotations
 
@@ -30,8 +32,6 @@ from workers import SourcesRefreshWorker
 
 
 class _WorkerRegistry:
-    """Реестр запущенных воркеров для корректной остановки."""
-
     def __init__(self):
         self._lock = threading.RLock()
         self._threads: List[Any] = []
@@ -68,6 +68,11 @@ class _WorkerRegistry:
                     if not w.wait(2000):
                         logger.warning(
                             "Worker thread did not stop: %s", w)
+        for r in runnables:
+            with suppress(Exception):
+                stop = getattr(r, 'stop', None)
+                if callable(stop):
+                    stop()
 
 
 class ApplicationCore(QObject):
@@ -80,12 +85,18 @@ class ApplicationCore(QObject):
     playlist_from_sources_ready = pyqtSignal(list)
     playlist_from_sources_failed = pyqtSignal(str)
     group_templates_updated = pyqtSignal()
+    # FIX 3: сигнал для фоновой перестройки alive-индекса.
+    alive_index_rebuild_started = pyqtSignal(str)
+    alive_index_rebuild_finished = pyqtSignal(str, int)
 
     _instance: Optional['ApplicationCore'] = None
     _instance_lock = threading.RLock()
 
     def __init__(self):
         super().__init__()
+        self._alive_rebuild_lock = threading.RLock()
+        self._alive_rebuild_pending = False
+        self._alive_rebuild_thread: Optional[threading.Thread] = None
         self._initialize()
 
     @classmethod
@@ -119,7 +130,6 @@ class ApplicationCore(QObject):
             CacheManager()
             if self.config.get('use_cache_manager', True)
             else None)
-        # Никакого бутстрапа: пустой список источников — норма.
         self.link_source_manager = LinkSourceManager(
             config_dir, self.cache_manager)
         self.link_replacement_settings = (
@@ -192,7 +202,104 @@ class ApplicationCore(QObject):
         except Exception:
             logger.exception("_bind_managers")
 
-    # ── EPG по умолчанию ──
+    # ── FIX 3: фоновая перестройка alive-индекса ──
+
+    def schedule_alive_index_rebuild(self, reason: str = "") -> None:
+        """Запускает перестройку alive-индекса в фоне.
+
+        Если перестройка уже запланирована или выполняется —
+        просто помечает «ещё раз», чтобы не запускать параллельно.
+        """
+        with self._alive_rebuild_lock:
+            if self._alive_rebuild_pending:
+                logger.debug(
+                    "alive_index_rebuild already pending (%s)",
+                    reason)
+                return
+            self._alive_rebuild_pending = True
+
+        def _worker():
+            try:
+                self.alive_index_rebuild_started.emit(reason)
+                settings = self.get_replacement_settings()
+                try:
+                    rebuilt = self.link_source_manager \
+                        .rebuild_alive_index(settings=settings)
+                except Exception:
+                    logger.exception(
+                        "rebuild_alive_index (bg, %s)", reason)
+                    rebuilt = 0
+                self.alive_index_rebuild_finished.emit(
+                    reason, rebuilt)
+            finally:
+                with self._alive_rebuild_lock:
+                    self._alive_rebuild_pending = False
+                    self._alive_rebuild_thread = None
+
+        t = threading.Thread(
+            target=_worker, name="alive-rebuild", daemon=True)
+        with self._alive_rebuild_lock:
+            self._alive_rebuild_thread = t
+        t.start()
+
+    def _on_sources_updated(self):
+        try:
+            self.link_source_manager.invalidate_cache()
+        except Exception:
+            logger.exception("invalidate_cache")
+        # После изменения списка источников индекс устарел —
+        # запланируем перестройку в фоне.
+        self.schedule_alive_index_rebuild("sources_updated")
+
+    def _on_app_quit(self):
+        with suppress(Exception):
+            self._auto_update_timer.stop()
+        self._workers.stop_all()
+        try:
+            self.link_source_manager.shutdown()
+        except Exception:
+            logger.exception("link_source_manager.shutdown")
+        if self.cache_manager:
+            try:
+                self.cache_manager.cleanup_old(
+                    self.config.get('cache_cleanup_days', 30))
+                self.cache_manager.vacuum()
+            except Exception:
+                logger.exception("cache shutdown")
+
+    def _check_auto_update(self):
+        sources = self.link_source_manager.get_all_sources()
+        to_update = [s for s in sources
+                     if s.enabled and s.auto_update
+                     and s.should_refresh()]
+        if not to_update:
+            return
+        snap = self._build_settings_snapshot()
+        try:
+            bl_index = self.blacklist_manager.build_index()
+        except Exception:
+            bl_index = None
+        settings = self.get_replacement_settings()
+        worker = SourcesRefreshWorker(
+            to_update, self.link_source_manager, self.config,
+            check_urls=True, settings_snapshot=snap,
+            blacklist_index=bl_index,
+            settings=settings)
+        core_ref = weakref.ref(self)
+
+        def _on_all_done(s, t):
+            core = core_ref()
+            if core is None:
+                return
+            with suppress(Exception):
+                if s:
+                    core.sources_updated.emit()
+
+        worker.all_done.connect(_on_all_done)
+        self._workers.add_thread(worker)
+        worker.finished.connect(
+            lambda w=worker: self._workers.remove_thread(w))
+        worker.start()
 
     def get_default_epg_url(self) -> str:
         try:
@@ -201,7 +308,7 @@ class ApplicationCore(QObject):
                 return v.strip()
         except Exception:
             logger.exception("get_default_epg_url")
-        return DEFAULT_EPG_URL  # "" по умолчанию
+        return DEFAULT_EPG_URL
 
     def resolve_epg_urls(self,
                          header_epg_sources: Optional[List[str]] = None
@@ -264,8 +371,6 @@ class ApplicationCore(QObject):
         worker.finished.connect(
             lambda w=worker: self._workers.remove_thread(w))
         worker.start()
-
-    # ── normalized_index ──
 
     def get_normalized_index_stats(
             self, max_age_hours: int = 24,
@@ -364,63 +469,6 @@ class ApplicationCore(QObject):
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _on_sources_updated(self):
-        try:
-            self.link_source_manager.invalidate_cache()
-        except Exception:
-            logger.exception("invalidate_cache")
-
-    def _on_app_quit(self):
-        with suppress(Exception):
-            self._auto_update_timer.stop()
-        self._workers.stop_all()
-        try:
-            self.link_source_manager.shutdown()
-        except Exception:
-            logger.exception("link_source_manager.shutdown")
-        if self.cache_manager:
-            try:
-                self.cache_manager.cleanup_old(
-                    self.config.get('cache_cleanup_days', 30))
-                self.cache_manager.vacuum()
-            except Exception:
-                logger.exception("cache shutdown")
-
-    def _check_auto_update(self):
-        sources = self.link_source_manager.get_all_sources()
-        to_update = [s for s in sources
-                     if s.enabled and s.auto_update
-                     and s.should_refresh()]
-        if not to_update:
-            return
-        snap = self._build_settings_snapshot()
-        try:
-            bl_index = self.blacklist_manager.build_index()
-        except Exception:
-            bl_index = None
-        settings = self.get_replacement_settings()
-        worker = SourcesRefreshWorker(
-            to_update, self.link_source_manager, self.config,
-            check_urls=True, settings_snapshot=snap,
-            blacklist_index=bl_index,
-            settings=settings)
-        core_ref = weakref.ref(self)
-
-        def _on_all_done(s, t):
-            core = core_ref()
-            if core is None:
-                return
-            with suppress(Exception):
-                if s:
-                    core.sources_updated.emit()
-
-        worker.all_done.connect(_on_all_done)
-        self._workers.add_thread(worker)
-        worker.finished.connect(
-            lambda w=worker: self._workers.remove_thread(w))
-        worker.start()
-
-    # ── Вкладки ──
     def register_tab(self, tab) -> str:
         tid = uuid.uuid4().hex
         with self._tab_lock:
@@ -498,6 +546,9 @@ class ApplicationCore(QObject):
         with_url = working = not_working = unknown = \
             unsupported = 0
         groups_set: Set[str] = set()
+        # FIX 4: unknown считается отдельно от unsupported,
+        # чтобы working + not_working + unknown + unsupported
+        # сходилось с with_url.
         for ch in channels:
             has = ch.has_valid_url
             if has:
@@ -506,10 +557,14 @@ class ApplicationCore(QObject):
                 working += 1
             elif ch.status.url_status is False:
                 not_working += 1
-            elif has:
-                unknown += 1
-            if ch.status.link_quality == LinkQuality.UNSUPPORTED:
-                unsupported += 1
+            else:
+                # url_status is None
+                if has:
+                    if ch.status.link_quality == \
+                            LinkQuality.UNSUPPORTED:
+                        unsupported += 1
+                    else:
+                        unknown += 1
             if ch.meta.group:
                 groups_set.add(ch.meta.group)
         stats = {
@@ -523,7 +578,6 @@ class ApplicationCore(QObject):
             self._stats_cache[tid] = (rev, stats)
         return stats
 
-    # ── Источники ──
     def get_sources(self) -> List[LinkSource]:
         return self.link_source_manager.get_all_sources()
 
@@ -543,16 +597,14 @@ class ApplicationCore(QObject):
             epg_db=epg_db if epg_db is not None else self.epg_db)
 
     # ── ЧС каналов ──
+
     def add_to_blacklist(self, name: str,
                          tvg_id: str = "") -> bool:
         r = self.blacklist_manager.add_channel(name, tvg_id)
         if r:
             self.blacklist_updated.emit()
-            try:
-                self.link_source_manager.rebuild_alive_index(
-                    settings=self.get_replacement_settings())
-            except Exception:
-                logger.exception("rebuild_alive_index")
+            # FIX 3: перестройка alive-индекса — в фоне.
+            self.schedule_alive_index_rebuild("add_to_blacklist")
         return r
 
     def remove_from_blacklist(self, name: str,
@@ -560,11 +612,8 @@ class ApplicationCore(QObject):
         r = self.blacklist_manager.remove_channel(name, tvg_id)
         if r:
             self.blacklist_updated.emit()
-            try:
-                self.link_source_manager.rebuild_alive_index(
-                    settings=self.get_replacement_settings())
-            except Exception:
-                logger.exception("rebuild_alive_index")
+            self.schedule_alive_index_rebuild(
+                "remove_from_blacklist")
         return r
 
     def get_blacklist(self) -> List[Dict[str, str]]:
@@ -573,11 +622,7 @@ class ApplicationCore(QObject):
     def clear_blacklist(self) -> bool:
         self.blacklist_manager.clear()
         self.blacklist_updated.emit()
-        try:
-            self.link_source_manager.rebuild_alive_index(
-                settings=self.get_replacement_settings())
-        except Exception:
-            logger.exception("rebuild_alive_index")
+        self.schedule_alive_index_rebuild("clear_blacklist")
         return True
 
     def apply_blacklist_to_channels(
@@ -586,6 +631,7 @@ class ApplicationCore(QObject):
         return self.blacklist_manager.filter_channels(channels)
 
     # ── ЧС домен/IP ──
+
     def add_domain_to_blacklist(
             self, value: str,
             include_subdomains: bool = True,
@@ -595,32 +641,23 @@ class ApplicationCore(QObject):
             note=note)
         if r:
             self.domain_blacklist_updated.emit()
-            try:
-                self.link_source_manager.rebuild_alive_index(
-                    settings=self.get_replacement_settings())
-            except Exception:
-                logger.exception("rebuild_alive_index")
+            self.schedule_alive_index_rebuild(
+                "add_domain_to_blacklist")
         return r
 
     def remove_domain_from_blacklist(self, value: str) -> bool:
         r = self.domain_blacklist_manager.remove_domain(value)
         if r:
             self.domain_blacklist_updated.emit()
-            try:
-                self.link_source_manager.rebuild_alive_index(
-                    settings=self.get_replacement_settings())
-            except Exception:
-                logger.exception("rebuild_alive_index")
+            self.schedule_alive_index_rebuild(
+                "remove_domain_from_blacklist")
         return r
 
     def clear_domain_blacklist(self) -> bool:
         self.domain_blacklist_manager.clear()
         self.domain_blacklist_updated.emit()
-        try:
-            self.link_source_manager.rebuild_alive_index(
-                settings=self.get_replacement_settings())
-        except Exception:
-            logger.exception("rebuild_alive_index")
+        self.schedule_alive_index_rebuild(
+            "clear_domain_blacklist")
         return True
 
     def get_domain_blacklist(self) -> List[Dict[str, Any]]:
@@ -639,6 +676,7 @@ class ApplicationCore(QObject):
             channels)
 
     # ── UA ──
+
     def apply_domain_user_agent(
             self, channels: List[ChannelData]) -> int:
         return (self.domain_user_agent_manager
@@ -653,6 +691,7 @@ class ApplicationCore(QObject):
                 .should_remove_user_agent(url))
 
     # ── Настройки / кэш ──
+
     def get_replacement_settings(self) -> LinkReplacementSettings:
         self._bind_managers()
         return self.link_replacement_settings
@@ -670,6 +709,7 @@ class ApplicationCore(QObject):
         return self.cache_manager.get_check_result(name, url, ttl)
 
     # ── Шаблоны группировки (group-title) ──
+
     def get_group_templates(self) -> List[Any]:
         return self.group_template_manager.get_all()
 

@@ -1,10 +1,7 @@
-# -*- coding: utf-8 -*-
-"""LinkSource, LinkSourceManager.
-
-ПРИНЦИПИАЛЬНО: приложение не содержит встроенных ссылок на
-IPTV-плейлисты. Пользователь добавляет источники сам или через
-авто-поиск (GitHub API, live-запрос).
-"""
+# Copyright (C) 2025 SmolNP
+# SPDX-License-Identifier: GPL-3.0-or-later
+# См. LICENSE в корне проекта.
+"""LinkSource, LinkSourceManager."""
 from __future__ import annotations
 
 import concurrent.futures
@@ -202,10 +199,6 @@ class LinkSourceManager:
             LinkSource.from_dict(x) for x in self._store._data
             if isinstance(x, dict)
         ]
-        # Никакого бутстрапа: пустой список — норма.
-        # Пользователь добавляет источники вручную или через
-        # «🔍 Найти источники автоматически» (GitHub API).
-
         self._loaded: "OrderedDict[str, Tuple[float, str, List[ChannelData]]]" = \
             OrderedDict()
         self._name_index: "OrderedDict[str, Dict[str, List[ChannelData]]]" = \
@@ -340,6 +333,13 @@ class LinkSourceManager:
     def update_source(self, old_name: str,
                       new_source: LinkSource) -> bool:
         with self._lock:
+            if new_source.name != old_name:
+                for s in self._sources:
+                    if s.name == new_source.name:
+                        logger.warning(
+                            "update_source: name collision '%s'",
+                            new_source.name)
+                        return False
             found = False
             for i, s in enumerate(self._sources):
                 if s.name == old_name:
@@ -457,16 +457,6 @@ class LinkSourceManager:
             domain_user_agent_manager.apply_rules_to_channels(
                 channels)
         return channels
-
-    @staticmethod
-    def _is_url_blocked(url: str,
-                        temp_domains: List[str],
-                        unsafe_domains: List[str]) -> bool:
-        host = URLUtils.extract_host(url) or ''
-        if not host:
-            return False
-        return URLUtils.host_in_domains(
-            host, list(temp_domains) + list(unsafe_domains))
 
     def _build_alive_index(
             self, channels: List[ChannelData], bl_mgr,
@@ -1235,6 +1225,8 @@ class LinkSourceManager:
                 return False
             if settings.is_filtered_domain(url):
                 return False
+            if URLUtils.validate_url(url) is not None:
+                return False
             return True
 
         def _accept(ch: ChannelData) -> bool:
@@ -1282,72 +1274,64 @@ class LinkSourceManager:
                         out.append(ch)
             return out
 
-        if settings.search_type == 'exact':
-            for source in enabled:
+        keys_cache: Dict[int, Set[str]] = {}
+
+        def _keys_for(ch: ChannelData) -> Set[str]:
+            k = keys_cache.get(ch.uid)
+            if k is None:
+                k = ch.search_keys(settings)
+                keys_cache[ch.uid] = k
+            return k
+
+        # FIX 10: параллелим загрузку источников и для exact —
+        # это I/O-bound операция, и последовательная загрузка
+        # 50 источников занимает слишком много времени.
+        ex = self._get_search_pool()
+        futures = {
+            ex.submit(
+                self.load_links_from_source,
+                s, True, config, True, stop_token,
+                blacklist_manager=blacklist_manager,
+                domain_blacklist_manager=
+                    domain_blacklist_manager,
+                domain_user_agent_manager=
+                    domain_user_agent_manager,
+                settings=settings
+            ): s
+            for s in enabled
+        }
+        try:
+            for fut in concurrent.futures.as_completed(
+                    futures,
+                    timeout=SEARCH_FUTURES_TIMEOUT_SEC):
                 if cancelled(stop_token):
-                    break
-                self.load_links_from_source(
-                    source, True, config, True, stop_token,
-                    blacklist_manager=blacklist_manager,
-                    domain_blacklist_manager=
-                        domain_blacklist_manager,
-                    domain_user_agent_manager=
-                        domain_user_agent_manager,
-                    settings=settings)
+                    continue
+                try:
+                    fut.result()
+                except Exception:
+                    logger.exception("Source search failed")
+                    continue
+                src = futures[fut]
                 with self._lock:
-                    index = self._name_index.get(source.name)
-                if index is None:
+                    index = self._name_index.get(src.name)
+                if not index:
                     continue
                 results.extend(
-                    _collect_from_index(index, 'exact'))
-        else:
-            ex = self._get_search_pool()
-            futures = {
-                ex.submit(
-                    self.load_links_from_source,
-                    s, True, config, True, stop_token,
-                    blacklist_manager=blacklist_manager,
-                    domain_blacklist_manager=
-                        domain_blacklist_manager,
-                    domain_user_agent_manager=
-                        domain_user_agent_manager,
-                    settings=settings
-                ): s
-                for s in enabled
-            }
-            try:
-                for fut in concurrent.futures.as_completed(
-                        futures,
-                        timeout=SEARCH_FUTURES_TIMEOUT_SEC):
-                    if cancelled(stop_token):
-                        continue
-                    try:
-                        fut.result()
-                    except Exception:
-                        logger.exception(
-                            "Source search failed")
-                        continue
-                    src = futures[fut]
-                    with self._lock:
-                        index = self._name_index.get(src.name)
-                    if not index:
-                        continue
-                    results.extend(
-                        _collect_from_index(
-                            index, settings.search_type))
-            except concurrent.futures.TimeoutError:
-                logger.warning(
-                    "search_channel: timeout %ds, cancelling "
-                    "pending futures",
-                    SEARCH_FUTURES_TIMEOUT_SEC)
-                for f in futures:
-                    with suppress(Exception):
-                        f.cancel()
+                    _collect_from_index(
+                        index, settings.search_type))
+        except concurrent.futures.TimeoutError:
+            logger.warning(
+                "search_channel: timeout %ds, cancelling "
+                "pending futures",
+                SEARCH_FUTURES_TIMEOUT_SEC)
+            for f in futures:
+                with suppress(Exception):
+                    f.cancel()
 
         def key(ch: ChannelData):
             sp = self._source_priority(ch.link.link_source)
             ms = 0.0
-            for k in ch.search_keys(settings):
+            for k in _keys_for(ch):
                 s = name_similarity(
                     ch.meta.name or "", k)
                 if s > ms:

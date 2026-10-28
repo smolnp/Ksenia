@@ -1,11 +1,7 @@
-# -*- coding: utf-8 -*-
-"""Встроенный плеер на mpv через QProcess --wid + JSON IPC.
-
-FIX (0.3.2): _collect_alternative_urls передаёт epg_db в
-find_matches_for_channel, чтобы плеер искал альтернативы по
-всем ключам (name / tvg_id / tvg_name / epg_alternative_names /
-EPG display-name), а не только по meta.name.
-"""
+# Copyright (C) 2025 SmolNP
+# SPDX-License-Identifier: GPL-3.0-or-later
+# См. LICENSE в корне проекта.
+"""Встроенный плеер на mpv через QProcess --wid + JSON IPC."""
 from __future__ import annotations
 
 import json
@@ -84,9 +80,6 @@ class MpvPlayerWidget(QFrame):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.addWidget(self._surface)
 
-        # ── Оверлей ошибки поверх видеоповерхности ──
-        # Родитель — self, но поднимается над _surface через
-        # raise_(); позиционируется вручную в resizeEvent().
         self._error_overlay = QLabel(self)
         self._error_overlay.setWordWrap(True)
         self._error_overlay.setAlignment(
@@ -112,11 +105,6 @@ class MpvPlayerWidget(QFrame):
         self._ipc_req_id = 0
         self._ipc_callbacks: Dict[int, Any] = {}
 
-        # FIX: отложенный loadfile — если IPC ещё не подключён
-        # (первый запуск mpv), сохраняем команду и отправим её
-        # сразу после подключения сокета. Иначе первая команда
-        # молча теряется и канал не открывается, пока
-        # пользователь не переключится на следующий/предыдущий.
         self._pending_loadfile: Optional[
             Tuple[str, str, Dict[str, str]]] = None
 
@@ -127,6 +115,8 @@ class MpvPlayerWidget(QFrame):
         self._release_lock = threading.RLock()
         self._aspect_user_choice: Optional[str] = None
         self._paused = False
+        self._volume: int = PLAYER_DEFAULT_VOLUME
+        self._pending_volume: Optional[int] = None
 
         self._video_w = 0
         self._video_h = 0
@@ -153,7 +143,6 @@ class MpvPlayerWidget(QFrame):
 
         self._started = False
 
-    # ── Публичный API ──
     def play_url(self, url: str, user_agent: str = "",
                  extra_headers: Optional[Dict[str, str]] = None,
                  uid: int = -1,
@@ -163,7 +152,6 @@ class MpvPlayerWidget(QFrame):
             if self._released:
                 return
 
-        # Пустой URL: плашка + сигнал, mpv не запускаем.
         if not url:
             self._show_error_overlay(
                 "<b>Пустой URL</b><br>"
@@ -208,8 +196,6 @@ class MpvPlayerWidget(QFrame):
         self._pref_audio_lang = pref_audio_lang or ""
         self._pref_video_lang = pref_video_lang or ""
 
-        # При смене URL убираем старую плашку — новая появится,
-        # только если mpv снова не сможет загрузить поток.
         self._hide_error_overlay()
 
         if not self._started:
@@ -242,10 +228,16 @@ class MpvPlayerWidget(QFrame):
         return not self._paused
 
     def set_volume(self, v: int):
+        self._volume = max(0, min(200, int(v)))
         if self._released or not self._started:
             return
+        if (self._ipc is None
+                or self._ipc.state()
+                != QLocalSocket.LocalSocketState.ConnectedState):
+            self._pending_volume = self._volume
+            return
         self._send_ipc(
-            {"command": ["set_property", "volume", int(v)]})
+            {"command": ["set_property", "volume", self._volume]})
 
     def set_aspect_ratio(self, ratio: str):
         if self._released or not self._started:
@@ -471,11 +463,22 @@ class MpvPlayerWidget(QFrame):
         return True
 
     def _check_mpv_alive(self):
+        # FIX 8: если mpv упал — сбрасываем состояние, чтобы
+        # следующий play_url() корректно перезапустил процесс.
         if self._proc is None:
             return
         state = self._proc.state()
         if state == QProcess.ProcessState.NotRunning:
             logger.error("mpv exited (state=NotRunning)")
+            self._pending_loadfile = None
+            self._pending_volume = None
+            self._started = False
+            self._proc = None
+            self._hide_error_overlay()
+            self._show_error_overlay(
+                "<b>mpv завершился неожиданно</b><br>"
+                "Плеер будет перезапущен при следующем "
+                "воспроизведении.")
 
     def _connect_ipc_with_retry(self):
         if not self._ipc_path:
@@ -516,8 +519,13 @@ class MpvPlayerWidget(QFrame):
             self._send_ipc(
                 {"command": ["observe_property", rid, prop]})
 
-        # FIX: отправляем отложенный loadfile, если первый
-        # play_url() пришёл до подключения IPC.
+        self._send_ipc(
+            {"command": ["set_property", "volume", self._volume]})
+        self._pending_volume = None
+
+        if self._aspect_user_choice and self._aspect_user_choice != "auto":
+            self.set_aspect_ratio(self._aspect_user_choice)
+
         pending = self._pending_loadfile
         if pending is not None:
             self._pending_loadfile = None
@@ -555,7 +563,6 @@ class MpvPlayerWidget(QFrame):
     def _handle_ipc_message(self, msg: Dict[str, Any]):
         ev = msg.get("event")
         if ev == "file-loaded":
-            # Успешная загрузка — скрываем плашку ошибки.
             self._hide_error_overlay()
             if self._pending_uid >= 0:
                 self.channel_status_changed.emit(
@@ -591,10 +598,8 @@ class MpvPlayerWidget(QFrame):
             with suppress(Exception):
                 cb(msg)
 
-    # ── Обработка ошибок mpv ──
     @staticmethod
     def _humanize_mpv_error(err: str) -> str:
-        """Превращает сырое сообщение mpv в понятный текст."""
         low = (err or "").lower()
         if not low:
             return "Неизвестная ошибка воспроизведения"
@@ -621,24 +626,12 @@ class MpvPlayerWidget(QFrame):
         return err.strip()[:200] or "Ошибка воспроизведения"
 
     def _handle_playback_error(self, err: str):
-        """Показывает человекочитаемую плашку и логирует.
-
-        Дополнительно пытается классифицировать ошибку через
-        URLUtils.classify_status для единообразного текста с
-        проверкой ссылок в таблице.
-        """
         human = self._humanize_mpv_error(err)
-
-        # Если удалось распознать через classify_status —
-        # используем его (единый словарь статусов).
         try:
             status_text, _ = URLUtils.classify_status(
                 self._current_url or "", None, error=err)
-            # classify_status возвращает StatusText.* — если это
-            # осмысленный статус, предпочитаем его.
             if status_text and status_text not in (
                     StatusText.UNCHECKED, StatusText.NO_URL):
-                # Отрезаем emoji-префикс для чистого текста.
                 clean = status_text.strip()
                 if clean:
                     human = clean
@@ -651,7 +644,6 @@ class MpvPlayerWidget(QFrame):
             f"<b>Ошибка воспроизведения</b><br>{human}")
         self.playback_error.emit(human)
 
-    # ── Оверлей ошибки ──
     def _show_error_overlay(self, text: str):
         self._current_error_text = text
         if not _is_qobject_valid(self._error_overlay):
@@ -670,8 +662,6 @@ class MpvPlayerWidget(QFrame):
     def _reposition_error_overlay(self):
         if not _is_qobject_valid(self._error_overlay):
             return
-        ow = self._error_overlay.width()
-        oh = self._error_overlay.height()
         margin = 24
         w = max(0, self.width() - 2 * margin)
         h = max(0, self.height() - 2 * margin)
@@ -766,8 +756,6 @@ class MpvPlayerWidget(QFrame):
 
     def _loadfile(self, url: str, user_agent: str,
                   extra_headers: Dict[str, str]):
-        # FIX: если IPC ещё не подключён — запоминаем и
-        # отправим после подключения в _on_ipc_connected.
         if self._ipc is None or (self._ipc.state()
                 != QLocalSocket.LocalSocketState.ConnectedState):
             self._pending_loadfile = (
@@ -824,8 +812,6 @@ def _track_label(t: Dict[str, Any], fallback_id: int) -> str:
 
 
 class EmbeddedPlayerDialog(BaseDialog):
-    """Ksenia Player — встроенный плеер на mpv."""
-
     channel_changed = pyqtSignal(int)
     channel_status_changed = pyqtSignal(int, bool)
     channel_modified = pyqtSignal(int)
@@ -1043,9 +1029,9 @@ class EmbeddedPlayerDialog(BaseDialog):
     def _on_channel_status_changed(self, uid: int, ok: bool):
         if uid == (self.channel.uid if self.channel else -1):
             if self.channel is not None:
+                from datetime import datetime as _dt
                 self.channel.status.url_status = bool(ok)
-                self.channel.status.url_check_time = (
-                    __import__("datetime").datetime.now())
+                self.channel.status.url_check_time = _dt.now()
                 if ok:
                     self.channel.status.link_quality = (
                         LinkQuality.WORKING)
@@ -1063,8 +1049,6 @@ class EmbeddedPlayerDialog(BaseDialog):
             self._update_link_buttons()
         self.channel_status_changed.emit(uid, ok)
 
-    # FIX: используем единый матчер find_matches_for_channel
-    # с epg_db, чтобы плеер и автозамена искали одинаково.
     def _collect_alternative_urls(self) -> List[str]:
         if self.channel is None:
             return []
@@ -1092,7 +1076,6 @@ class EmbeddedPlayerDialog(BaseDialog):
             try:
                 limit = max(1, int(
                     settings.max_urls_to_check_per_channel))
-                # FIX: ищем по всем ключам канала, включая EPG.
                 search_keys = self.channel.search_keys(
                     settings, epg_db=self.core.epg_db)
                 alive = (
@@ -1508,8 +1491,6 @@ class EmbeddedPlayerDialog(BaseDialog):
     def _on_error(self, msg: str):
         if not _is_qobject_valid(self):
             return
-        # Плашка уже показана внутри MpvPlayerWidget.
-        # Здесь только обновляем кнопки и статус канала.
         self._update_link_buttons()
 
     def _safe_release(self):

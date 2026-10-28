@@ -1,21 +1,11 @@
-# -*- coding: utf-8 -*-
-"""BaseJsonStore, StableStateManager, CacheManager.
-
-FIX (0.3.2): добавлена таблица normalized_index — «живой»
-нормализованный индекс источников.
-
-  • Заполняется при SourcesRefreshWorker._phase3_rebuild
-    (после проверки URL), ТОЛЬКО для живых ссылок.
-  • Ключи — ChannelData.search_keys(settings) (name / tvg_name /
-    epg_alternative_names / tvg:<id>).
-  • Отпечаток настроек нормализации (settings_fp) позволяет
-    считать кэш устаревшим при смене настроек.
-  • Из него строятся _name_index / _alive_index в RAM
-    (LinkSourceManager._store_loaded).
-"""
+# Copyright (C) 2025 SmolNP
+# SPDX-License-Identifier: GPL-3.0-or-later
+# См. LICENSE в корне проекта.
+"""BaseJsonStore, StableStateManager, CacheManager."""
 from __future__ import annotations
 
 import atexit
+import copy
 import hashlib
 import json
 import os
@@ -45,7 +35,7 @@ class BaseJsonStore:
     def __init__(self, path: str, default: Any):
         self.path = path
         self._lock = threading.RLock()
-        self._data = default
+        self._data = copy.deepcopy(default)
         self._load()
 
     def _load(self):
@@ -56,6 +46,12 @@ class BaseJsonStore:
                 data = json.load(f)
             if isinstance(data, type(self._data)):
                 self._data = data
+            else:
+                logger.warning(
+                    "BaseJsonStore %s: type mismatch "
+                    "(expected %s, got %s) — kept default",
+                    self.path, type(self._data).__name__,
+                    type(data).__name__)
         except Exception:
             logger.exception("BaseJsonStore load: %s", self.path)
 
@@ -256,10 +252,6 @@ class CacheManager:
                     PRIMARY KEY (name, url)
                 );
 
-                -- FIX (0.3.2): «живой» нормализованный индекс
-                -- источников. Заполняется в
-                -- SourcesRefreshWorker._phase3_rebuild ТОЛЬКО для
-                -- живых ссылок. Ключи — ChannelData.search_keys().
                 CREATE TABLE IF NOT EXISTS normalized_index (
                     source TEXT NOT NULL,
                     search_key TEXT NOT NULL,
@@ -448,7 +440,7 @@ class CacheManager:
             conn = self._connect()
             with conn:
                 conn.execute("DELETE FROM url_status_cache")
-        except (sqlite3.ProgrammingError, Exception):
+        except Exception:
             pass
 
     def vacuum(self):
@@ -572,8 +564,6 @@ class CacheManager:
         except Exception:
             pass
 
-    # ── normalized_index ──
-
     def save_normalized_index(
             self,
             rows: List[Dict[str, Any]],
@@ -581,24 +571,9 @@ class CacheManager:
             settings_fp: str,
             replace_source: bool = True,
     ) -> int:
-        """Сохраняет «живой» нормализованный индекс источника.
-
-        rows — список dict с ключами:
-            search_key (str), name (str), tvg_id (str),
-            url (str), priority (int)
-        source — имя источника (LinkSource.name)
-        settings_fp — отпечаток настроек нормализации (str)
-        replace_source — если True, сначала удаляет все старые
-            записи этого источника (атомарно).
-
-        Возвращает число записанных строк.
-        """
         if not source or not settings_fp:
             return 0
         if not rows:
-            # Пустой индекс — тоже валидное состояние: значит,
-            # у источника нет живых URL. Удаляем старые записи,
-            # чтобы не осталось «фантомов».
             if replace_source:
                 try:
                     conn = self._connect()
@@ -606,7 +581,7 @@ class CacheManager:
                         conn.execute(
                             "DELETE FROM normalized_index "
                             "WHERE source = ?", (source,))
-                except (sqlite3.ProgrammingError, Exception):
+                except Exception:
                     pass
             return 0
         now = time.time()
@@ -636,7 +611,7 @@ class CacheManager:
                         conn.execute(
                             "DELETE FROM normalized_index "
                             "WHERE source = ?", (source,))
-                except (sqlite3.ProgrammingError, Exception):
+                except Exception:
                     pass
             return 0
         try:
@@ -666,14 +641,6 @@ class CacheManager:
             max_age_hours: int = 24,
             source: Optional[str] = None,
     ) -> Dict[str, List[Dict[str, Any]]]:
-        """Загружает normalized_index, сгруппированный по source.
-
-        Возвращает:
-            {source: [{search_key, name, tvg_id, url, priority}, ...]}
-
-        Если settings_fp не совпадает с сохранённым — запись
-        считается устаревшей и НЕ возвращается.
-        """
         if not settings_fp:
             return {}
         cutoff = time.time() - max_age_hours * 3600
@@ -735,16 +702,6 @@ class CacheManager:
             self,
             max_age_hours: int = 24,
     ) -> Dict[str, Any]:
-        """Статистика normalized_index для UI.
-
-        Возвращает:
-            count — всего записей
-            sources — число источников
-            newest_ts — самая свежая cached_at (или 0)
-            oldest_ts — самая старая cached_at (или 0)
-            fresh_count — записей свежее max_age_hours
-            settings_fps — множество отпечатков настроек
-        """
         try:
             conn = self._connect()
             cutoff = time.time() - max_age_hours * 3600
@@ -828,7 +785,9 @@ class CacheManager:
             return
         with self._link_cache_lock:
             self._link_cache_put_counter += 1
-            if self._link_cache_put_counter % 50 == 0:
+            # FIX 9: эвикция раз в 10 записей (а не 50), чтобы
+            # не превышать лимит при интенсивной записи.
+            if self._link_cache_put_counter % 10 == 0:
                 self._evict_link_cache_if_needed()
             path = self._link_cache_path(url)
             tmp = path + ".tmp"
@@ -919,9 +878,10 @@ class CacheManager:
                 "WHERE cached_at < ?", (cutoff_epg,)).fetchone()[0]
             stats['normalized_index']['count'] = conn.execute(
                 "SELECT COUNT(*) FROM normalized_index").fetchone()[0]
+            cutoff_norm = now - 24 * 3600
             stats['normalized_index']['old_count'] = conn.execute(
                 "SELECT COUNT(*) FROM normalized_index "
-                "WHERE cached_at < ?", (cutoff_epg,)).fetchone()[0]
+                "WHERE cached_at < ?", (cutoff_norm,)).fetchone()[0]
             stats['normalized_index']['sources'] = conn.execute(
                 "SELECT COUNT(DISTINCT source) "
                 "FROM normalized_index").fetchone()[0]

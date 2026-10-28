@@ -1,4 +1,6 @@
-# -*- coding: utf-8 -*-
+# Copyright (C) 2025 SmolNP
+# SPDX-License-Identifier: GPL-3.0-or-later
+# См. LICENSE в корне проекта.
 """ColumnSpec — описание колонок таблицы каналов."""
 from __future__ import annotations
 
@@ -132,12 +134,8 @@ def columns_for_channels(
         if spec.weight == COLUMN_OPTIONAL:
             if spec.key in hidden:
                 continue
-            # Принудительно добавляем TVG-ID и Логотип, даже если они пустые
-            # или не переданы в user_visible_keys
             if spec.key in ("tvg_id", "logo"):
                 result.append(spec)
-            # Остальные опциональные колонки добавляем только при наличии данных
-            # или если они явно запрошены пользователем
             elif explicit_optional and spec.key not in user_keys:
                 continue
             elif any(spec.get_value(ch) for ch in channels):
@@ -150,5 +148,5 @@ def columns_for_channels(
             if spec.key in user_keys and any(
                     spec.get_value(ch) for ch in channels):
                 result.append(spec)
-                
+
     return result

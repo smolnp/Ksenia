@@ -1,4 +1,6 @@
-# -*- coding: utf-8 -*-
+# Copyright (C) 2025 SmolNP
+# SPDX-License-Identifier: GPL-3.0-or-later
+# См. LICENSE в корне проекта.
 """Чёрные списки и правила UA."""
 from __future__ import annotations
 
@@ -127,11 +129,11 @@ class DomainBlacklistRule:
         try:
             ia, ib = (ipaddress.ip_address(a),
                       ipaddress.ip_address(b))
-            if ia.version != ib.version:
-                if ia.version == 6 and ia.ipv4_mapped:
-                    ia = ia.ipv4_mapped
-                if ib.version == 6 and ib.ipv4_mapped:
-                    ib = ib.ipv4_mapped
+            # Нормализуем IPv4-mapped IPv6 к IPv4 в обе стороны.
+            if ia.version == 6 and ia.ipv4_mapped:
+                ia = ia.ipv4_mapped
+            if ib.version == 6 and ib.ipv4_mapped:
+                ib = ib.ipv4_mapped
             return ia == ib
         except ValueError:
             return False

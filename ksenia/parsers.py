@@ -1,4 +1,6 @@
-# -*- coding: utf-8 -*-
+# Copyright (C) 2025 SmolNP
+# SPDX-License-Identifier: GPL-3.0-or-later
+# См. LICENSE в корне проекта.
 """M3UParser, PlaylistHeaderManager."""
 from __future__ import annotations
 
@@ -34,7 +36,6 @@ _PROTOCOLS = ('http://', 'https://', 'rtmp://', 'rtsp://', 'udp://',
 
 
 def _find_name_comma(line: str) -> int:
-    """Индекс запятой, отделяющей атрибуты от имени."""
     in_quotes = False
     quote_char = ''
     escaped = False
@@ -57,11 +58,6 @@ def _find_name_comma(line: str) -> int:
 
 
 def _is_valid_url_candidate(url: str) -> bool:
-    """Проверяет, похожа ли строка на URL.
-
-    Используется только для решения «это URL или нет».
-    Каналы без URL сохраняются отдельно (см. parse()).
-    """
     if not url:
         return False
     u = url.strip()
@@ -74,9 +70,41 @@ def _is_valid_url_candidate(url: str) -> bool:
         return True
     if u.startswith('/'):
         return True
-    if len(u) > 10 and ' ' not in u:
+    # Ужесточение: без схемы/слэшей принимаем только длинные
+    # строки без пробелов, похожие на домен/путь.
+    if len(u) > 10 and ' ' not in u and (
+            '/' in u or '.' in u):
         return True
     return False
+
+
+def _unescape_extinf_name(raw: str) -> str:
+    """Снимает экранирование, которое накладывает update_extinf.
+
+    В имени канала (после последней запятой в #EXTINF) мы
+    экранируем `\\` → `\\\\` и `"` → `\\"`. При чтении файла
+    надо вернуть как было.
+    """
+    if not raw:
+        return ""
+    out: list[str] = []
+    i = 0
+    n = len(raw)
+    while i < n:
+        c = raw[i]
+        if c == '\\' and i + 1 < n:
+            nxt = raw[i + 1]
+            if nxt == '\\':
+                out.append('\\')
+                i += 2
+                continue
+            if nxt == '"':
+                out.append('"')
+                i += 2
+                continue
+        out.append(c)
+        i += 1
+    return "".join(out)
 
 
 class M3UParser:
@@ -85,7 +113,7 @@ class M3UParser:
         comma = _find_name_comma(line)
         if comma < 0:
             return ""
-        return line[comma + 1:].strip()
+        return _unescape_extinf_name(line[comma + 1:].strip())
 
     @classmethod
     def parse_attrs(cls, line: str) -> Dict[str, str]:
@@ -150,11 +178,6 @@ class M3UParser:
             parse_index: int,
             assign_original_index: bool,
     ) -> int:
-        """Подготавливает pending-канал как «канал без URL».
-
-        Возвращает новый parse_index (увеличенный на 1, если
-        assign_original_index=True).
-        """
         if not pending.meta.name:
             pending.meta.name = "(без имени)"
         pending.link.url = ""
@@ -174,21 +197,6 @@ class M3UParser:
               assign_original_index: bool = True,
               settings: Optional[Any] = None
               ) -> List[ChannelData]:
-        """Парсит M3U/M3U8.
-
-        Поведение:
-            - Каналы с URL добавляются как обычно.
-            - #EXTINF БЕЗ последующего URL сохраняется как канал
-              с has_url=False. Это позволяет пользователю
-              сохранять «заготовки» каналов и находить для них
-              ссылки позже, не теряя их при переоткрытии файла.
-            - Пустые строки и комментарии между #EXTINF и URL
-              не завершают канал (URL может быть на следующей
-              непустой строке).
-
-        Параметр settings принимается для обратной совместимости
-        (сейчас не влияет на поведение парсера).
-        """
         validate_m3u_lines(content)
 
         channels: List[ChannelData] = []
@@ -203,7 +211,6 @@ class M3UParser:
         fix = ChannelNameNormalizer.fix_encoding
 
         def _flush_pending():
-            """Добавляет pending_channel как канал без URL."""
             nonlocal pending_channel, parse_index
             if pending_channel is None:
                 return
@@ -212,6 +219,9 @@ class M3UParser:
                 assign_original_index)
             channels.append(pending_channel)
             pending_channel = None
+            # Очищаем EXTVLCOPT, чтобы они не «прилипали» к
+            # следующему #EXTINF.
+            pending_vlcopts.clear()
 
         while i < n:
             raw_line = lines[i]
@@ -223,8 +233,15 @@ class M3UParser:
 
             if line.startswith('#EXTGRP:'):
                 grp = fix(line[len('#EXTGRP:'):].strip())
-                if grp and pending_channel is None:
-                    pending_extgrp = grp
+                if grp:
+                    if pending_channel is None:
+                        pending_extgrp = grp
+                    else:
+                        # EXTGRP после #EXTINF — применяем сразу.
+                        if (not pending_channel.meta.group
+                                or pending_channel.meta.group
+                                == DEFAULT_GROUP):
+                            pending_channel.meta.group = grp
                 i += 1
                 continue
 
@@ -235,8 +252,6 @@ class M3UParser:
 
             if line.startswith('#EXTINF:'):
                 if pending_channel is not None:
-                    # Встретили новый #EXTINF, а предыдущий
-                    # остался без URL — сохраняем как «заготовку».
                     _flush_pending()
 
                 payload = line[len('#EXTINF:'):]
@@ -260,7 +275,6 @@ class M3UParser:
                 i += 1
                 continue
 
-            # Любая другая непустая строка — потенциальный URL.
             if pending_channel is not None:
                 url = fix(line)
                 if url.startswith('http:\\\\'):
@@ -284,17 +298,11 @@ class M3UParser:
                             MAX_CHANNELS_PER_PLAYLIST)
                         break
                 else:
-                    # Строка не похожа на URL и не является
-                    # комментарием — вероятно, «мусор».
-                    # pending_channel сохраняем: URL может быть
-                    # на следующей строке.
                     logger.debug(
                         "M3UParser: non-URL line after "
                         "#EXTINF: %r", url[:80])
             i += 1
 
-        # Конец файла: если остался pending_channel без URL —
-        # сохраняем как «заготовку».
         if pending_channel is not None:
             _flush_pending()
 
@@ -357,7 +365,8 @@ class PlaylistHeaderManager:
                         v = m.group(2) or m.group(3) or ''
                         v = (v.replace('\\"', '"')
                              .replace('\\\\', '\\'))
-                        if k.lower() == 'url-tvg':
+                        kl = k.lower()
+                        if kl in ('url-tvg', 'x-tvg-url'):
                             for part in v.split(','):
                                 part = part.strip()
                                 if part:
@@ -410,7 +419,7 @@ class PlaylistHeaderManager:
                 f'{self._escape_attr(k)}="{self._escape_attr(v)}"')
         for k, v in self._original_attrs.items():
             if (k not in self.custom_attributes
-                    and k.lower() != 'url-tvg'):
+                    and k.lower() not in ('url-tvg', 'x-tvg-url')):
                 parts.append(
                     f'{self._escape_attr(k)}="{self._escape_attr(v)}"')
         self.header_lines.insert(0, ' '.join(parts))

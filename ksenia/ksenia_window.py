@@ -1,12 +1,7 @@
-# -*- coding: utf-8 -*-
-"""ksenia_window — главное окно.
-
-Версия 0.4.0:
-  • Экспорт/импорт настроек в JSON.
-  • _PlaylistCreateTask: если EPG не задан (default_epg_url
-    пуст) — создание плейлиста продолжается без EPG.
-  • _auto_find_sources: без include_fast.
-"""
+# Copyright (C) 2025 SmolNP
+# SPDX-License-Identifier: GPL-3.0-or-later
+# См. LICENSE в корне проекта.
+"""Главное окно."""
 from __future__ import annotations
 
 import json
@@ -27,9 +22,9 @@ from PyQt6.QtWidgets import (
     QStatusBar, QStyle, QTabWidget, QToolBar, QVBoxLayout,
     QWidget)
 
-from app_core import ApplicationCore  # noqa: F401
-from channel_table_model import ChannelTableModel  # noqa: F401
-from playlist_tab import PlaylistTab  # noqa: F401
+from app_core import ApplicationCore
+from channel_table_model import ChannelTableModel
+from playlist_tab import PlaylistTab
 
 from dialogs import (
     BlacklistDialog,
@@ -85,13 +80,6 @@ def _settings() -> QSettings:
 
 
 class _PlaylistCreateTask(QRunnable):
-    """Фоновое создание плейлиста из источников.
-
-    Если EPG не задан (default_epg_url пуст и в шапке нет
-    url-tvg) — шаг EPG пропускается, создание продолжается
-    без метаданных EPG.
-    """
-
     def __init__(self, core, sources_to_load, opts, stop_token,
                  win_ref, epg_sources=None):
         super().__init__()
@@ -165,6 +153,8 @@ class _PlaylistCreateTask(QRunnable):
     def _try_load_from_normalized_index(
             self,
     ) -> Optional[List[ChannelData]]:
+        if self.core.cache_manager is None:
+            return None
         settings = self.core.get_replacement_settings()
         try:
             if not self.core.has_normalized_index():
@@ -350,6 +340,11 @@ class _PlaylistCreateTask(QRunnable):
             if w is None or not _is_qobject_valid(w):
                 return
             self.core.playlist_from_sources_failed.emit(str(e))
+        finally:
+            # Снимаем регистрацию — критично, иначе при выходе
+            # или отключении кэша воркер останется «живым».
+            with suppress(Exception):
+                self.core._workers.remove_runnable(self)
 
 
 class _StableExportTask(QRunnable):
@@ -958,7 +953,6 @@ class MainWindow(QMainWindow):
         s.sync()
         self.core.config.save()
 
-    # ── Экспорт / импорт настроек ──
     def _export_settings(self):
         fp = save_file_dialog(
             self, "Экспорт настроек", "ksenia_settings.json",
@@ -1118,6 +1112,9 @@ class MainWindow(QMainWindow):
         task = _PlaylistCreateTask(
             self.core, sources_to_load, opts, _stop, win_ref,
             epg_sources=None)
+        # Регистрируем задачу, чтобы stop_all() мог её
+        # корректно остановить.
+        self.core._workers.add_runnable(task)
         QThreadPool.globalInstance().start(task)
 
     def _finish_create_playlist_from_sources(

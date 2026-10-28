@@ -1,10 +1,12 @@
-# -*- coding: utf-8 -*-
+# Copyright (C) 2025 SmolNP
+# SPDX-License-Identifier: GPL-3.0-or-later
+# См. LICENSE в корне проекта.
 """Константы, статусы, фильтры (без цветов — они в theme.py)."""
 from __future__ import annotations
 
 from PyQt6.QtWidgets import QDialogButtonBox, QMessageBox
 
-APP_VERSION = "0.2.1"
+APP_VERSION = "0.2.2"
 APP_ORG = "Ksenia"
 APP_NAME = "KseniaM3UEditor"
 
@@ -155,6 +157,6 @@ class StatusText:
     CONN_ERROR = "🔗 Ошибка соединения"
     GEOBLOCK = "🌍 Геоблок (403)"
     NOT_FOUND = "❌ Не найден (404)"
-    CANCELLED = "Отменено"
+    CANCELLED = "⏹ Отменено"
     BLOCKED_BY_DOMAIN = "🚫 Заблокирован ЧС домен/IP"
     EMPTY_RESPONSE = "📭 Пустой ответ"

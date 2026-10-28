@@ -1,10 +1,7 @@
-# -*- coding: utf-8 -*-
-"""CLI/headless режим. Без QApplication — только QCoreApplication.
-
-FIX (0.3.2): --epg-url (опционально) — явно указать EPG для
-экспорта; без него EPG не грузится (в CLI он не нужен, если
-не указан).
-"""
+# Copyright (C) 2025 SmolNP
+# SPDX-License-Identifier: GPL-3.0-or-later
+# См. LICENSE в корне проекта.
+"""CLI/headless режим. Без QApplication — только QCoreApplication."""
 from __future__ import annotations
 
 import argparse
@@ -73,7 +70,7 @@ def _install_translation_headless(app: QCoreApplication,
         tr_ = QTranslator()
         if not tr_.load(qm):
             return
-        app._ksenia_translator = tr_  # keep reference
+        app._ksenia_translator = tr_
         app.installTranslator(tr_)
     except Exception:
         logger.exception("install translation (headless)")
@@ -134,9 +131,6 @@ def run_cli(args: argparse.Namespace) -> int:
 
     sources.sort(key=lambda s: s.priority)
 
-    # FIX (0.3.2): если --epg-url указан — грузим EPG до источников,
-    # чтобы применить метаданные (tvg_id / tvg_name / display-name).
-    # Если не указан — EPG не используется (как и раньше).
     if args.epg_url:
         print(f"[+] Загрузка EPG: {args.epg_url}")
         try:
@@ -189,7 +183,6 @@ def run_cli(args: argparse.Namespace) -> int:
         if modified:
             print(f"[+] UA-правила применены к {modified}")
 
-    # FIX (0.3.2): если --epg-url указан — применяем EPG-метаданные.
     if args.epg_url and core.epg_db.has_channel_info:
         applied = 0
         overwrite = bool(core.config.get(
@@ -219,7 +212,6 @@ def run_cli(args: argparse.Namespace) -> int:
 
         def find_url(ch: ChannelData) -> Optional[str]:
             cands: List[str] = []
-            # FIX: stable_key с settings — совместимо с GUI.
             ref = ssm.get(ch.stable_key(settings))
             if ref:
                 cands.append(ref)

@@ -1,4 +1,6 @@
-# -*- coding: utf-8 -*-
+# Copyright (C) 2025 SmolNP
+# SPDX-License-Identifier: GPL-3.0-or-later
+# См. LICENSE в корне проекта.
 """Диалоги редактирования каналов и сравнения плейлистов."""
 from __future__ import annotations
 
@@ -230,14 +232,6 @@ class PlaylistHeaderDialog(BaseDialog):
 
 
 class RemoveMetadataDialog(BaseDialog):
-    """Диалог удаления метаданных у канала(ов).
-
-    FIX: кнопки QRadioButton создаются с родителем sg и добавляются
-    в layout ДО QButtonGroup.addButton(), иначе в PyQt6
-    QButtonGroup.button(id) возвращает None и __init__ падал с
-    AttributeError.
-    """
-
     def __init__(self, parent=None):
         super().__init__("Удаление метаданных", parent,
                           size=(400, 360))
@@ -259,7 +253,6 @@ class RemoveMetadataDialog(BaseDialog):
 
         sg = QGroupBox("Область")
         sl = QVBoxLayout(sg)
-        # FIX: parent=sg, и layout наполняется ДО addButton.
         self._rb_current = QRadioButton("Текущий канал", sg)
         self._rb_selected = QRadioButton("Выбранные", sg)
         self._rb_all = QRadioButton("Все каналы", sg)
@@ -272,7 +265,6 @@ class RemoveMetadataDialog(BaseDialog):
         self._scope_group.addButton(self._rb_current, 0)
         self._scope_group.addButton(self._rb_selected, 1)
         self._scope_group.addButton(self._rb_all, 2)
-        # Проверяем напрямую у кнопки, а не через group.button(0).
         self._rb_current.setChecked(True)
 
         self.add_ok_cancel()
@@ -358,7 +350,10 @@ class DuplicateFinderDialog(BaseDialog):
                  settings: Any = None):
         super().__init__("Поиск дубликатов", parent,
                           size=(980, 640))
-        self.channels = channels
+        # ВАЖНО: работаем с копией, чтобы не мутировать
+        # tab.all_channels до явного подтверждения.
+        self._original_channels = list(channels)
+        self._working_channels = list(channels)
         self.use_tvg_id = use_tvg_id
         self.keep_duplicates = keep_duplicates
         self.settings = settings
@@ -423,10 +418,11 @@ class DuplicateFinderDialog(BaseDialog):
 
     def _update_stats(self):
         report = SimpleDuplicateFinder.get_duplicate_report(
-            self.channels, use_tvg_id=self.use_tvg_id,
+            self._working_channels, use_tvg_id=self.use_tvg_id,
             settings=self.settings)
         self.stats_label.setText(
-            f"<b>Всего каналов:</b> {len(self.channels)} | "
+            f"<b>Всего каналов:</b> "
+            f"{len(self._working_channels)} | "
             f"<b>Дубликатов по URL:</b> "
             f"{report['total_url_duplicates']} | "
             f"<b>Дубликатов по названию:</b> "
@@ -454,10 +450,6 @@ class DuplicateFinderDialog(BaseDialog):
                                   (ch.link.url or "")[:80]))
                 row += 1
 
-    def _mutate_channels(self, new_list: List[ChannelData]):
-        self.channels.clear()
-        self.channels.extend(new_list)
-
     def _remove_by_url(self):
         if not confirm(
                 self,
@@ -466,9 +458,9 @@ class DuplicateFinderDialog(BaseDialog):
             return
         new_list, removed = \
             SimpleDuplicateFinder.remove_duplicates_by_url(
-                self.channels)
+                self._working_channels)
         if removed:
-            self._mutate_channels(new_list)
+            self._working_channels = new_list
         self.duplicates_removed.emit(removed)
         self._update_stats()
         info_box(self, f"Удалено: {removed}", "Готово")
@@ -481,13 +473,16 @@ class DuplicateFinderDialog(BaseDialog):
             return
         new_list, removed = \
             SimpleDuplicateFinder.remove_duplicates_by_name(
-                self.channels, use_tvg_id=self.use_tvg_id,
+                self._working_channels, use_tvg_id=self.use_tvg_id,
                 settings=self.settings)
         if removed:
-            self._mutate_channels(new_list)
+            self._working_channels = new_list
         self.duplicates_removed.emit(removed)
         self._update_stats()
         info_box(self, f"Удалено: {removed}", "Готово")
+
+    def get_result(self) -> List[ChannelData]:
+        return list(self._working_channels)
 
     def _export_report(self):
         fp = save_file_dialog(
@@ -498,7 +493,7 @@ class DuplicateFinderDialog(BaseDialog):
             return
         try:
             report = SimpleDuplicateFinder.get_duplicate_report(
-                self.channels, use_tvg_id=self.use_tvg_id,
+                self._working_channels, use_tvg_id=self.use_tvg_id,
                 settings=self.settings)
             rows = 0
             with open(fp, "w", encoding="utf-8-sig",
@@ -784,10 +779,7 @@ class ComparePlaylistsDialog(BaseDialog):
 
 
 class GroupTemplateListDialog(BaseDialog):
-    """Список шаблонов группировки + создание из плейлиста
-    + применение к текущему плейлисту."""
-
-    template_applied = pyqtSignal(str)   # name
+    template_applied = pyqtSignal(str)
 
     def __init__(self, manager, playlist_tab=None, parent=None):
         super().__init__("Шаблоны группировки каналов", parent,

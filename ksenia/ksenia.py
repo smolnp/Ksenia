@@ -1,4 +1,6 @@
-# -*- coding: utf-8 -*-
+# Copyright (C) 2025 SmolNP
+# SPDX-License-Identifier: GPL-3.0-or-later
+# См. LICENSE в корне проекта.
 """Ksenia M3U Editor — точка входа."""
 from __future__ import annotations
 
@@ -33,7 +35,6 @@ def _setup_pycache_prefix() -> None:
 
 
 def _setup_qt_platform(headless: bool) -> None:
-    """Не форсируем xcb глобально — ломает Wayland."""
     if headless or not sys.platform.startswith("linux"):
         return
     if "QT_QPA_PLATFORM" in os.environ:

@@ -1,11 +1,7 @@
-# -*- coding: utf-8 -*-
-"""Базовые диалоги, IconProvider, фабрики, helpers.
-
-Версия 0.2.1:
-  • make_action оборачивает слот в try/except — любая ошибка
-    в слоте логируется, а не роняет приложение.
-  • BaseDialog.add_reset_button() — кнопка «Сбросить».
-"""
+# Copyright (C) 2025 SmolNP
+# SPDX-License-Identifier: GPL-3.0-or-later
+# См. LICENSE в корне проекта.
+"""Базовые диалоги, IconProvider, фабрики, helpers."""
 from __future__ import annotations
 
 import json
@@ -200,11 +196,6 @@ class BaseDialog(QDialog):
     def add_reset_button(
             self, on_reset: Callable[[], None]
     ) -> Optional[QPushButton]:
-        """Добавляет кнопку «Сбросить» к нижней панели.
-
-        Ищет первый QDialogButtonBox в диалоге. Если не найден
-        (например, кнопки ещё не добавлены) — возвращает None.
-        """
         bb = self.findChild(QDialogButtonBox)
         if bb is None:
             return None
@@ -259,8 +250,6 @@ def make_action(parent, text: str, slot: Callable,
     a.setStatusTip(tip)
 
     def _safe_slot(checked=False, _slot=slot):
-        # FIX 0.2.1: любая ошибка в слоте логируется,
-        # а не роняет приложение через qFatal.
         try:
             _slot()
         except Exception:

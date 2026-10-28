@@ -1,4 +1,6 @@
-# -*- coding: utf-8 -*-
+# Copyright (C) 2025 SmolNP
+# SPDX-License-Identifier: GPL-3.0-or-later
+# См. LICENSE в корне проекта.
 """logging_setup — логгер без зависимостей от проекта.
 
 Единственный источник логгера. Никаких импортов из paths/i18n/

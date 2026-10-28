@@ -1,4 +1,6 @@
-# -*- coding: utf-8 -*-
+# Copyright (C) 2025 SmolNP
+# SPDX-License-Identifier: GPL-3.0-or-later
+# См. LICENSE в корне проекта.
 """ChannelData и связанные модели."""
 from __future__ import annotations
 
@@ -210,36 +212,16 @@ class ChannelData:
         self.status.reset()
         self.touch()
 
-    # FIX: settings пробрасываются снаружи, чтобы нормализация
-    # учитывала пользовательские настройки (aliases, скобки и т.д.).
     def normalized_name(self, settings=None) -> str:
         return nn_canonical_key(
             self.meta.name or "", settings,
             tvg_id=self.meta.tvg_id, keep_shift=False)
 
-    # FIX: stable_key учитывает settings — совпадает с матчером.
     def stable_key(self, settings=None) -> str:
         if self.meta.tvg_id and not is_stub_tvg_id(self.meta.tvg_id):
             return f"tvg:{self.meta.tvg_id.strip().lower()}"
         return f"name:{self.normalized_name(settings)}"
 
-    # FIX: единый набор ключей для поиска канала в источниках.
-    # Используется:
-    #   • при индексации источников (sources._store_loaded);
-    #   • при поиске замены (sources.find_matches_for_channel);
-    #   • при построении alive-индекса (sources.get_alive_urls_for_keys);
-    #   • в плеере (альтернативы);
-    #   • в ручной замене/добавлении ссылки.
-    #
-    # epg_db — опционально. Если передан и загружен, добавляются:
-    #   • EPG display-name по tvg_id канала;
-    #   • EPG alternative_names по tvg_id канала.
-    #
-    # Если epg_db не передан — используются только собственные
-    # поля канала (name / tvg_name / epg_alternative_names).
-    #
-    # tvg_id добавляется как отдельный ключ "tvg:<id>" — это
-    # даёт точный матч, даже если имена совсем разные.
     def search_keys(self, settings=None,
                     epg_db=None) -> Set[str]:
         keys: Set[str] = set()
@@ -257,7 +239,6 @@ class ChannelData:
         for alt in (self.meta.epg_alternative_names or []):
             _add(alt)
 
-        # EPG display-name / альтернативы по tvg_id
         if epg_db is not None:
             try:
                 if getattr(epg_db, 'has_channel_info', False):
@@ -377,9 +358,11 @@ class ChannelData:
             return colors['not_working']
         if lq == LinkQuality.UNSUPPORTED:
             return colors['unsupported']
-        if self.status.url_status is None:
-            return colors['unchecked']
-        return colors['neutral']
+        if self.status.url_status is True:
+            return colors['working']
+        if self.status.url_status is False:
+            return colors['not_working']
+        return colors['unchecked']
 
     def get_status_text(self) -> str:
         if not self.has_valid_url:
@@ -522,9 +505,21 @@ class ChannelData:
             data.get('link_source', '') or '', _MAX_SHORT_LEN)
 
         self.status.url_status = data.get('url_status')
-        self.status.status_text = (
-            data.get('status_text', StatusText.UNCHECKED)
-            or StatusText.UNCHECKED)
+        st = data.get('status_text', StatusText.UNCHECKED)
+        # Валидация: если status_text не из известного набора
+        # StatusText — сбрасываем в UNCHECKED.
+        _valid = {
+            StatusText.UNCHECKED, StatusText.NO_URL,
+            StatusText.WORKING, StatusText.NOT_WORKING,
+            StatusText.UNSUPPORTED, StatusText.TIMEOUT,
+            StatusText.DNS_FAIL, StatusText.CONN_ERROR,
+            StatusText.GEOBLOCK, StatusText.NOT_FOUND,
+            StatusText.CANCELLED, StatusText.BLOCKED_BY_DOMAIN,
+            StatusText.EMPTY_RESPONSE,
+        }
+        if not isinstance(st, str) or st not in _valid:
+            st = StatusText.UNCHECKED
+        self.status.status_text = st
         sc = data.get('status_code')
         if sc is not None:
             try:

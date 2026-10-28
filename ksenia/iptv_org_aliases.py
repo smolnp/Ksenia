@@ -1,14 +1,16 @@
-# -*- coding: utf-8 -*-
+# Copyright (C) 2025 SmolNP
+# SPDX-License-Identifier: GPL-3.0-or-later
+# См. LICENSE в корне проекта.
 """Алиасы iptv-org (channels.json → {alt_casefold: canon_raw}).
 
 Кэш ~2-3 МБ в config-каталоге. TTL 24 ч. Загрузка ленивая.
 Защита от рекурсии через thread-local флаг _building.
 
-ВАЖНО: алиасы хранятся в «сыром» виде (casefold, без нормализации).
-Нормализация применяется потребителем (name_normalizer._normalize_impl)
-с учётом пользовательских настроек. Это гарантирует, что отключение
-любой опции нормализации (скобки, эмодзи, спецсимволы) не ломает
-поиск алиасов.
+Алиасы хранятся в «сыром» виде (casefold, без нормализации).
+Нормализация применяется потребителем (name_normalizer) с
+учётом пользовательских настроек. Это гарантирует, что
+отключение любой опции нормализации (скобки, эмодзи,
+спецсимволы) не ломает поиск алиасов.
 """
 from __future__ import annotations
 
@@ -23,7 +25,7 @@ from logging_setup import logger
 
 _URL = "https://iptv-org.github.io/api/channels.json"
 _TTL_SEC = 24 * 60 * 60
-_UA = "Ksenia-M3U-Editor/0.3"
+_UA = "Ksenia-M3U-Editor/0.2"
 _TIMEOUT_SEC = 30
 _CACHE_FILENAME = "iptv_org_aliases.json"
 
@@ -78,7 +80,7 @@ def _write_cache(aliases: Dict[str, str], source_count: int) -> None:
         os.makedirs(os.path.dirname(p), exist_ok=True)
         tmp = p + ".tmp"
         payload = {
-            "version": 3,          # ← bump: сменился формат ключей
+            "version": 3,
             "built_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "source_url": _URL,
             "source_count": int(source_count),
@@ -113,7 +115,6 @@ def _download_channels() -> Optional[list]:
 
 
 def _normalize_raw(name: str) -> str:
-    """Только casefold + сжатие пробелов. Без учёта settings."""
     import re
     if not name:
         return ""
@@ -122,12 +123,6 @@ def _normalize_raw(name: str) -> str:
 
 
 def _build_aliases(channels: list) -> Dict[str, str]:
-    """Строит {casefold(alt_name): canonical_name (raw)}.
-
-    НЕ применяет нормализацию — только casefold + сжатие пробелов.
-    Потребитель сам нормализует «сырой» ключ и значение с учётом
-    пользовательских настроек.
-    """
     _building.value = True
     try:
         aliases: Dict[str, str] = {}
@@ -149,7 +144,6 @@ def _build_aliases(channels: list) -> Dict[str, str]:
                 alt_key = _normalize_raw(alt)
                 if not alt_key or alt_key == canon_key:
                     continue
-                # Первое вхождение побеждает — детерминизм.
                 aliases.setdefault(alt_key, name)
         return aliases
     finally:
@@ -157,10 +151,6 @@ def _build_aliases(channels: list) -> Dict[str, str]:
 
 
 def get_aliases(force_refresh: bool = False) -> Dict[str, str]:
-    """Возвращает {casefold(alt): raw_canonical_name}.
-
-    Ключи и значения — «сырые» (casefold, без нормализации).
-    """
     if getattr(_building, "value", False):
         return {}
     global _cache, _cache_loaded, _cache_meta

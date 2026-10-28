@@ -1,4 +1,6 @@
-# -*- coding: utf-8 -*-
+# Copyright (C) 2025 SmolNP
+# SPDX-License-Identifier: GPL-3.0-or-later
+# См. LICENSE в корне проекта.
 """EPGDatabase — база XMLTV с кэшем и нечётким поиском."""
 from __future__ import annotations
 
@@ -61,7 +63,6 @@ def _prefer_tvg_id_from_settings(settings: Any,
 
 def _epg_fuzzy_params_from_settings(settings: Any
                                      ) -> Tuple[float, int, float]:
-    """FIX: читает параметры fuzzy-поиска EPG из настроек."""
     if settings is None:
         return (1.0, EPG_FUZZY_MIN_LENGTH_DEFAULT,
                 EPG_FUZZY_MIN_GAP_DEFAULT)
@@ -95,6 +96,9 @@ class EPGDatabase:
         self._channel_info_lock = threading.RLock()
         self._channel_info_settings_key: Optional[tuple] = None
         self._indexes_built: bool = False
+        # Множество cid, для которых canonical/alternative
+        # пересчитаны. Используется для инкрементального обновления.
+        self._canonical_dirty: Set[str] = set()
 
         self._index_full: Dict[str, List[Tuple[str, int]]] = {}
         self._index_light: Dict[str, List[Tuple[str, int]]] = {}
@@ -121,6 +125,7 @@ class EPGDatabase:
             self._index_strict.clear()
             self._channel_info_settings_key = None
             self._indexes_built = False
+            self._canonical_dirty.clear()
         with self._fuzzy_cache_lock:
             self._fuzzy_cache.clear()
         with self._token_cache_lock:
@@ -238,6 +243,7 @@ class EPGDatabase:
                 existing = self._channel_info.get(cid)
                 if existing is None:
                     self._channel_info[cid] = info
+                    self._canonical_dirty.add(cid)
                     continue
                 existing_names = set(existing.display_names)
                 for n in info.display_names:
@@ -255,9 +261,13 @@ class EPGDatabase:
                 if info.priority > existing.priority:
                     existing.priority = info.priority
                     existing.source = info.source
+                self._canonical_dirty.add(cid)
 
-            for _cid, info in self._channel_info.items():
-                if not info.display_names:
+            # Пересчитываем canonical/alternative ТОЛЬКО для тех
+            # cid, которые реально обновились.
+            for cid in self._canonical_dirty:
+                info = self._channel_info.get(cid)
+                if info is None or not info.display_names:
                     continue
                 names_priority = {
                     n: info.priority for n in info.display_names}
@@ -269,6 +279,7 @@ class EPGDatabase:
                 info.alternative_names = pick_all_alternative_names(
                     info.display_names, canon,
                     max_alternatives=EPG_ALTERNATIVE_NAMES_MAX)
+            self._canonical_dirty.clear()
 
             self._channel_info_settings_key = None
             self._indexes_built = False
@@ -430,18 +441,13 @@ class EPGDatabase:
                     self._channel_info[cid] = info
             self._channel_info_settings_key = None
             self._indexes_built = False
+            self._canonical_dirty.clear()
 
         self.clear_fuzzy_cache()
         return sum(len(v) for v in tmp.values())
 
     @staticmethod
     def _settings_key(settings) -> Optional[tuple]:
-        """Отпечаток настроек, влияющих на нормализацию.
-
-        Включает ВСЕ флаги, которые читает
-        normalize_with_settings: remove_parentheses, remove_brackets,
-        remove_emojis, ignore_special_chars, use_iptv_org_aliases.
-        """
         if settings is None:
             return None
         try:
@@ -526,11 +532,6 @@ class EPGDatabase:
                 field_candidates.append(channel.meta.tvg_name)
             if channel.meta.name:
                 field_candidates.append(channel.meta.name)
-            # FIX: учитываем alternative_names из ранее
-            # применённого EPG. Это позволяет находить канал
-            # повторно, даже если его отображаемое имя уже
-            # было переименовано в каноническое EPG-имя,
-            # а tvg_id по какой-то причине пуст.
             for alt in (channel.meta.epg_alternative_names or []):
                 if alt and alt not in field_candidates:
                     field_candidates.append(alt)
@@ -711,9 +712,6 @@ class EPGDatabase:
                     if u[0] in EPG_ALLOWED_META_FIELDS]
         return filtered, source, alternatives
 
-    # FIX: единая точка применения EPG к каналу.
-    # Используется при создании плейлиста из источников и в
-    # фоновом воркере — чтобы не дублировать логику.
     def apply_metadata_to_channel(
             self, channel: ChannelData,
             settings: Any = None,
@@ -724,15 +722,6 @@ class EPGDatabase:
             fuzzy_min_gap: float = EPG_FUZZY_MIN_GAP_DEFAULT,
             rename_channel: bool = True,
     ) -> bool:
-        """Применяет EPG-метаданные к каналу.
-
-        Возвращает True, если что-то изменилось.
-
-        Параметр overwrite_metadata определяет, перезаписывать ли
-        уже существующие поля (tvg_id, tvg_name, tvg_logo,
-        tvg_chno). По умолчанию — да (соответствует
-        epg_overwrite_metadata=True).
-        """
         if fuzzy_threshold is None:
             fuzzy_threshold, _ml, _mg = \
                 _epg_fuzzy_params_from_settings(settings)
@@ -748,7 +737,6 @@ class EPGDatabase:
             return False
 
         changed = False
-        # tvg_id
         if info.channel_id:
             cur = (channel.meta.tvg_id or "").strip()
             if (not cur or is_stub_tvg_id(cur)
@@ -756,38 +744,32 @@ class EPGDatabase:
                 if cur != info.channel_id:
                     channel.meta.tvg_id = info.channel_id
                     changed = True
-        # tvg_name
         if info.display_name:
             cur = channel.meta.tvg_name or ""
             if (not cur or overwrite_metadata):
                 if cur != info.display_name:
                     channel.meta.tvg_name = info.display_name
                     changed = True
-        # tvg_logo
         if info.icon:
             cur = channel.meta.tvg_logo or ""
             if not cur or overwrite_metadata:
                 if cur != info.icon:
                     channel.meta.tvg_logo = info.icon
                     changed = True
-        # tvg_chno
         if info.lcn:
             cur = channel.meta.tvg_chno or ""
             if not cur or overwrite_metadata:
                 if cur != info.lcn:
                     channel.meta.tvg_chno = info.lcn
                     changed = True
-        # epg_source
         src = self.get_channel_source(info.channel_id)
         if src and channel.meta.epg_source != src:
             channel.meta.epg_source = src
             changed = True
-        # epg_alternative_names
         alts = list(info.alternative_names)
         if alts and channel.meta.epg_alternative_names != alts:
             channel.meta.epg_alternative_names = alts
             changed = True
-        # Переименование канала в каноническое EPG-имя
         if rename_channel and info.display_name:
             if channel.meta.name != info.display_name:
                 channel.meta.name = info.display_name

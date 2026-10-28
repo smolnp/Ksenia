@@ -1,4 +1,6 @@
-# -*- coding: utf-8 -*-
+# Copyright (C) 2025 SmolNP
+# SPDX-License-Identifier: GPL-3.0-or-later
+# См. LICENSE в корне проекта.
 """Config, LinkReplacementSettings."""
 from __future__ import annotations
 
@@ -130,7 +132,7 @@ class Config:
             SOURCES_FINDER_MAX_M3UGUIDE_DEFAULT,
         'sources_finder_update_interval_hours':
             SOURCES_FINDER_UPDATE_INTERVAL_HOURS,
-        # Ширины столбцов таблицы каналов (перенесено из QSettings).
+        # Ширины столбцов таблицы каналов.
         'column_widths': {},
         'language': 'ru',
     }

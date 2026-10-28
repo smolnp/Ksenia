@@ -1,17 +1,7 @@
-# -*- coding: utf-8 -*-
-"""Настройки: общие, замена ссылок, кэш.
-
-Версия 0.4.0:
-  • Убраны мёртвые настройки (limit_check_*, bootstrap).
-  • Убран дубль epg_overwrite_metadata (оставлен только
-    в «Замене ссылок» → вкладка EPG).
-  • Добавлены зависимости: fast_replacement_mode,
-    search_type, epg_fuzzy_enabled.
-  • Добавлена кнопка «Сбросить к умолчаниям».
-  • Добавлена валидация default_epg_url.
-  • TTL-изменения инвалидируют кэш.
-  • sf_max_* читаются из конфига в SourcesFinderDialog.
-"""
+# Copyright (C) 2025 SmolNP
+# SPDX-License-Identifier: GPL-3.0-or-later
+# См. LICENSE в корне проекта.
+"""Настройки: общие, замена ссылок, кэш."""
 from __future__ import annotations
 
 from contextlib import suppress
@@ -294,7 +284,6 @@ class LinkReplacementSettingsDialog(BaseDialog):
         iptv_w.setLayout(iptv_row)
         tabs_by_key["norm"][2].addRow(iptv_w)
 
-        # Пояснение про две шкалы порогов.
         tabs_by_key["search"][2].addRow(hint_label(
             "Порог (%) и мин. схожесть (0–1) — две шкалы для "
             "одной задачи. В коде берётся максимум из двух: "
@@ -312,13 +301,11 @@ class LinkReplacementSettingsDialog(BaseDialog):
             fast_w.toggled.connect(
                 self._on_fast_replacement_toggled)
 
-        # Зависимость search_type → пороги.
         st = self._widgets.get("search_type_combo")
         if st is not None:
             st.currentIndexChanged.connect(
                 self._on_search_type_changed)
 
-        # Зависимость epg_fuzzy_enabled → его параметры.
         epg_chk = self._widgets.get("epg_fuzzy_enabled_check")
         if epg_chk is not None:
             epg_chk.toggled.connect(self._on_epg_fuzzy_toggled)

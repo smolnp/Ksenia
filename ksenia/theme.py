@@ -1,4 +1,6 @@
-# -*- coding: utf-8 -*-
+# Copyright (C) 2025 SmolNP
+# SPDX-License-Identifier: GPL-3.0-or-later
+# См. LICENSE в корне проекта.
 """theme — единый источник цветов и имени темы иконок.
 
 Все цвета берутся из QApplication.palette(). Никаких жёстких
@@ -58,7 +60,6 @@ def is_dark() -> bool:
 
 
 def setup_icon_theme() -> str:
-    """Устанавливает тему иконок при старте."""
     global _icon_theme
     if _icon_theme is not None:
         return _icon_theme
@@ -70,7 +71,7 @@ def setup_icon_theme() -> str:
         return current
 
     for candidate in _ICON_THEME_FALLBACKS:
-        QIcon.setThemeName("")  # сброс кэша Qt
+        QIcon.setThemeName("")
         QIcon.setThemeName(candidate)
         if not QIcon.fromTheme("document-open").isNull():
             _icon_theme = candidate

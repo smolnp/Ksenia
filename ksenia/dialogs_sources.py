@@ -1,13 +1,7 @@
-# -*- coding: utf-8 -*-
-"""Диалоги источников ссылок и выбора ссылки.
-
-Версия 0.2.1:
-  • SourcesFinderDialog(core=None, parent=None) — корректная
-    сигнатура; читает лимиты из core.config.
-  • Убран чекбокс FAST.
-  • Подсказки переписаны: приложение не содержит встроенных
-    ссылок на IPTV.
-"""
+# Copyright (C) 2025 SmolNP
+# SPDX-License-Identifier: GPL-3.0-or-later
+# См. LICENSE в корне проекта.
+"""Диалоги источников ссылок и выбора ссылки."""
 from __future__ import annotations
 
 import os

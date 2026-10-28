@@ -1,16 +1,7 @@
-# -*- coding: utf-8 -*-
-"""Менеджер шаблонов группировки каналов (group-title).
-
-Шаблон — это именованный набор правил вида:
-    {normalized_channel_name: group_title}
-
-Применение к плейлисту: для каждого канала берём его
-нормализованное имя, ищем в шаблоне и, если нашли, ставим
-group-title. Каналы, которых нет в шаблоне, либо сохраняют
-свой group-title, либо попадают в группу по умолчанию.
-
-Хранится в config_dir/group_templates.json.
-"""
+# Copyright (C) 2025 SmolNP
+# SPDX-License-Identifier: GPL-3.0-or-later
+# См. LICENSE в корне проекта.
+"""Менеджер шаблонов группировки каналов (group-title)."""
 from __future__ import annotations
 
 import os
@@ -34,17 +25,12 @@ def _norm_key(name: str, settings: Any = None) -> str:
 
 
 class GroupTemplate:
-    """Один шаблон группировки: имя + правила."""
-
     __slots__ = ('name', 'rules', 'created', 'modified',
                  'source_description')
 
     def __init__(self, name: str = ""):
         self.name: str = name
-        # rules: {normalized_name: group_title}
         self.rules: Dict[str, str] = {}
-        # Оригинальные отображаемые имена — для отчётов и UI.
-        # {normalized_name: original_display_name}
         self.source_description: Dict[str, str] = {}
         self.created: float = time.time()
         self.modified: float = time.time()
@@ -92,8 +78,6 @@ class GroupTemplate:
 
 
 class GroupTemplateManager:
-    """Хранилище шаблонов + операции применения."""
-
     def __init__(self, config_dir: str):
         self._path = os.path.join(config_dir,
                                     "group_templates.json")
@@ -106,7 +90,6 @@ class GroupTemplateManager:
         self._index_by_name: Dict[str, GroupTemplate] = {
             t.name: t for t in self._templates}
 
-    # ── Сохранение/загрузка ──
     def _persist_locked(self) -> bool:
         self._store._data = [t.to_dict() for t in self._templates]
         return self._store.save()
@@ -114,7 +97,6 @@ class GroupTemplateManager:
     def _rebuild_index_locked(self):
         self._index_by_name = {t.name: t for t in self._templates}
 
-    # ── CRUD ──
     def get_all(self) -> List[GroupTemplate]:
         with self._lock:
             return [t.copy() for t in self._templates]
@@ -135,7 +117,6 @@ class GroupTemplateManager:
 
     def save_template(self, template: GroupTemplate,
                       overwrite: bool = False) -> Tuple[bool, str]:
-        """Сохраняет шаблон. Возвращает (ok, error_message)."""
         if not template or not template.name:
             return False, "Пустое имя шаблона"
         with self._lock:
@@ -143,8 +124,6 @@ class GroupTemplateManager:
             if existing is not None and not overwrite:
                 return False, f"Шаблон «{template.name}» уже есть"
             if existing is not None:
-                # Обновляем существующий (in-place, чтобы
-                # сохранить created).
                 existing.rules = dict(template.rules)
                 existing.source_description = dict(
                     template.source_description)
@@ -189,20 +168,12 @@ class GroupTemplateManager:
                                 if x.name != name]
             return self._persist_locked()
 
-    # ── Создание шаблона из плейлиста ──
     def build_from_channels(
             self, channels: List[ChannelData],
             name: str,
             settings: Any = None,
             include_only_existing_groups: bool = True,
     ) -> Tuple[Optional[GroupTemplate], str]:
-        """Создаёт шаблон из списка каналов.
-
-        Если include_only_existing_groups=True — в шаблон
-        попадают только каналы, у которых group-title не пуст
-        и не «Без группы». Иначе — все каналы (у каналов без
-        группы будет DEFAULT_FALLBACK_GROUP).
-        """
         if not channels:
             return None, "Плейлист пуст"
         if not name or not name.strip():
@@ -223,8 +194,6 @@ class GroupTemplateManager:
                 continue
             prev = t.rules.get(key)
             if prev is not None and prev != g:
-                # Коллизия: одно имя — разные группы.
-                # Оставляем первый, но запоминаем конфликт.
                 if key not in conflicts:
                     conflicts[key] = (
                         f"«{ch.meta.name}»: "
@@ -244,7 +213,6 @@ class GroupTemplateManager:
             msg += f"\nКонфликтов (оставлено первое): {len(conflicts)}"
         return t, msg
 
-    # ── Применение шаблона к плейлисту ──
     def apply_to_channels(
             self, template: GroupTemplate,
             channels: List[ChannelData],
@@ -255,29 +223,11 @@ class GroupTemplateManager:
             fallback_group: str = DEFAULT_FALLBACK_GROUP,
             case_insensitive: bool = True,
     ) -> Dict[str, Any]:
-        """Применяет шаблон. Возвращает статистику:
-            {
-              'changed': int,
-              'matched': int,
-              'unmatched': int,
-              'missing': int,   # каналов шаблона нет в плейлисте
-            }
-
-        keep_unmatched — оставить group-title каналов, которых
-                         нет в шаблоне (иначе — fallback_group).
-        create_missing_groups — не используется для group-title
-                         (группы не создаются автоматически, т.к.
-                         это просто строки), оставлен для
-                         совместимости сигнатуры.
-        """
         if template is None or not channels:
             return {'changed': 0, 'matched': 0, 'unmatched': 0,
                     'missing': 0}
 
         rules = template.rules
-        if case_insensitive:
-            # Уже нормализованы FULL с casefold — регистр не важен.
-            pass
 
         changed = 0
         matched = 0

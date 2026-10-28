@@ -1,4 +1,6 @@
-# -*- coding: utf-8 -*-
+# Copyright (C) 2025 SmolNP
+# SPDX-License-Identifier: GPL-3.0-or-later
+# См. LICENSE в корне проекта.
 """ChannelTableModel — QAbstractTableModel с ColumnSpec."""
 from __future__ import annotations
 
@@ -35,7 +37,7 @@ def _get_core_if_gui():
 class ChannelTableModel(QAbstractTableModel):
     MIME_TYPE = "application/x-ksenia-channel-uids"
 
-    request_move = pyqtSignal(list, object)
+    request_move = pyqtSignal(list, object, int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -62,9 +64,6 @@ class ChannelTableModel(QAbstractTableModel):
             columns_for_channels([]))
 
     def _rebuild_columns(self, columns: List[ColumnSpec]):
-        # QAbstractTableModel не имеет setColumnCount/setHorizontalHeaderLabels.
-        # columnCount() и headerData() уже переопределены и читают
-        # self._columns, поэтому достаточно обновить список.
         self._columns = list(columns)
         self._column_index_by_key = {
             spec.key: i for i, spec in enumerate(self._columns)}
@@ -80,7 +79,6 @@ class ChannelTableModel(QAbstractTableModel):
             return self._columns[index].key
         return None
 
-    # ── Настройки ──
     @staticmethod
     def _get_settings():
         core = _get_core_if_gui()
@@ -109,7 +107,6 @@ class ChannelTableModel(QAbstractTableModel):
             or (ch.meta.group and ch.meta.group != DEFAULT_GROUP)
             or ch.link.user_agent)
 
-    # ── Публичный API ──
     def set_channels(self, channels: List[ChannelData],
                      visible_optional_keys: Optional[List[str]] = None):
         self._channels = channels
@@ -135,12 +132,6 @@ class ChannelTableModel(QAbstractTableModel):
         self._reset_with_filter()
 
     def set_status_filter(self, status: str):
-        """Фильтр по статусу URL: Всего / С URL / Без URL /
-        Работают / Не работают / Не проверены.
-
-        Складывается по AND с группой, дубликатами, спец-префиксами
-        и текстовым поиском.
-        """
         if status not in (
                 STATUS_FILTER_ALL, STATUS_FILTER_WITH_URL,
                 STATUS_FILTER_WITHOUT_URL, STATUS_FILTER_WORKING,
@@ -183,7 +174,6 @@ class ChannelTableModel(QAbstractTableModel):
                 use_tvg_id=self._get_dedup_tvg_setting(),
                 settings=settings)
 
-    # ── Фильтр ──
     def _reset_with_filter(self):
         self.beginResetModel()
         self._apply_filter_internal()
@@ -202,7 +192,6 @@ class ChannelTableModel(QAbstractTableModel):
             filtered = [ch for ch in filtered
                         if ch.meta.group == self._group_filter]
 
-        # ── Фильтр по статусу URL ──
         if self._status_filter == STATUS_FILTER_WITH_URL:
             filtered = [ch for ch in filtered
                         if ch.has_valid_url]
@@ -219,7 +208,6 @@ class ChannelTableModel(QAbstractTableModel):
             filtered = [ch for ch in filtered
                         if ch.has_valid_url
                         and ch.status.url_status is None]
-        # STATUS_FILTER_ALL — без фильтрации
 
         s = self._search_text
         if self._special == "orphan":
@@ -268,7 +256,6 @@ class ChannelTableModel(QAbstractTableModel):
         self._sort_internal()
         self.endResetModel()
 
-    # ── Доступ ──
     def channel_at(self, row: int) -> Optional[ChannelData]:
         if 0 <= row < len(self._filtered):
             return self._filtered[row]
@@ -297,7 +284,6 @@ class ChannelTableModel(QAbstractTableModel):
                 return self._columns[section].title
         return None
 
-    # ── Цвета ──
     def _dup_color_for_uid(self, uid: int) -> Optional[QColor]:
         in_name = uid in self._dup_uids_name
         in_url = uid in self._dup_uids_url
@@ -318,12 +304,14 @@ class ChannelTableModel(QAbstractTableModel):
             return None
         return dup_text_color_for_bg(bg)
 
-    # ── data ──
     def data(self, index: QModelIndex,
              role=Qt.ItemDataRole.DisplayRole):
         if not index.isValid():
             return None
-        ch = self._filtered[index.row()]
+        row = index.row()
+        if row < 0 or row >= len(self._filtered):
+            return None
+        ch = self._filtered[row]
         col = index.column()
         spec = (self._columns[col]
                 if 0 <= col < len(self._columns) else None)
@@ -382,7 +370,6 @@ class ChannelTableModel(QAbstractTableModel):
             return Qt.AlignmentFlag.AlignCenter
         return None
 
-    # ── flags/mime ──
     def flags(self, index: QModelIndex):
         if not index.isValid():
             return (Qt.ItemFlag.ItemIsDropEnabled
@@ -408,15 +395,19 @@ class ChannelTableModel(QAbstractTableModel):
         return [self.MIME_TYPE]
 
     def mimeData(self, indexes):
-        uids = sorted({self._filtered[i.row()].uid
-                       for i in indexes
-                       if i.isValid()
-                       and 0 <= i.row() < len(self._filtered)})
-        if not uids:
+        uids: Set[int] = set()
+        for i in indexes:
+            if not i.isValid():
+                continue
+            row = i.row()
+            if 0 <= row < len(self._filtered):
+                uids.add(self._filtered[row].uid)
+        uids_sorted = sorted(uids)
+        if not uids_sorted:
             return None
         mime = QMimeData()
         mime.setData(self.MIME_TYPE,
-                     ",".join(map(str, uids)).encode('ascii'))
+                     ",".join(map(str, uids_sorted)).encode('ascii'))
         return mime
 
     def dropMimeData(self, data, action, row, column, parent):
@@ -431,19 +422,52 @@ class ChannelTableModel(QAbstractTableModel):
             return False
         if not uids:
             return False
-        target_row = parent.row() if parent.isValid() else row
+
+        # FIX 7: различаем «вставить перед строкой» и
+        # «вставить после строки» по позиции drop.
+        #
+        # Qt передаёт:
+        #   • parent.isValid() → drop «в» строку parent.row();
+        #   • row == -1 → drop в конец;
+        #   • row == N → drop между N-1 и N.
+        #
+        # Для внутреннего drag&drop нам нужно знать, куда
+        # пользователь целился: до или после target_row.
+        # Вычисляем это по глобальной позиции курсора и
+        # геометрии target-строки.
+        insert_after = False
+        target_row = -1
+        if parent.isValid():
+            target_row = parent.row()
+            try:
+                pos = self._last_drop_pos  # ставится в view
+            except AttributeError:
+                pos = None
+            if pos is not None and 0 <= target_row < self.rowCount():
+                rect = self._view_visual_rect(target_row)
+                if rect is not None:
+                    mid_y = rect.y() + rect.height() // 2
+                    insert_after = pos.y() > mid_y
+        elif row >= 0 and row < len(self._filtered):
+            target_row = row
+            insert_after = True   # явный drop «после» row
+        else:
+            target_row = -1
+
         ref_uid: Optional[int] = None
         if 0 <= target_row < len(self._filtered):
             ref_uid = self._filtered[target_row].uid
-        self.request_move.emit(uids, ref_uid)
+        self.request_move.emit(uids, ref_uid, 1 if insert_after else 0)
         return True
 
-    # ── setData ──
     def setData(self, index: QModelIndex, value,
                 role=Qt.ItemDataRole.EditRole):
         if not index.isValid() or role != Qt.ItemDataRole.EditRole:
             return False
-        ch = self._filtered[index.row()]
+        row = index.row()
+        if row < 0 or row >= len(self._filtered):
+            return False
+        ch = self._filtered[row]
         spec = (self._columns[index.column()]
                 if 0 <= index.column() < len(self._columns)
                 else None)
@@ -486,6 +510,7 @@ class ChannelTableModel(QAbstractTableModel):
                     .max_alternative_urls
                 if ch.link.url not in ch.link.alternative_urls:
                     ch.link.alternative_urls.insert(0, ch.link.url)
+                if len(ch.link.alternative_urls) > max_alts:
                     ch.link.alternative_urls = \
                         ch.link.alternative_urls[:max_alts]
             ch.link.url = new_value
@@ -510,7 +535,6 @@ class ChannelTableModel(QAbstractTableModel):
             return True
         return False
 
-    # ── refresh ──
     def refresh_row(self, row: int):
         if 0 <= row < len(self._filtered):
             self.dataChanged.emit(self.index(row, 0),

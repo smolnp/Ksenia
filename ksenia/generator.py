@@ -1,15 +1,11 @@
-# -*- coding: utf-8 -*-
+# Copyright (C) 2025 SmolNP
+# SPDX-License-Identifier: GPL-3.0-or-later
+# См. LICENSE в корне проекта.
 """Поиск источников IPTV-плейлистов через GitHub API.
 
 Модуль НЕ содержит встроенных ссылок на плейлисты.
 Все результаты получаются live-запросом к GitHub API в момент
 выполнения поиска.
-
-Используется в SourcesFinderDialog по кнопке
-«🔍 Найти источники автоматически».
-
-Сигнал завершения называется `search_finished`, чтобы не
-конфликтовать с QThread.finished.
 """
 from __future__ import annotations
 
@@ -33,7 +29,7 @@ from constants import (
     SOURCES_FINDER_HEALTH_TIMEOUT,
     SOURCES_FINDER_HEALTH_MAX_BYTES,
 )
-from paths import logger
+from logging_setup import logger
 
 
 def _is_excluded(name: str, url: str) -> bool:
@@ -193,13 +189,6 @@ def _check_source_health(url: str, *,
 
 
 class SourcesFinderWorker(QThread):
-    """Ищет URL-ы плейлистов через GitHub API (live),
-    проверяет доступность и свежесть.
-
-    Никаких встроенных ссылок: всё, что попадает в результат,
-    получено из ответа API в момент выполнения поиска.
-    """
-
     progress = pyqtSignal(str)
     found = pyqtSignal(list)
     health_progress = pyqtSignal(int, int)
@@ -223,6 +212,9 @@ class SourcesFinderWorker(QThread):
         self.max_age_days = max(1, int(max_age_days))
         self.health_workers = max(1, min(int(health_workers), 16))
         self.health_timeout = max(2, int(health_timeout))
+        # Один Session на весь воркер.
+        self._session: Optional[requests.Session] = None
+        self._session_lock = threading.Lock()
 
     def stop(self):
         self._stop.set()
@@ -230,26 +222,37 @@ class SourcesFinderWorker(QThread):
     def _is_stopped(self) -> bool:
         return self._stop.is_set()
 
-    @staticmethod
-    def _session() -> requests.Session:
-        s = requests.Session()
-        s.headers.update({
-            'User-Agent': 'Ksenia-M3U-Editor/SourcesFinder',
-            'Accept': ('application/vnd.github.v3+json, '
-                       'application/json, */*'),
-        })
-        return s
+    def _get_session(self) -> requests.Session:
+        with self._session_lock:
+            if self._session is None:
+                s = requests.Session()
+                s.headers.update({
+                    'User-Agent':
+                        'Ksenia-M3U-Editor/SourcesFinder',
+                    'Accept': ('application/vnd.github.v3+json, '
+                               'application/json, */*'),
+                })
+                self._session = s
+            return self._session
 
-    def _search_github(self, session: requests.Session,
-                       out: List[Dict[str, Any]],
+    def _close_session(self):
+        with self._session_lock:
+            s = self._session
+            self._session = None
+        if s is not None:
+            try:
+                s.close()
+            except Exception:
+                pass
+
+    def _search_github(self, out: List[Dict[str, Any]],
                        seen_urls: Set[str]):
-        """Поиск через GitHub Search API — только live-запрос,
-        без известных репозиториев."""
         queries = [
             "iptv m3u russia",
             "russian iptv playlist",
             "iptv ru m3u",
         ]
+        session = self._get_session()
         for query in queries:
             if self._is_stopped():
                 return
@@ -304,19 +307,14 @@ class SourcesFinderWorker(QThread):
                     f"GitHub search error ({query}): {e}")
             time.sleep(0.3)
 
-    def _search_m3uguide_repo(self, session: requests.Session,
-                              out: List[Dict[str, Any]],
+    def _search_m3uguide_repo(self, out: List[Dict[str, Any]],
                               seen_urls: Set[str]):
-        """Поиск в репозитории m3uguide/playlists через API.
-
-        Никаких хардкод-ссылок: список файлов приходит в ответе
-        API, download_url формируется GitHub'ом в момент запроса.
-        """
         if self._is_stopped():
             return
         self.progress.emit("m3u.guide: поиск файлов...")
         try:
-            r = session.get(_M3UGUIDE_REPO_API, timeout=15)
+            r = self._get_session().get(
+                _M3UGUIDE_REPO_API, timeout=15)
             if r.status_code != 200:
                 return
             items = r.json()
@@ -408,16 +406,14 @@ class SourcesFinderWorker(QThread):
         return valid, rejected
 
     def run(self):
-        session = self._session()
         try:
             out: List[Dict[str, Any]] = []
             seen_urls: Set[str] = set()
 
             if self.include_github and not self._is_stopped():
-                self._search_github(session, out, seen_urls)
+                self._search_github(out, seen_urls)
             if self.include_m3uguide and not self._is_stopped():
-                self._search_m3uguide_repo(
-                    session, out, seen_urls)
+                self._search_m3uguide_repo(out, seen_urls)
 
             github_items = [x for x in out
                             if x.get('source') == 'github']
@@ -461,7 +457,4 @@ class SourcesFinderWorker(QThread):
             logger.exception("SourcesFinderWorker")
             self.error.emit(str(e))
         finally:
-            try:
-                session.close()
-            except Exception:
-                pass
+            self._close_session()

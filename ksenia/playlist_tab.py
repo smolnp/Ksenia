@@ -1,15 +1,7 @@
-# -*- coding: utf-8 -*-
-"""PlaylistTab — виджет одной вкладки плейлиста.
-
-Версия 0.2.1:
-  • Ширины столбцов хранятся в Config (а не в QSettings).
-  • allow_duplicate_urls реально проверяется при вставке
-    ссылки и при массовой вставке каналов.
-  • limit_check_enabled / max_channels_to_check реально
-    применяются при проверке.
-  • Умное копирование: Ctrl+A → Ctrl+C → Ctrl+V работает
-    для любого количества каналов.
-"""
+# Copyright (C) 2025 SmolNP
+# SPDX-License-Identifier: GPL-3.0-or-later
+# См. LICENSE в корне проекта.
+"""PlaylistTab — виджет одной вкладки плейлиста."""
 from __future__ import annotations
 
 import csv
@@ -132,6 +124,10 @@ class PlaylistTab(QWidget):
         self._search_timer.timeout.connect(self._do_search)
         self._pending_search = ""
 
+        # FIX 5: флаг «идёт правка через _edit_channels» — чтобы
+        # избежать полной перестройки модели в _commit.
+        self._inside_edit_channels = False
+
         self._setup_ui()
         self._setup_shortcuts()
 
@@ -207,7 +203,6 @@ class PlaylistTab(QWidget):
         h.sectionResized.connect(self._on_section_resized)
         self._apply_resize_modes()
 
-    # ── Ширины столбцов (в Config) ──
     @staticmethod
     def _default_column_width(key: str) -> int:
         return _DEFAULT_COLUMN_WIDTHS.get(key, 120)
@@ -460,25 +455,58 @@ class PlaylistTab(QWidget):
     def _edit_channels(self, description: str,
                        refresh: str = 'reset',
                        force_save: bool = False):
+        # FIX 2: откат без двойной перестройки модели.
+        #
+        # Идея:
+        #   • «до» запоминаем в локальную копию.
+        #   • Если блок прошёл успешно — коммитим (см. _commit).
+        #   • Если блок упал — восстанавливаем состояние из
+        #     локальной копии (без вызова undo-менеджера, чтобы
+        #     избежать повторного refresh через _apply_diff).
         if self._state_save_timer.isActive():
             self._state_save_timer.stop()
-        self.undo_manager.save_state(self.all_channels, description)
+        prev_channels = self._snapshot_channels_for_rollback()
+        prev_pending_desc = self._pending_state_desc
         self._pending_state_desc = ""
+
         ok = False
+        self._inside_edit_channels = True
         try:
             with self._suppress_save():
                 yield self.all_channels
             ok = True
         finally:
+            self._inside_edit_channels = False
             if ok:
                 self._commit(description,
                              reset_view=(refresh == 'reset'),
-                             save_state=False)
+                             save_state=True)
             else:
-                self.refresh_view()
+                # Восстановление из локальной копии без undo.
+                try:
+                    self.all_channels = prev_channels
+                    self._normalize_order()
+                except Exception:
+                    logger.exception("rollback after failed edit")
+                self._pending_state_desc = prev_pending_desc
+                with self._suppress_save():
+                    self._rebuild_model_safely(preserve_selection=True)
+
+    def _snapshot_channels_for_rollback(self) -> List[ChannelData]:
+        """Снимок каналов для отката.
+
+        Используем копии, чтобы пользовательские изменения
+        в неудавшемся блоке не «протекли» обратно.
+        """
+        return [ch.copy() for ch in self.all_channels]
 
     def _commit(self, description: str = "",
                 *, reset_view: bool = False, save_state: bool = True):
+        # FIX 5: если мы внутри _edit_channels, модель уже будет
+        # перестроена вызывающим кодом через _edit_channels
+        # (reset_view=True), либо вызывающий сам решит. Здесь
+        # делаем минимально необходимую работу: сохраняем
+        # состояние undo (если надо) и обновляем model.refresh_all.
         if save_state and description:
             self.save_state(description)
         self.sync_to_core()
@@ -486,6 +514,8 @@ class PlaylistTab(QWidget):
             if reset_view:
                 self._rebuild_model_safely(preserve_selection=True)
             else:
+                # Точечное обновление данных вместо полной
+                # перестройки модели.
                 self.model.refresh_all()
         self.update_info()
         self.groups_changed.emit()
@@ -621,7 +651,6 @@ class PlaylistTab(QWidget):
             self._suppress_state_save = False
             self._loading = False
 
-    # ── EPG ──
     def _resolve_epg_urls_for_load(self) -> Optional[List[str]]:
         urls = [u for u in self.header_manager.epg_sources
                 if u and u.strip()]
@@ -918,12 +947,24 @@ class PlaylistTab(QWidget):
             self.save_state("Правка ячейки")
             self.sync_to_core()
             self.update_info()
+            # FIX 6: set_duplicate_mode нельзя вызывать синхронно
+            # внутри обработчика dataChanged — Qt может ругаться
+            # на beginResetModel/endResetModel в этом контексте.
             if self.model.is_duplicate_mode():
-                self.model.set_duplicate_mode(True)
+                QTimer.singleShot(
+                    0, self._reapply_duplicate_mode_async)
             self.groups_changed.emit()
         except RuntimeError:
             logger.warning(
                 "dataChanged handler hit deleted item, ignoring")
+
+    def _reapply_duplicate_mode_async(self):
+        if not _is_qobject_valid(self):
+            return
+        try:
+            self.model.set_duplicate_mode(True)
+        except Exception:
+            logger.exception("reapply duplicate mode")
 
     def save_state(self, description: str = ""):
         if self._suppress_state_save:
@@ -1003,7 +1044,10 @@ class PlaylistTab(QWidget):
                 if uid not in existing_uids and data:
                     new_ch = ChannelData.from_dict(data)
                     if new_ch.uid in existing_uids:
-                        new_ch.uid = ChannelData._next_uid()
+                        logger.error(
+                            "UID collision on undo: %d, "
+                            "skipping added entry", new_ch.uid)
+                        continue
                     uid_map[new_ch.uid] = new_ch
                     existing_uids.add(new_ch.uid)
 
@@ -1058,7 +1102,6 @@ class PlaylistTab(QWidget):
             info_box(self, "Нет URL для проверки")
             return
 
-        # Лимит проверок из настроек.
         if self.core.config.get('limit_check_enabled', False):
             try:
                 limit = int(self.core.config.get(
@@ -1564,15 +1607,7 @@ class PlaylistTab(QWidget):
         info_box(self, f"Обновлено {len(self.selected_channels)} "
                         f"каналов", "Готово")
 
-    # ── Copy/Cut/Paste ──
-    # FIX 0.2.1: умное копирование — Ctrl+A → Ctrl+C → Ctrl+V
-    # работает для любого количества каналов.
     def _copy_channel(self):
-        """Умное копирование: если выделено >1 канала —
-        копируем всё выделение, иначе — текущий канал.
-
-        Ctrl+C вызывает именно этот метод.
-        """
         w = self.parent_window
         if w is None:
             return
@@ -1627,11 +1662,6 @@ class PlaylistTab(QWidget):
             w.copied_channel = None
 
     def _paste_channel(self, row: int = -1):
-        """Умная вставка: если в буфере список — вставляем
-        весь список, иначе — один канал.
-
-        Ctrl+V вызывает именно этот метод.
-        """
         w = self.parent_window
         if w is None:
             return
@@ -1696,8 +1726,6 @@ class PlaylistTab(QWidget):
         else:
             base_idx = len(self.all_channels)
 
-        # FIX 0.2.1: проверка allow_duplicate_urls для
-        # массовой вставки.
         allow_dup = bool(self.core.config.get(
             'allow_duplicate_urls', False))
         if not allow_dup:
@@ -2572,6 +2600,7 @@ class PlaylistTab(QWidget):
             error_box(self, str(e))
 
     def show_duplicate_finder(self):
+        # FIX 1: применяем результат диалога к текущему плейлисту.
         if not self.all_channels:
             info_box(self, "Нет каналов")
             return
@@ -2586,15 +2615,19 @@ class PlaylistTab(QWidget):
             settings=self.core.get_replacement_settings())
 
         def on_duplicates_removed(removed: int):
-            if removed > 0 and _is_qobject_valid(self):
-                self.save_state("Удаление дубликатов")
-                self._normalize_order()
-                self.sync_to_core()
-                with self._suppress_save():
-                    self._rebuild_model_safely(
-                        preserve_selection=True)
-                self.update_info()
-                self.groups_changed.emit()
+            if removed <= 0 or not _is_qobject_valid(self):
+                return
+            new_list = dlg.get_result()
+            if not new_list:
+                return
+            self.save_state("Удаление дубликатов")
+            self.all_channels[:] = new_list
+            self._normalize_order()
+            self.sync_to_core()
+            with self._suppress_save():
+                self._rebuild_model_safely(preserve_selection=True)
+            self.update_info()
+            self.groups_changed.emit()
 
         dlg.duplicates_removed.connect(on_duplicates_removed)
         dlg.exec()

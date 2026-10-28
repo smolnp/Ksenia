@@ -1,4 +1,6 @@
-# -*- coding: utf-8 -*-
+# Copyright (C) 2025 SmolNP
+# SPDX-License-Identifier: GPL-3.0-or-later
+# См. LICENSE в корне проекта.
 """URLUtils, _StopToken, валидация, decode."""
 from __future__ import annotations
 
@@ -51,7 +53,9 @@ def cancelled(stop_token: Optional['_StopToken']) -> bool:
     return stop_token is not None and stop_token.is_set()
 
 
-_M3U_ENCODINGS = ('utf-8', 'utf-8-sig', 'cp1251')
+# Порядок важен: utf-8-sig должен идти ДО utf-8, иначе BOM
+# попадёт в первую строку и сломает распознавание #EXTM3U.
+_M3U_ENCODINGS = ('utf-8-sig', 'utf-8', 'cp1251')
 
 
 def decode_m3u_bytes(raw: bytes) -> Tuple[str, str]:

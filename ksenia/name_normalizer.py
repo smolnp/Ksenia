@@ -1,4 +1,6 @@
-# -*- coding: utf-8 -*-
+# Copyright (C) 2025 SmolNP
+# SPDX-License-Identifier: GPL-3.0-or-later
+# См. LICENSE в корне проекта.
 """Нормализация имён каналов.
 
 NormMode: STRICT (только casefold) / LIGHT (без скобок) /
@@ -44,7 +46,7 @@ _ORIG_SUFFIXES = ('orig', 'ориг', 'original')
 _STUB_MARKERS = ('заглушка', 'no_epg', 'no epg', 'placeholder',
                  'не используется', 'test channel')
 
-# FIX: базовые синонимы — работают даже без iptv_org_aliases.json.
+# Базовые синонимы — работают даже без iptv_org_aliases.json.
 # Ключи — casefold + сжатие пробелов (_raw_alias_key).
 #
 # ВАЖНО: словарь применяется ТОЛЬКО к точному совпадению всего
@@ -407,7 +409,6 @@ _SYNONYMS: Dict[str, str] = {
     "ru tv": "RU.TV",
     "ru.tv": "RU.TV",
     "rutv": "RU.TV",
-    "тнт music": "ТНТ-Music",
     "mtv": "MTV",
     "mtv live": "MTV Live",
     "mtv 90s": "MTV 90s",
@@ -422,7 +423,6 @@ _SYNONYMS: Dict[str, str] = {
     "bridge schlager": "Bridge TV Шлягер",
 
     # ── Детские ──
-    "карусель": "Карусель",
     "мульт": "Мульт",
     "mult": "Мульт",
     "мультимания": "Мультимания",
@@ -457,8 +457,6 @@ _SYNONYMS: Dict[str, str] = {
     "союз hd": "Союз HD",
     "надежда": "Надежда",
     "nadezhda": "Надежда",
-    "спас": "Спас",
-    "spas": "Спас",
     "музсоюз": "МузСоюз",
     "muzsoyuz": "МузСоюз",
 
@@ -480,24 +478,14 @@ _SYNONYMS: Dict[str, str] = {
     "телепутешествия hd": "Телепутешествия HD",
 
     # ── Спорт ──
-    "матч тв": "Матч ТВ",
-    "match tv": "Матч ТВ",
     "матч футбол 1": "Матч! Футбол 1",
-    "match futbol 1": "Матч! Футбол 1",
     "матч футбол 2": "Матч! Футбол 2",
-    "match futbol 2": "Матч! Футбол 2",
     "матч футбол 3": "Матч! Футбол 3",
-    "match futbol 3": "Матч! Футбол 3",
     "матч премьер": "Матч! Премьер",
-    "match premer": "Матч! Премьер",
     "матч арена": "Матч! Арена",
-    "match arena": "Матч! Арена",
     "матч игра": "Матч! Игра",
-    "match igra": "Матч! Игра",
     "матч страна": "Матч! Страна",
-    "match strana": "Матч! Страна",
     "матч планета": "Матч! Планета",
-    "match planeta": "Матч! Планета",
     "футбол": "Футбол",
     "futbol": "Футбол",
     "футбол hd": "Футбол HD",
@@ -520,8 +508,6 @@ _SYNONYMS: Dict[str, str] = {
     "perets": "Перец",
     "перец int": "Перец International",
     "perets int": "Перец International",
-    "ю": "Ю",
-    "u": "Ю",
     "ю hd": "Ю HD",
     "u hd": "Ю HD",
     "продвижение": "Продвижение",
@@ -532,8 +518,6 @@ _SYNONYMS: Dict[str, str] = {
     "tvoe tv": "Твоё ТВ",
     "твое тв hd": "Твоё ТВ HD",
     "tvoe tv hd": "Твоё ТВ HD",
-    "телекафе": "Телекафе",
-    "telecafe": "Телекафе",
 
     # ── Кино и сериалы ──
     "еврокино": "Еврокино",
@@ -604,16 +588,10 @@ _SYNONYMS: Dict[str, str] = {
     "izvestiya": "Известия",
     "известия hd": "Известия HD",
     "izvestiya hd": "Известия HD",
-    "рбк": "РБК",
-    "rbk": "РБК",
     "рбк hd": "РБК HD",
     "rbk hd": "РБК HD",
     "рбк 2": "РБК 2",
     "rbk 2": "РБК 2",
-    "россия 24": "Россия 24",
-    "rossiya 24": "Россия 24",
-    "мир 24": "Мир 24",
-    "mir 24": "Мир 24",
     "беларусь 24": "Беларусь 24",
     "belarus 24": "Беларусь 24",
     "вместе-рф": "Вместе-РФ",
@@ -901,11 +879,6 @@ def transliterate_tokens(text: str) -> str:
 
 
 def _transliterate_word(word: str) -> str:
-    """Транслитерирует одно слово латиница → кириллица.
-
-    Сохраняет регистр первой буквы. Не трогает слова с цифрами
-    (обычно это технические обозначения: HD, 4K, TV21).
-    """
     if not word or not word[0].isalpha():
         return word
     if not all(c.isalpha() or c in "-'" for c in word):
@@ -933,20 +906,6 @@ def _transliterate_word(word: str) -> str:
 
 
 def _transliterate_latin_fallback(text: str) -> str:
-    """Транслитерация латиницы → кириллица.
-
-    ВНИМАНИЕ: НЕ ИСПОЛЬЗУЙТЕ для отображения имён каналов!
-    Официальные имена (BBC Earth, Cartoon Network, TV BRICS,
-    Mezzo, RTG, Viju TV1000...) будут испорчены:
-        BBC Earth       → Ббк Еартх
-        Cartoon Network → Картоон Нетворк
-        TV BRICS        → Тв Брикс
-
-    Использовать ТОЛЬКО если точно известно, что имя — транслит
-    русского названия (например, для CLI-экспорта без EPG и без
-    _SYNONYMS). Для отображения используйте display_name() —
-    он берёт каноническое имя из EPG или _SYNONYMS.
-    """
     if not text:
         return text
     cyr = sum(1 for c in text if _CYR_LO <= c.casefold() <= _CYR_HI)
@@ -964,36 +923,46 @@ def _transliterate_latin_fallback(text: str) -> str:
 
 
 def _raw_alias_key(text: str) -> str:
-    """Ключ для поиска в алиасах/синонимах: casefold + сжатие."""
     if not text:
         return ""
     return _WS_MULTI.sub(' ', text.strip()).casefold()
 
 
 def _apply_synonyms(s: str) -> str:
-    """Подставляет канон из _SYNONYMS, если найдено.
-
-    Применяется к «сырому» s ДО нормализации качества.
-    Возвращает канон в правильном регистре.
-
-    ВАЖНО: применяется ТОЛЬКО к точному совпадению всего имени
-    (после casefold и сжатия пробелов). Поэтому «Cartoon Network»
-    не превратится в «Картоон Нетворк» — его просто нет в словаре.
-    """
     if not s:
         return s
     key = _raw_alias_key(s)
     canon = _SYNONYMS.get(key)
     if canon:
         return canon
+    # FIX: если исходное имя содержит тег качества в скобках
+    # («Первый канал (HD)»), попробуем снять его и поискать
+    # синоним по «чистому» имени. Качество вернём обратно.
+    stripped = _QUALITY_PARENS_TAG.sub('', s).strip()
+    stripped = _QUALITY_BRACKETS_TAG.sub('', stripped).strip()
+    if stripped and stripped != s:
+        canon = _SYNONYMS.get(_raw_alias_key(stripped))
+        if canon:
+            quality = _extract_quality_tag(s)
+            return f"{canon} {quality}".strip() if quality else canon
     return s
 
 
-def _apply_iptv_org_aliases(s: str) -> str:
-    """Подставляет канон из алиасов iptv-org, если найдено.
+def _extract_quality_tag(s: str) -> str:
+    m = _QUALITY_PARENS_TAG.search(s)
+    if m:
+        tag = m.group('tag') or ''
+        cls = _classify_quality_tag(tag)
+        return cls or ''
+    m = _QUALITY_BRACKETS_TAG.search(s)
+    if m:
+        tag = m.group('tag') or ''
+        cls = _classify_quality_tag(tag)
+        return cls or ''
+    return ''
 
-    Применяется к «сырому» s ДО нормализации качества.
-    """
+
+def _apply_iptv_org_aliases(s: str) -> str:
     if not s:
         return s
     try:
@@ -1013,7 +982,6 @@ def _apply_iptv_org_aliases(s: str) -> str:
 
 
 def _strip_decorative(text: str) -> str:
-    """Убирает декоративные маркеры (Ⓢ, ™, ★, эмодзи и т.п.) везде."""
     if not text:
         return text
     s = _DECORATIVE.sub(' ', text)
@@ -1024,15 +992,12 @@ def _strip_decorative(text: str) -> str:
 # ── Нормализация качества (для display_name) ──
 
 def _classify_quality_tag(tag: str) -> str:
-    """Классифицирует тег качества: 'HD' / 'SD' / '4K' / '' (удалить)."""
     if not tag:
         return ""
     t = tag.strip().casefold()
-    if (t in ('4k', '8k', 'uhd', 'ultra hd',
-              '2160p', '2160i', '4320p', '4320i')
+    if (t in ('4k', '8k', 'uhd', 'ultra hd')
             or t.startswith('2160') or t.startswith('4320')):
-        return "4K" if t in ('4k', '8k', 'uhd', 'ultra hd') \
-            or t.startswith('2160') or t.startswith('4320') else ""
+        return "4K"
     if (t in ('hd', 'fhd', 'fullhd', 'full hd')
             or t.startswith('1080') or t.startswith('720')
             or t.startswith('1280')):
@@ -1049,7 +1014,6 @@ def _classify_quality_tag(tag: str) -> str:
 
 
 def _normalize_quality_tag_display(s: str) -> str:
-    """Заменяет теги качества на HD/SD/4K (или удаляет)."""
     if not s:
         return s
 
@@ -1083,16 +1047,15 @@ def _normalize_impl(text: str, mode: str,
                     remove_emojis: bool,
                     remove_special: bool,
                     use_aliases: bool) -> str:
-    """Агрессивная нормализация — для поиска (search_key).
-
-    ВСЕГДА удаляет HD/SD/4K/сдвиг, чтобы поиск был максимально
-    широким. Для отображения используйте display_name().
-    """
     if not text:
         return ""
     s = fix_encoding(text)
 
-    if use_aliases and mode == NormMode.FULL.value:
+    # Алиасы применяем в FULL и CANONICAL — чтобы canonical_key
+    # (а значит и stable_key) был стабилен между «Perviy Kanal»
+    # и «Первый канал».
+    if use_aliases and mode in (NormMode.FULL.value,
+                                 NormMode.CANONICAL.value):
         s = _apply_synonyms(s)
         s = _apply_iptv_org_aliases(s)
 
@@ -1154,7 +1117,6 @@ def normalize_with_settings(text: str, settings: Any,
 # ── display_name (для показа) ──
 
 def _smart_title(s: str) -> str:
-    """Приводит к 'Первый канал', но HD/SD/4K/UHD/FHD — в верхнем."""
     if not s:
         return s
     acronyms = frozenset({
@@ -1181,15 +1143,6 @@ def _smart_title(s: str) -> str:
 
 
 def _normalize_display_impl(text: str) -> str:
-    """Нормализация для показа: убрать провайдер/Orig/мусор,
-    качество → HD/SD/4K, сдвиг сохранить, регистр → Title Case.
-
-    FIX: НЕ транслитерирует латиницу в кириллицу автоматически.
-    Официальные имена каналов (BBC Earth, Cartoon Network, TV BRICS,
-    Mezzo, RTG, Viju TV1000...) должны оставаться на латинице.
-    Для русских каналов, записанных латиницей, используйте
-    _SYNONYMS (Perviy Kanal → Первый канал) или загруженный EPG.
-    """
     if not text:
         return ""
     s = fix_encoding(text)
@@ -1215,9 +1168,6 @@ def _normalize_display_impl(text: str) -> str:
 
     base = _smart_title(base)
 
-    # НЕ транслитерируем: официальные латинские имена должны
-    # остаться как есть. См. docstring выше.
-
     if shift:
         base = f"{base} {shift}".strip()
 
@@ -1225,11 +1175,6 @@ def _normalize_display_impl(text: str) -> str:
 
 
 def _epg_fuzzy_params(settings: Any) -> Tuple[float, int, float]:
-    """Вытаскивает параметры fuzzy-поиска EPG из настроек.
-
-    Раньше display_name() жёстко использовал fuzzy_threshold=1.0,
-    из-за чего матчинг по «сырым» именам источников не работал.
-    """
     if settings is None:
         return 1.0, 5, 0.05
     try:
@@ -1252,21 +1197,6 @@ def display_name(name: str, settings: Any = None,
                  tvg_id: str = "",
                  tvg_name: str = "",
                  alternative_names: Any = None) -> str:
-    """Каноническое имя для показа.
-
-    1. Если EPG загружен и для канала есть match — используем
-       EPG display-name (вариант A: всегда с EPG, если доступен).
-    2. Иначе — обычная нормализация без транслитерации.
-    3. _SYNONYMS применяется внутри нормализации к точному
-       совпадению «сырого» имени — это позволяет превратить
-       «Perviy Kanal» в «Первый канал», но НЕ трогает
-       «Cartoon Network», «BBC Earth» и другие официальные
-       латинские имена.
-
-    FIX: fuzzy-порог берётся из настроек, а не 1.0.
-    FIX: передаются alternative_names для повторного матчинга
-    после первого применения EPG.
-    """
     if not name and not tvg_id:
         return ""
     base = _normalize_display_impl(name or "")
@@ -1302,7 +1232,6 @@ def display_name(name: str, settings: Any = None,
 def canonical_key(name: str, settings: Any = None,
                   tvg_id: str = "", keep_shift: bool = False
                   ) -> str:
-    """Ключ для stable_state.json. Агрессивная нормализация."""
     base, shift = extract_shift(name or "")
     base, _ = extract_dash_tail(base)
     norm = normalize_with_settings(base, settings, NormMode.FULL)
@@ -1376,8 +1305,6 @@ def dominant_script(text: str) -> str:
     best = max(ratios.items(), key=lambda x: x[1])
     return 'mixed' if best[1] < 0.3 else best[0]
 
-
-# ── Совместимость с прежним кодом ──
 
 class ChannelNameNormalizer:
     @staticmethod

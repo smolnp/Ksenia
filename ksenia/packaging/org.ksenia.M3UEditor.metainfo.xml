@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
+
 <component type="desktop-application">
   <id>org.ksenia.M3UEditor</id>
   <metadata_license>CC0-1.0</metadata_license>
@@ -31,7 +32,7 @@
       Windows.
     </p>
     <p xml:lang="ru">
-      Ksenia M3U Editor — десктопный редактор IPTV-плейлистов
+      Редактор M3U Ксения — десктопный редактор IPTV-плейлистов
       формата M3U/M3U8. Поддерживает несколько плейлистов во
       вкладках, многопоточную проверку ссылок, автозамену битых
       ссылок из кэша живых URL, чёрные списки каналов и
@@ -64,44 +65,35 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
-    <release version="0.4.0" date="2025-12-01">
+    <release version="0.2.2" date="2026-10-23">
       <description>
-        <p>Removed all built-in IPTV/EPG source links.</p>
-        <p>Auto-search is now a live GitHub API query only.</p>
-        <p>Removed bootstrap default sources.</p>
-        <p>Removed FAST sources list.</p>
-        <p>Removed m3u.guide hardcoded URLs (now via API).</p>
-        <p>Removed known-repos list.</p>
-        <p>DEFAULT_EPG_URL is now empty.</p>
-        <p>Added Reset button in all settings dialogs.</p>
-        <p>Added Export/Import settings in JSON.</p>
-        <p>Removed duplicate epg_overwrite_metadata setting.</p>
-        <p>Removed dead settings (limit_check_*, bootstrap).</p>
-        <p>fast_replacement_mode now disables verify_candidates.</p>
-        <p>search_type disables thresholds in exact mode.</p>
-        <p>epg_fuzzy_enabled disables EPG thresholds.</p>
-        <p>allow_duplicate_urls is now actually checked.</p>
-        <p>default_epg_url is now validated as http(s) URL.</p>
-        <p>TTL changes invalidate cache entries.</p>
-        <p>Column widths moved from QSettings to Config.</p>
-        <p xml:lang="ru">Удалены все встроенные ссылки на IPTV/EPG-источники.</p>
-        <p xml:lang="ru">Авто-поиск теперь только live-запрос к GitHub API.</p>
-        <p xml:lang="ru">Удалён бутстрап стартовых источников.</p>
-        <p xml:lang="ru">Удалён список FAST-источников.</p>
-        <p xml:lang="ru">Удалены хардкод-ссылки m3u.guide (теперь через API).</p>
-        <p xml:lang="ru">Удалён список known-repos.</p>
-        <p xml:lang="ru">DEFAULT_EPG_URL теперь пустой.</p>
-        <p xml:lang="ru">Добавлена кнопка «Сбросить» во всех настройках.</p>
-        <p xml:lang="ru">Добавлен экспорт/импорт настроек в JSON.</p>
-        <p xml:lang="ru">Убран дубль epg_overwrite_metadata.</p>
-        <p xml:lang="ru">Убраны мёртвые настройки (limit_check_*, bootstrap).</p>
-        <p xml:lang="ru">fast_replacement_mode теперь отключает verify_candidates.</p>
-        <p xml:lang="ru">search_type дизейблит пороги в режиме exact.</p>
-        <p xml:lang="ru">epg_fuzzy_enabled дизейблит пороги EPG.</p>
-        <p xml:lang="ru">allow_duplicate_urls теперь реально проверяется.</p>
-        <p xml:lang="ru">default_epg_url валидируется как http(s) URL.</p>
-        <p xml:lang="ru">TTL-изменения инвалидируют кэш.</p>
-        <p xml:lang="ru">Ширины столбцов перенесены из QSettings в Config.</p>
+        <p>Исправлены критические ошибки парсинга и undo.</p>
+        <p>Устранена утечка EXTVLCOPT между каналами.</p>
+        <p>Исправлена потеря канала при undo с коллизией uid.</p>
+        <p>Восстановлен откат undo при исключении в блоке правки.</p>
+        <p>Исправлен undo для диалога поиска дубликатов.</p>
+        <p>Кэш normalized_index: корректный TTL в статистике.</p>
+        <p>Порядок кодировок: utf-8-sig перед utf-8 (BOM).</p>
+        <p>Громкость плеера применяется сразу после подключения IPC.</p>
+        <p>Алиасы синонимов применяются к именам с тегом качества.</p>
+        <p>Генератор источников использует один Session на воркер.</p>
+        <p>_PlaylistCreateTask регистрируется в реестре воркеров.</p>
+        <p xml:lang="ru">Исправлены критические ошибки парсинга и undo.</p>
+        <p xml:lang="ru">Устранена утечка EXTVLCOPT между каналами.</p>
+        <p xml:lang="ru">Исправлена потеря канала при undo с коллизией uid.</p>
+        <p xml:lang="ru">Восстановлен откат undo при исключении в блоке правки.</p>
+        <p xml:lang="ru">Исправлен undo для диалога поиска дубликатов.</p>
+        <p xml:lang="ru">Кэш normalized_index: корректный TTL в статистике.</p>
+        <p xml:lang="ru">Порядок кодировок: utf-8-sig перед utf-8 (BOM).</p>
+        <p xml:lang="ru">Громкость плеера применяется сразу после подключения IPC.</p>
+        <p xml:lang="ru">Алиасы синонимов применяются к именам с тегом качества.</p>
+        <p xml:lang="ru">Генератор источников использует один Session на воркер.</p>
+        <p xml:lang="ru">_PlaylistCreateTask регистрируется в реестре воркеров.</p>
+      </description>
+    </release>
+    <release version="0.2.1" date="2026-09-26">
+      <description>
+        <p>Первая стабильная публичная версия.</p>
       </description>
     </release>
   </releases>
