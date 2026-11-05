@@ -32,20 +32,85 @@ from theme import hint_hex
 from utils import URLUtils
 
 
+# ── Поиск mpv ──────────────────────────────────────────────────
+
+def _app_dir() -> str:
+    """Папка, где лежит ksenia.exe (frozen) или ksenia.py."""
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def _bundle_dir() -> str:
+    """Временная папка распаковки PyInstaller (_MEIPASS) или app_dir."""
+    if getattr(sys, 'frozen', False):
+        return getattr(sys, '_MEIPASS', _app_dir())
+    return _app_dir()
+
+
+def find_mpv() -> Optional[str]:
+    """Ищет mpv в таком порядке (первый найденный побеждает):
+
+    1. <app_dir>/mpv/mpv.exe          — портативная папка проекта
+    2. <app_dir>/mpv.exe              — рядом с ksenia.py / ksenia.exe
+    3. <bundle_dir>/mpv/mpv.exe       — внутри one-file бандла (--add-data)
+    4. <bundle_dir>/mpv.exe           — внутри бандла без подпапки
+    5. C:\\Program Files\\MPV\\mpv.exe — системная установка (Program Files)
+    6. C:\\ProgramData\\MPV\\mpv.exe   — системная установка (ProgramData)
+    7. C:\\mpv\\mpv.exe                — «короткий» путь
+    8. PATH                            — системная установка / пакетный менеджер
+    """
+    if sys.platform.startswith("win"):
+        exe_name = "mpv.exe"
+        candidates = [
+            os.path.join(_app_dir(), "mpv", exe_name),
+            os.path.join(_app_dir(), exe_name),
+            os.path.join(_bundle_dir(), "mpv", exe_name),
+            os.path.join(_bundle_dir(), exe_name),
+            r"C:\Program Files\MPV\mpv.exe",
+            r"C:\ProgramData\MPV\mpv.exe",
+            r"C:\mpv\mpv.exe",
+        ]
+    else:
+        exe_name = "mpv"
+        candidates = [
+            os.path.join(_app_dir(), "mpv", exe_name),
+            os.path.join(_app_dir(), exe_name),
+            os.path.join(_bundle_dir(), "mpv", exe_name),
+            os.path.join(_bundle_dir(), exe_name),
+        ]
+
+    for c in candidates:
+        if os.path.isfile(c):
+            return c
+
+    return shutil.which("mpv")
+
+
 def is_mpv_available() -> bool:
-    return shutil.which("mpv") is not None
+    return find_mpv() is not None
 
 
 def get_mpv_error() -> str:
     if is_mpv_available():
         return ""
     return (
-        "mpv не установлен.\n\n"
-        "Установите его через менеджер пакетов:\n"
-        "  sudo apt install mpv      (Debian/Ubuntu)\n"
-        "  sudo dnf install mpv      (Fedora)\n"
-        "  sudo pacman -S mpv        (Arch)")
+        "mpv не найден.\n\n"
+        "Варианты установки (любой из них):\n"
+        "1. Положите папку mpv с mpv.exe рядом с программой:\n"
+        f"   {os.path.join(_app_dir(), 'mpv')}\n\n"
+        "2. Установите в систему (Windows):\n"
+        "   C:\\Program Files\\MPV\\mpv.exe\n"
+        "   C:\\ProgramData\\MPV\\mpv.exe\n"
+        "   C:\\mpv\\mpv.exe\n"
+        "   или добавьте папку с mpv.exe в PATH.\n\n"
+        "3. Linux:\n"
+        "   sudo apt install mpv      (Debian/Ubuntu)\n"
+        "   sudo dnf install mpv      (Fedora)\n"
+        "   sudo pacman -S mpv        (Arch)")
 
+
+# ── Виджет плеера ──────────────────────────────────────────────
 
 class MpvPlayerWidget(QFrame):
     playback_error = pyqtSignal(str)
@@ -172,6 +237,7 @@ class MpvPlayerWidget(QFrame):
             self.playback_error.emit(get_mpv_error())
             return
 
+        # FIX: если mpv умер — полностью сбрасываем состояние
         if self._started and (
                 self._proc is None
                 or self._proc.state()
@@ -180,6 +246,10 @@ class MpvPlayerWidget(QFrame):
             self._started = False
             self._proc = None
             self._cleanup_ipc_path()
+            if self._ipc is not None:
+                with suppress(Exception):
+                    self._ipc.disconnectFromServer()
+                self._ipc = None
 
         self._current_url = url
         self._video_w = 0
@@ -379,7 +449,7 @@ class MpvPlayerWidget(QFrame):
         return path
 
     def _start_mpv(self) -> bool:
-        mpv_path = shutil.which("mpv")
+        mpv_path = find_mpv()
         if not mpv_path:
             self._show_error_overlay(
                 "<b>mpv не установлен</b><br>"
@@ -445,6 +515,8 @@ class MpvPlayerWidget(QFrame):
         proc = QProcess(self)
         proc.setProgram(mpv_path)
         proc.setArguments(args)
+        # Критично: mpv ищет свои DLL/шрифты относительно своего exe
+        proc.setWorkingDirectory(os.path.dirname(mpv_path))
         proc.setProcessChannelMode(
             QProcess.ProcessChannelMode.SeparateChannels)
 
@@ -463,7 +535,7 @@ class MpvPlayerWidget(QFrame):
         return True
 
     def _check_mpv_alive(self):
-        # FIX 8: если mpv упал — сбрасываем состояние, чтобы
+        # FIX: если mpv упал — сбрасываем состояние, чтобы
         # следующий play_url() корректно перезапустил процесс.
         if self._proc is None:
             return
@@ -496,6 +568,12 @@ class MpvPlayerWidget(QFrame):
 
     def _try_connect_ipc(self, deadline: float):
         if self._released or self._ipc is None:
+            return
+        # FIX: если mpv умер — не пытаемся подключаться
+        if self._proc is None or (
+                self._proc.state()
+                == QProcess.ProcessState.NotRunning):
+            logger.warning("mpv IPC connect timeout (process dead)")
             return
         if (self._ipc.state()
                 == QLocalSocket.LocalSocketState.ConnectedState):
