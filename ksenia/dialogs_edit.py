@@ -287,59 +287,6 @@ class RemoveMetadataDialog(BaseDialog):
         return "all"
 
 
-class MassEditDialog(BaseDialog):
-    def __init__(self, count: int, parent=None):
-        super().__init__(f"Массовая правка ({count} каналов)",
-                          parent, size=(520, 320))
-        l = self.root
-        l.addWidget(QLabel(
-            f"<b>Выбрано каналов:</b> {count}"))
-        g = QGroupBox("Что изменить")
-        gl = QVBoxLayout(g)
-        self.ua_check = QCheckBox("User-Agent")
-        self.tvg_id_check = QCheckBox("TVG-ID")
-        self.tvg_logo_check = QCheckBox("TVG-Logo")
-        self.group_check = QCheckBox("Group-title")
-        for w in (self.ua_check, self.tvg_id_check,
-                  self.tvg_logo_check, self.group_check):
-            gl.addWidget(w)
-        l.addWidget(g)
-        self.ua_edit = QLineEdit()
-        self.ua_edit.setPlaceholderText(
-            "Оставьте пустым, чтобы удалить")
-        self.tvg_id_edit = QLineEdit()
-        self.tvg_logo_edit = QLineEdit()
-        self.group_edit = QLineEdit()
-        form = QFormLayout()
-        form.addRow("User-Agent:", self.ua_edit)
-        form.addRow("TVG-ID:", self.tvg_id_edit)
-        form.addRow("TVG-Logo:", self.tvg_logo_edit)
-        form.addRow("Group-title:", self.group_edit)
-        l.addLayout(form)
-        self.add_ok_cancel()
-
-    def get_changes(self) -> Dict[str, str]:
-        result = {}
-        if self.ua_check.isChecked():
-            result['user_agent'] = self.ua_edit.text().strip()
-        if self.tvg_id_check.isChecked():
-            result['tvg_id'] = self.tvg_id_edit.text().strip()
-        if self.tvg_logo_check.isChecked():
-            result['tvg_logo'] = self.tvg_logo_edit.text().strip()
-        if self.group_check.isChecked():
-            result['group'] = self.group_edit.text().strip()
-        return result
-
-    def accept(self):
-        if not any((self.ua_check.isChecked(),
-                    self.tvg_id_check.isChecked(),
-                    self.tvg_logo_check.isChecked(),
-                    self.group_check.isChecked())):
-            warn_box(self, "Выберите хотя бы одно поле")
-            return
-        super().accept()
-
-
 class DuplicateFinderDialog(BaseDialog):
     duplicates_removed = pyqtSignal(int)
 

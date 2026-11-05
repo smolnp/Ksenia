@@ -30,6 +30,14 @@ _MAX_ALT_NAMES = 32
 _MAX_ALT_NAME_LEN = 512
 
 
+# Автоматически собираем все известные строковые статусы
+# из StatusText. Если добавляется новый — он не будет
+# «молча» сброшен при загрузке из кэша.
+_VALID_STATUS_TEXTS = frozenset(
+    v for k, v in vars(StatusText).items()
+    if isinstance(v, str) and not k.startswith('_'))
+
+
 def _clip(v: Any, limit: int) -> str:
     if v is None:
         return ""
@@ -91,7 +99,7 @@ class ChannelMetadata(SlotsCopyMixin):
 class ChannelLink(SlotsCopyMixin):
     __slots__ = ('url', 'extinf', 'user_agent', 'extvlcopt_lines',
                  'extra_headers', 'has_url', 'alternative_urls',
-                 'link_source')
+                 'link_source', 'is_repaired')
 
     def __init__(self):
         self.url: str = ""
@@ -102,11 +110,16 @@ class ChannelLink(SlotsCopyMixin):
         self.has_url: bool = True
         self.alternative_urls: list = []
         self.link_source: str = ""
+        # Флаг: текущий URL получен в результате Auto-Repair
+        # (не из кэша живых URL). Используется UI для подсветки
+        # и логирования. В M3U не пишется.
+        self.is_repaired: bool = False
 
 
 class ChannelStatus(SlotsCopyMixin):
     __slots__ = ('url_status', 'url_check_time', 'link_quality',
-                 'link_response_time', 'status_text', 'status_code')
+                 'link_response_time', 'status_text', 'status_code',
+                 'resolution', 'ttfb_ms')
 
     def __init__(self):
         self.url_status: Optional[bool] = None
@@ -115,6 +128,11 @@ class ChannelStatus(SlotsCopyMixin):
         self.link_response_time: Optional[float] = None
         self.status_text: str = StatusText.UNCHECKED
         self.status_code: Optional[int] = None
+        # Фактическое разрешение (из ffprobe): "SD"/"720p"/"1080p"/"4K"
+        # или "" если не определено. НЕ пишется в M3U — только UI.
+        self.resolution: str = ""
+        # Time to first byte, мс. Опционально (None = не измерено).
+        self.ttfb_ms: Optional[float] = None
 
     def reset(self):
         self.url_status = None
@@ -123,6 +141,8 @@ class ChannelStatus(SlotsCopyMixin):
         self.link_response_time = None
         self.status_text = StatusText.UNCHECKED
         self.status_code = None
+        self.resolution = ""
+        self.ttfb_ms = None
 
 
 class ChannelData:
@@ -209,6 +229,7 @@ class ChannelData:
     def clear_url(self):
         self.link.url = ""
         self.link.has_url = False
+        self.link.is_repaired = False
         self.status.reset()
         self.touch()
 
@@ -371,6 +392,13 @@ class ChannelData:
         if lq == LinkQuality.UNSUPPORTED:
             return StatusText.UNSUPPORTED
         if lq == LinkQuality.WORKING:
+            # Если статус-текст содержит детали (например,
+            # «🔧 Починена») — показываем их, иначе общий WORKING.
+            if (self.status.status_text
+                    and self.status.status_text not in (
+                        StatusText.UNCHECKED,
+                        StatusText.NO_URL)):
+                return self.status.status_text
             return StatusText.WORKING
         if lq == LinkQuality.NOT_WORKING:
             return StatusText.NOT_WORKING
@@ -398,6 +426,13 @@ class ChannelData:
         if self.status.link_response_time is not None:
             t += (f"Время ответа: "
                   f"{self.status.link_response_time:.2f} сек\n")
+        if self.status.ttfb_ms is not None:
+            t += f"TTFB: {self.status.ttfb_ms:.0f} мс\n"
+        if self.status.resolution:
+            t += f"Разрешение: {self.status.resolution}\n"
+        if self.link.is_repaired:
+            t += "⚠ Ссылка была автоматически починена " \
+                 "(схема/редирект)\n"
         if self.link.alternative_urls:
             t += (f"Альтернативных ссылок: "
                   f"{len(self.link.alternative_urls)}\n")
@@ -422,6 +457,7 @@ class ChannelData:
             'has_url': self.link.has_url,
             'alternative_urls': list(self.link.alternative_urls),
             'link_source': self.link.link_source,
+            'is_repaired': self.link.is_repaired,
             'url_status': self.status.url_status,
             'url_check_time': (
                 self.status.url_check_time.isoformat()
@@ -430,6 +466,8 @@ class ChannelData:
             'link_response_time': self.status.link_response_time,
             'status_text': self.status.status_text,
             'status_code': self.status.status_code,
+            'resolution': self.status.resolution,
+            'ttfb_ms': self.status.ttfb_ms,
             'modified_date': self.modified_date.isoformat(),
             'original_index': self.original_index,
         }
@@ -503,21 +541,15 @@ class ChannelData:
         ]
         self.link.link_source = _clip(
             data.get('link_source', '') or '', _MAX_SHORT_LEN)
+        self.link.is_repaired = bool(
+            data.get('is_repaired', False))
 
         self.status.url_status = data.get('url_status')
         st = data.get('status_text', StatusText.UNCHECKED)
-        # Валидация: если status_text не из известного набора
-        # StatusText — сбрасываем в UNCHECKED.
-        _valid = {
-            StatusText.UNCHECKED, StatusText.NO_URL,
-            StatusText.WORKING, StatusText.NOT_WORKING,
-            StatusText.UNSUPPORTED, StatusText.TIMEOUT,
-            StatusText.DNS_FAIL, StatusText.CONN_ERROR,
-            StatusText.GEOBLOCK, StatusText.NOT_FOUND,
-            StatusText.CANCELLED, StatusText.BLOCKED_BY_DOMAIN,
-            StatusText.EMPTY_RESPONSE,
-        }
-        if not isinstance(st, str) or st not in _valid:
+        # Валидация по автогенерируемому множеству известных
+        # статусов. При добавлении нового в StatusText —
+        # достаточно перезапустить приложение.
+        if not isinstance(st, str) or st not in _VALID_STATUS_TEXTS:
             st = StatusText.UNCHECKED
         self.status.status_text = st
         sc = data.get('status_code')
@@ -532,6 +564,14 @@ class ChannelData:
                 self.status.link_response_time = float(rt)
             except (ValueError, TypeError):
                 pass
+        res = data.get('resolution')
+        self.status.resolution = _clip(res or '', 32)
+        ttfb = data.get('ttfb_ms')
+        if ttfb is not None:
+            try:
+                self.status.ttfb_ms = float(ttfb)
+            except (ValueError, TypeError):
+                self.status.ttfb_ms = None
         for fld in ('url_check_time', 'modified_date'):
             v = data.get(fld)
             if v:

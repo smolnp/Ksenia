@@ -249,6 +249,8 @@ class CacheManager:
                     status_code INTEGER,
                     successes INTEGER DEFAULT 0,
                     failures INTEGER DEFAULT 0,
+                    ttfb_ms REAL,
+                    resolution TEXT DEFAULT '',
                     PRIMARY KEY (name, url)
                 );
 
@@ -272,11 +274,39 @@ class CacheManager:
                 CREATE INDEX IF NOT EXISTS idx_norm_cached
                     ON normalized_index(cached_at);
             """)
+            # Миграция: добавляем новые колонки, если их нет в
+            # существующей БД (обратная совместимость).
+            cols = {r['name'] for r in
+                    conn.execute(
+                        "PRAGMA table_info(url_status_cache)")}
+            if 'ttfb_ms' not in cols:
+                logger.info(
+                    "Migration: url_status_cache ADD COLUMN ttfb_ms")
+                conn.execute(
+                    "ALTER TABLE url_status_cache "
+                    "ADD COLUMN ttfb_ms REAL")
+            if 'resolution' not in cols:
+                logger.info(
+                    "Migration: url_status_cache "
+                    "ADD COLUMN resolution TEXT DEFAULT ''")
+                conn.execute(
+                    "ALTER TABLE url_status_cache "
+                    "ADD COLUMN resolution TEXT DEFAULT ''")
             conn.commit()
 
     @staticmethod
     def _row_to_check_dict(row: sqlite3.Row) -> Dict[str, Any]:
         sc = row['status_code']
+        # sqlite3.Row поддерживает .keys(); при отсутствии
+        # колонки (очень старая БД) — дефолт.
+        try:
+            ttfb = row['ttfb_ms']
+        except (IndexError, KeyError):
+            ttfb = None
+        try:
+            resolution = row['resolution'] or ''
+        except (IndexError, KeyError):
+            resolution = ''
         return {
             'alive': bool(row['alive']),
             'response_ms': float(row['response_ms'] or 0),
@@ -285,6 +315,8 @@ class CacheManager:
             'status_code': sc if sc is not None and sc >= 0 else None,
             'successes': int(row['successes'] or 0),
             'failures': int(row['failures'] or 0),
+            'ttfb_ms': float(ttfb) if ttfb is not None else None,
+            'resolution': resolution,
         }
 
     @staticmethod
@@ -292,8 +324,9 @@ class CacheManager:
         return """
             INSERT INTO url_status_cache
                 (name, url, alive, response_ms, last_check,
-                 status_text, status_code, successes, failures)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 status_text, status_code, successes, failures,
+                 ttfb_ms, resolution)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(name, url) DO UPDATE SET
                 alive = excluded.alive,
                 response_ms = excluded.response_ms,
@@ -303,12 +336,19 @@ class CacheManager:
                 successes = url_status_cache.successes
                     + excluded.successes,
                 failures = url_status_cache.failures
-                    + excluded.failures
+                    + excluded.failures,
+                ttfb_ms = COALESCE(excluded.ttfb_ms,
+                                   url_status_cache.ttfb_ms),
+                resolution = COALESCE(
+                    NULLIF(excluded.resolution, ''),
+                    url_status_cache.resolution)
         """
 
     def save_check_result(self, name: str, url: str, alive: bool,
                           response_ms: float, status_text: str = "",
-                          status_code: Optional[int] = None) -> None:
+                          status_code: Optional[int] = None,
+                          ttfb_ms: Optional[float] = None,
+                          resolution: str = "") -> None:
         if not name or not url:
             return
         try:
@@ -318,7 +358,9 @@ class CacheManager:
                     name.lower(), url, 1 if alive else 0,
                     response_ms, time.time(), status_text,
                     status_code if status_code is not None else -1,
-                    1 if alive else 0, 0 if alive else 1))
+                    1 if alive else 0, 0 if alive else 1,
+                    ttfb_ms,
+                    (resolution or '')[:32]))
         except sqlite3.ProgrammingError:
             pass
         except Exception:
@@ -334,7 +376,8 @@ class CacheManager:
             conn = self._connect()
             row = conn.execute("""
                 SELECT alive, response_ms, last_check, status_text,
-                       status_code, successes, failures
+                       status_code, successes, failures,
+                       ttfb_ms, resolution
                 FROM url_status_cache
                 WHERE name=? AND url=? AND last_check >= ?
             """, (name.lower(), url, cutoff)).fetchone()
@@ -364,7 +407,7 @@ class CacheManager:
                 rows = conn.execute(f"""
                     SELECT name, url, alive, response_ms,
                            last_check, status_text, status_code,
-                           successes, failures
+                           successes, failures, ttfb_ms, resolution
                     FROM url_status_cache
                     WHERE (name, url) IN ({placeholders})
                       AND last_check >= ?
@@ -381,18 +424,32 @@ class CacheManager:
     def save_check_results_batch(
             self,
             results: List[Tuple[str, str, bool, float, str,
-                                Optional[int]]]) -> None:
+                                Optional[int], Optional[float],
+                                str]]) -> None:
+        """Батч-запись результатов проверок.
+
+        Каждый элемент:
+          (name, url, alive, response_ms, status_text,
+           status_code, ttfb_ms, resolution)
+        """
         if not results:
             return
         now = time.time()
         rows = []
-        for name, url, alive, rt, st, sc in results:
+        for item in results:
+            if len(item) < 6:
+                continue
+            name, url, alive, rt, st, sc = item[:6]
+            ttfb = item[6] if len(item) > 6 else None
+            resolution = item[7] if len(item) > 7 else ""
             if not name or not url:
                 continue
             rows.append((
                 name.lower(), url, 1 if alive else 0, rt, now,
                 st or "", sc if sc is not None else -1,
-                1 if alive else 0, 0 if alive else 1))
+                1 if alive else 0, 0 if alive else 1,
+                ttfb,
+                (resolution or '')[:32]))
         if not rows:
             return
         try:
@@ -402,12 +459,13 @@ class CacheManager:
         except sqlite3.ProgrammingError:
             return
         except Exception:
-            logger.warning("save_check_results_batch failed: %d",
-                           len(rows))
+            logger.warning(
+                "save_check_results_batch failed: %d", len(rows))
             for r in rows:
                 try:
-                    self.save_check_result(r[0], r[1], bool(r[2]),
-                                            r[3], r[4], r[5])
+                    self.save_check_result(
+                        r[0], r[1], bool(r[2]), r[3], r[4],
+                        r[5], r[9], r[10])
                 except Exception:
                     pass
 
@@ -785,8 +843,6 @@ class CacheManager:
             return
         with self._link_cache_lock:
             self._link_cache_put_counter += 1
-            # FIX 9: эвикция раз в 10 записей (а не 50), чтобы
-            # не превышать лимит при интенсивной записи.
             if self._link_cache_put_counter % 10 == 0:
                 self._evict_link_cache_if_needed()
             path = self._link_cache_path(url)

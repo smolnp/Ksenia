@@ -17,7 +17,10 @@ from urllib.parse import urlparse
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-from constants import MAX_URL_LENGTH, MAX_M3U_LINES, StatusText
+from constants import (
+    MAX_URL_LENGTH, MAX_M3U_LINES, StatusText,
+    AUTO_REPAIR_MAX_ATTEMPTS, AUTO_REPAIR_SCHEME_TIMEOUT,
+)
 from logging_setup import logger
 
 from name_normalizer import (  # noqa: F401
@@ -207,6 +210,13 @@ class URLUtils:
                 return StatusText.DNS_FAIL, status_code
             if "connection" in e or "соединени" in e:
                 return StatusText.CONN_ERROR, status_code
+            # Content-Type audit из _check_url_once
+            if "html" in e and "instead" in e:
+                return StatusText.HTML_INSTEAD_OF_STREAM, status_code
+            if "json" in e and "instead" in e:
+                return StatusText.JSON_INSTEAD_OF_STREAM, status_code
+            if "non-video" in e or "не видео" in e:
+                return StatusText.NON_VIDEO_CONTENT, status_code
             return "🆘 " + error[:40], status_code
         if status_code is None:
             return StatusText.UNCHECKED, None
@@ -260,24 +270,74 @@ class URLUtils:
         except socket.gaierror:
             return False
 
+    # ── Content-Type audit ──
+
     @staticmethod
-    def _check_url_once(url: str, timeout: int,
-                        verify_ssl: bool,
-                        user_agent: str = "",
-                        referrer: str = "",
-                        extra_headers=None,
-                        stop_token: Optional['_StopToken'] = None
-                        ) -> Tuple[Optional[bool], Optional[float],
-                                    str, Optional[int]]:
+    def _classify_content_type(ct: str) -> Optional[str]:
+        """Возвращает статус ошибки, если Content-Type не похож
+        на видео/аудио-поток. Иначе None.
+
+        Валидные для IPTV типы:
+          - video/*, audio/*
+          - application/vnd.apple.mpegurl (HLS)
+          - application/x-mpegurl (HLS)
+          - application/dash+xml (DASH)
+          - application/octet-stream (часто .ts/.mp4 без MIME)
+        """
+        if not ct:
+            return None
+        low = ct.lower().split(';', 1)[0].strip()
+        if not low:
+            return None
+        if low.startswith(('video/', 'audio/')):
+            return None
+        if low in (
+                'application/vnd.apple.mpegurl',
+                'application/x-mpegurl',
+                'application/dash+xml',
+                'application/octet-stream',
+                'application/mpegurl',
+                'application/x-mpegURL'.lower(),
+        ):
+            return None
+        if 'text/html' in low or 'application/xhtml' in low:
+            return StatusText.HTML_INSTEAD_OF_STREAM
+        if 'application/json' in low:
+            return StatusText.JSON_INSTEAD_OF_STREAM
+        # image/*, text/plain, application/xml и т.п.
+        return StatusText.NON_VIDEO_CONTENT
+
+    # ── Core single check ──
+
+    @staticmethod
+    def _check_url_once(
+            url: str, timeout: int, verify_ssl: bool,
+            user_agent: str = "",
+            referrer: str = "",
+            extra_headers=None,
+            stop_token: Optional['_StopToken'] = None,
+    ) -> Tuple[Optional[bool], Optional[float], str,
+               Optional[int], Optional[float], Optional[str]]:
+        """Одна попытка проверки URL.
+
+        Возвращает кортеж:
+          (ok, response_time_sec, message, status_code,
+           ttfb_ms, repaired_url)
+
+        repaired_url всегда None здесь — Auto-Repair реализован
+        отдельным методом try_repair() на уровне check_url().
+        """
         if cancelled(stop_token):
-            return None, None, "Отменено", None
+            return None, None, "Отменено", None, None, None
         parsed = urlparse(url)
         if not URLUtils._resolve_dns(parsed.hostname):
-            return False, 0.0, "DNS резолвинг не удался", None
+            return (False, 0.0, "DNS резолвинг не удался",
+                    None, None, None)
         if cancelled(stop_token):
-            return None, None, "Отменено", None
+            return None, None, "Отменено", None, None, None
 
         start = time.time()
+        ttfb: Optional[float] = None
         session = requests.Session()
         headers = {
             'User-Agent': user_agent or
@@ -297,30 +357,130 @@ class URLUtils:
                              allow_redirects=True,
                              verify=verify_ssl,
                              stream=True) as r:
+                # TTFB — время до получения заголовков
+                # (для стримов это то же, что до первого байта
+                # заголовков ответа; для HEAD — приблизительно).
+                ttfb = (time.time() - start) * 1000.0
                 rt = time.time() - start
                 code = r.status_code
                 if code in (200, 206, 301, 302, 304, 307, 308):
+                    # Content-Type audit
+                    ct = r.headers.get('Content-Type', '')
+                    ct_err = URLUtils._classify_content_type(ct)
+                    if ct_err:
+                        return (False, rt,
+                                f"HTTP {code} ({ct[:60]})",
+                                code, ttfb, None)
                     try:
                         chunk = next(
-                            r.iter_content(chunk_size=1024),
-                            None)
+                            r.iter_content(chunk_size=1024), None)
                     except Exception:
                         chunk = None
                     if not chunk:
-                        return False, rt, "Пустой ответ", code
-                    return True, rt, f"HTTP {code}", code
-                return False, rt, f"HTTP {code}", code
+                        return (False, rt, "Пустой ответ",
+                                code, ttfb, None)
+                    return True, rt, f"HTTP {code}", code, ttfb, None
+                return False, rt, f"HTTP {code}", code, ttfb, None
         except requests.Timeout:
-            return False, timeout, "Превышен таймаут", None
+            return False, timeout, "Превышен таймаут", None, None, None
         except requests.ConnectionError:
-            return False, 0.0, "Ошибка соединения", None
+            return (False, 0.0, "Ошибка соединения",
+                    None, None, None)
         except Exception as e:
-            return False, 0.0, f"Ошибка: {str(e)[:60]}", None
+            return (False, 0.0, f"Ошибка: {str(e)[:60]}",
+                    None, None, None)
         finally:
             try:
                 session.close()
             except Exception:
                 pass
+
+    # ── Auto-Repair ──
+
+    @staticmethod
+    def _try_scheme_swap(url: str) -> Optional[str]:
+        """Меняет http↔https и проверяет с коротким таймаутом."""
+        if url.startswith("http://"):
+            alt = "https://" + url[7:]
+        elif url.startswith("https://"):
+            alt = "http://" + url[8:]
+        else:
+            return None
+        try:
+            ok, _rt, _msg, _code, _ttfb, _ = \
+                URLUtils._check_url_once(
+                    alt, AUTO_REPAIR_SCHEME_TIMEOUT,
+                    verify_ssl=False, stop_token=None)
+            if ok is True:
+                logger.info(
+                    "Auto-Repair scheme: %s -> %s",
+                    url[:80], alt[:80])
+                return alt
+        except Exception:
+            logger.debug("Auto-Repair scheme swap failed",
+                         exc_info=True)
+        return None
+
+    @staticmethod
+    def _try_follow_redirects(url: str, timeout: int
+                              ) -> Optional[str]:
+        """GET с follow, но без чтения тела. Возвращает
+        финальный URL, если он отличается от исходного."""
+        try:
+            with requests.Session() as s:
+                with s.get(url, timeout=timeout, stream=True,
+                           allow_redirects=True,
+                           verify=False) as r:
+                    if r.history and r.url != url:
+                        logger.info(
+                            "Auto-Repair redirect: %s -> %s",
+                            url[:80], r.url[:80])
+                        return r.url
+        except Exception:
+            logger.debug("Auto-Repair redirect probe failed",
+                         exc_info=True)
+        return None
+
+    @staticmethod
+    def try_repair(url: str, timeout: int = 3,
+                   max_attempts: int = AUTO_REPAIR_MAX_ATTEMPTS
+                   ) -> Optional[str]:
+        """Пытается починить ссылку: схема http↔https +
+        следование редиректам. Возвращает рабочий URL или None.
+
+        Не пишет в лог шумно — debug для неудач, info для успеха.
+        Не бросает исключений.
+        """
+        if not url or not url.strip():
+            return None
+        current = url.strip()
+        seen = {current}
+        for _ in range(max(1, int(max_attempts))):
+            # 1. Смена схемы
+            new_url = URLUtils._try_scheme_swap(current)
+            if not new_url:
+                # 2. Редиректы
+                new_url = URLUtils._try_follow_redirects(
+                    current, timeout)
+            if not new_url or new_url in seen:
+                return None
+            # Финальная верификация: новый URL должен
+            # действительно открываться.
+            try:
+                ok, _rt, _msg, _code, _ttfb, _ = \
+                    URLUtils._check_url_once(
+                        new_url, timeout,
+                        verify_ssl=False, stop_token=None)
+                if ok is True:
+                    return new_url
+            except Exception:
+                logger.debug(
+                    "Auto-Repair verify failed", exc_info=True)
+            seen.add(new_url)
+            current = new_url
+        return None
+
+    # ── Public check_url ──
 
     @staticmethod
     def check_url(url: str, timeout: int = 3,
@@ -329,27 +489,38 @@ class URLUtils:
                   user_agent: str = "", referrer: str = "",
                   extra_headers=None,
                   retries: int = 0,
-                  retry_delay: float = 0.0
-                  ) -> Tuple[Optional[bool], Optional[float],
-                              str, Optional[int]]:
+                  retry_delay: float = 0.0,
+                  try_repair: bool = False,
+                  ) -> Tuple[Optional[bool], Optional[float], str,
+                              Optional[int], Optional[float],
+                              Optional[str]]:
+        """Проверяет URL. Возвращает 6-tuple:
+
+          (ok, response_time_sec, message, status_code,
+           ttfb_ms, repaired_url)
+
+        Параметр try_repair=True включает Auto-Repair при первой
+        неудаче. Auto-Repair — первый шаг, до обращения к кэшу
+        живых URL (вызывающий код).
+        """
         if not url or not url.strip():
-            return False, None, "Пустой URL", None
+            return False, None, "Пустой URL", None, None, None
         if cancelled(stop_token):
-            return None, None, "Отменено", None
+            return None, None, "Отменено", None, None, None
         retries = max(0, int(retries))
         retry_delay = max(0.0, float(retry_delay))
         last = URLUtils._check_url_once(
             url, timeout, verify_ssl, user_agent=user_agent,
             referrer=referrer, extra_headers=extra_headers,
             stop_token=stop_token)
-        ok, _rt, msg, code = last
+        ok, _rt, msg, code, _ttfb, _ = last
         if ok is True or code in (403, 404) or retries == 0:
             return last
         if msg and 'DNS' in msg:
             return last
         for _ in range(retries):
             if cancelled(stop_token):
-                return None, None, "Отменено", None
+                return None, None, "Отменено", None, None, None
             if retry_delay > 0:
                 time.sleep(retry_delay)
             result = URLUtils._check_url_once(
@@ -357,7 +528,7 @@ class URLUtils:
                 user_agent=user_agent, referrer=referrer,
                 extra_headers=extra_headers,
                 stop_token=stop_token)
-            ok, _rt, msg, code = result
+            ok, _rt, msg, code, _ttfb, _ = result
             if ok is True or code in (403, 404):
                 return result
             if msg and 'DNS' in msg:

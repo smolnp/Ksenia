@@ -28,6 +28,7 @@ from constants import (
     ALIVE_INDEX_CACHE_MAX, StatusText,
     SEARCH_FUTURES_TIMEOUT_SEC, MAX_CHANNELS_PER_PLAYLIST,
     NORMALIZATION_SETTINGS_KEYS)
+from ffprobe_utils import resolution_rank
 from logging_setup import logger
 from models import ChannelData
 from parsers import M3UParser
@@ -70,8 +71,7 @@ class LinkSource:
         'last_error', 'last_attempt', 'consecutive_errors',
         'apply_blacklist', 'apply_domain_blacklist',
         'total_working', 'working_checked_at',
-        'raw_total_links', 'raw_total_with_url',
-        'generated')
+        'raw_total_links', 'raw_total_with_url')
 
     def __init__(self):
         self.name: str = ""
@@ -94,7 +94,6 @@ class LinkSource:
         self.working_checked_at: Optional[float] = None
         self.raw_total_links: int = 0
         self.raw_total_with_url: int = 0
-        self.generated: bool = False
 
     def should_refresh(self) -> bool:
         if not self.auto_update:
@@ -139,7 +138,6 @@ class LinkSource:
             'working_checked_at': self.working_checked_at,
             'raw_total_links': self.raw_total_links,
             'raw_total_with_url': self.raw_total_with_url,
-            'generated': self.generated,
         }
 
     @classmethod
@@ -165,7 +163,6 @@ class LinkSource:
             data.get('apply_blacklist', True))
         s.apply_domain_blacklist = bool(
             data.get('apply_domain_blacklist', True))
-        s.generated = bool(data.get('generated', False))
         for fld in ('last_updated', 'last_attempt'):
             dt = parse_datetime(data.get(fld))
             if dt is not None:
@@ -275,8 +272,13 @@ class LinkSourceManager:
 
     def _persist(self) -> bool:
         with self._lock:
-            self._store._data = [s.to_dict()
-                                  for s in self._sources]
+            try:
+                self._store._data = [s.to_dict()
+                                      for s in self._sources]
+            except Exception:
+                logger.exception(
+                    "_persist: to_dict failed for one of sources")
+                return False
         return self._store.save()
 
     def add_source(self, source: LinkSource) -> bool:
@@ -305,30 +307,6 @@ class LinkSourceManager:
             except Exception:
                 logger.exception("clear_normalized_index")
         return self._persist()
-
-    def remove_generated_sources(self) -> int:
-        with self._lock:
-            before = len(self._sources)
-            removed_names = [s.name for s in self._sources
-                             if s.generated]
-            self._sources = [s for s in self._sources
-                             if not s.generated]
-            for name in removed_names:
-                self._loaded.pop(name, None)
-                self._name_index.pop(name, None)
-                self._alive_index.pop(name, None)
-            self._alive_index_cache.clear()
-            self._alive_index_cache_key = None
-            removed = before - len(self._sources)
-        if removed and self.cache_manager is not None:
-            for name in removed_names:
-                try:
-                    self.cache_manager.clear_normalized_index(name)
-                except Exception:
-                    logger.exception("clear_normalized_index")
-        if removed:
-            self._persist()
-        return removed
 
     def update_source(self, old_name: str,
                       new_source: LinkSource) -> bool:
@@ -460,10 +438,13 @@ class LinkSourceManager:
 
     def _build_alive_index(
             self, channels: List[ChannelData], bl_mgr,
-            temp_domains: List[str],
-            unsafe_domains: List[str],
             settings: Optional[LinkReplacementSettings] = None
     ) -> Dict[str, List[ChannelData]]:
+        """Строит индекс «ключ поиска → живые каналы».
+
+        Фильтрация по temp_domains/unsafe_domains выполняется
+        через settings.is_filtered_domain() — не дублируем.
+        """
         alive_index: Dict[str, List[ChannelData]] = defaultdict(
             list)
         if self.cache_manager is None or not channels:
@@ -512,6 +493,10 @@ class LinkSourceManager:
             if not info.get('alive'):
                 continue
             for ch in ch_by_pair.get(pair, ()):
+                with suppress(Exception):
+                    ch.status.ttfb_ms = info.get('ttfb_ms')
+                    ch.status.resolution = \
+                        info.get('resolution') or ''
                 for key in ch.search_keys(settings):
                     alive_index[key].append(ch)
         return dict(alive_index)
@@ -590,8 +575,6 @@ class LinkSourceManager:
             self, name: str, path: str,
             channels: List[ChannelData],
             bl_mgr=None,
-            temp_domains: Optional[List[str]] = None,
-            unsafe_domains: Optional[List[str]] = None,
             settings: Optional[LinkReplacementSettings] = None
     ):
         if not name:
@@ -638,10 +621,7 @@ class LinkSourceManager:
                 for key in ch.search_keys(settings):
                     index[key].append(ch)
             alive_index = self._build_alive_index(
-                channels, bl_mgr,
-                temp_domains or [],
-                unsafe_domains or [],
-                settings=settings)
+                channels, bl_mgr, settings=settings)
 
         with self._lock:
             self._loaded[name] = (time.time(), path, channels)
@@ -668,8 +648,6 @@ class LinkSourceManager:
     def rebuild_alive_index(
             self, source_name: Optional[str] = None,
             blacklist_manager=None,
-            temp_domains: Optional[List[str]] = None,
-            unsafe_domains: Optional[List[str]] = None,
             settings: Optional[LinkReplacementSettings] = None
     ) -> int:
         if self.cache_manager is None:
@@ -690,9 +668,7 @@ class LinkSourceManager:
             if not channels:
                 continue
             alive_index = self._build_alive_index(
-                channels, blacklist_manager,
-                temp_domains or [], unsafe_domains or [],
-                settings=settings)
+                channels, blacklist_manager, settings=settings)
             with self._lock:
                 self._alive_index[name] = alive_index
                 self._alive_index.move_to_end(name)
@@ -821,10 +797,6 @@ class LinkSourceManager:
             self._store_loaded(
                 source.name, source.path, channels,
                 blacklist_manager,
-                list(config.get('temporary_domains', []))
-                if config else [],
-                list(config.get('unsafe_domains', []))
-                if config else [],
                 settings=settings)
             self._persist()
         except InputValidationError as e:
@@ -1072,7 +1044,8 @@ class LinkSourceManager:
             self, keys: frozenset,
             settings: LinkReplacementSettings,
             limit: int) -> List[str]:
-        results: List[str] = []
+        candidates: List[Tuple[
+            int, float, int, int, str]] = []
         seen: Set[str] = set()
         sources = sorted(
             self._sources,
@@ -1080,7 +1053,7 @@ class LinkSourceManager:
         for src in sources:
             if not src.enabled:
                 continue
-            if len(results) >= limit:
+            if len(candidates) >= limit * 3:
                 break
             alive_index = self._alive_index.get(src.name)
             if not alive_index:
@@ -1095,12 +1068,26 @@ class LinkSourceManager:
                     if settings.is_filtered_domain(url):
                         continue
                     seen.add(url)
-                    results.append(url)
-                    if len(results) >= limit:
-                        break
-                if len(results) >= limit:
-                    break
-        return results
+
+                    st = ch.status
+                    if st.url_status is False:
+                        continue
+                    alive_rank = (0 if st.url_status is True
+                                   else 1)
+                    ttfb = (st.ttfb_ms
+                            if st.ttfb_ms is not None else 1e9)
+                    res_rank = resolution_rank(
+                        st.resolution or "")
+                    candidates.append((
+                        alive_rank,
+                        float(ttfb),
+                        -res_rank,
+                        int(src.priority),
+                        url,
+                    ))
+
+        candidates.sort(key=lambda x: x[:4])
+        return [c[4] for c in candidates[:limit]]
 
     def get_alive_urls_for_keys(
             self, keys: Set[str],
@@ -1283,9 +1270,6 @@ class LinkSourceManager:
                 keys_cache[ch.uid] = k
             return k
 
-        # FIX 10: параллелим загрузку источников и для exact —
-        # это I/O-bound операция, и последовательная загрузка
-        # 50 источников занимает слишком много времени.
         ex = self._get_search_pool()
         futures = {
             ex.submit(

@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from PyQt6.QtCore import (QAbstractTableModel, QMimeData,
                             QModelIndex, Qt, pyqtSignal)
-from PyQt6.QtGui import QColor
+from PyQt6.QtGui import QColor, QIcon, QPixmap
 
 from channel_columns import ColumnSpec, columns_for_channels
 from constants import (
@@ -32,6 +32,21 @@ def _get_core_if_gui():
         return ApplicationCore.try_get_if_gui_thread()
     except Exception:
         return None
+
+
+def _resolution_qcolor(ch: ChannelData) -> Optional[QColor]:
+    """Цветовая метка разрешения (для колонки «Качество»).
+    Возвращает None, если разрешение не определено."""
+    res = (ch.status.resolution or "").lower()
+    if not res:
+        return None
+    if "4k" in res or "2160" in res:
+        return QColor(255, 200, 0)      # 4K — золотой
+    if "1080" in res:
+        return QColor(50, 190, 100)     # 1080p — зелёный
+    if "720" in res:
+        return QColor(60, 170, 230)     # 720p — голубой
+    return QColor(150, 150, 150)        # SD/прочее — серый
 
 
 class ChannelTableModel(QAbstractTableModel):
@@ -227,7 +242,8 @@ class ChannelTableModel(QAbstractTableModel):
                 if (s in (ch.meta.name or "").lower() or
                     s in (ch.meta.group or "").lower() or
                     s in (ch.meta.tvg_id or "").lower() or
-                    s in (ch.link.url or "").lower())
+                    s in (ch.link.url or "").lower() or
+                    s in (ch.status.resolution or "").lower())
             ]
         self._filtered = filtered
 
@@ -325,19 +341,42 @@ class ChannelTableModel(QAbstractTableModel):
         if role == Qt.ItemDataRole.UserRole:
             return ch.uid
 
-        if spec.key == "name" and role == Qt.ItemDataRole.BackgroundRole:
-            if self._duplicate_mode:
-                c = self._dup_color_for_uid(ch.uid)
-                if c is not None:
-                    return c
-            if (not ch.has_valid_url
-                    and self._has_any_metadata(ch)):
-                return semantic_colors()['orphan_bg']
+        if spec.key == "name":
+            if role == Qt.ItemDataRole.BackgroundRole:
+                if self._duplicate_mode:
+                    c = self._dup_color_for_uid(ch.uid)
+                    if c is not None:
+                        return c
+                if (not ch.has_valid_url
+                        and self._has_any_metadata(ch)):
+                    return semantic_colors()['orphan_bg']
+                return None
+            if role == Qt.ItemDataRole.ForegroundRole:
+                if self._duplicate_mode:
+                    return self._dup_text_color_for_uid(ch.uid)
+                return None
+            # Квадратик разрешения убран: разрешение теперь
+            # отображается цветными цифрами в колонке «Качество».
             return None
 
-        if spec.key == "name" and role == Qt.ItemDataRole.ForegroundRole:
-            if self._duplicate_mode:
-                return self._dup_text_color_for_uid(ch.uid)
+        if spec.key == "resolution":
+            # «—» (пустое значение) не подсвечиваем цветом —
+            # используем нейтральный цвет из палитры.
+            if role == Qt.ItemDataRole.ForegroundRole:
+                if not ch.status.resolution:
+                    return semantic_colors()['no_url']
+                return _resolution_qcolor(ch)
+            if role == Qt.ItemDataRole.BackgroundRole:
+                if not ch.status.resolution:
+                    return None
+                color = _resolution_qcolor(ch)
+                if color is not None:
+                    bg = QColor(color)
+                    bg.setAlpha(40)
+                    return bg
+                return None
+            if role == Qt.ItemDataRole.TextAlignmentRole:
+                return Qt.AlignmentFlag.AlignCenter
             return None
 
         if spec.key == "url":
@@ -423,24 +462,12 @@ class ChannelTableModel(QAbstractTableModel):
         if not uids:
             return False
 
-        # FIX 7: различаем «вставить перед строкой» и
-        # «вставить после строки» по позиции drop.
-        #
-        # Qt передаёт:
-        #   • parent.isValid() → drop «в» строку parent.row();
-        #   • row == -1 → drop в конец;
-        #   • row == N → drop между N-1 и N.
-        #
-        # Для внутреннего drag&drop нам нужно знать, куда
-        # пользователь целился: до или после target_row.
-        # Вычисляем это по глобальной позиции курсора и
-        # геометрии target-строки.
         insert_after = False
         target_row = -1
         if parent.isValid():
             target_row = parent.row()
             try:
-                pos = self._last_drop_pos  # ставится в view
+                pos = self._last_drop_pos
             except AttributeError:
                 pos = None
             if pos is not None and 0 <= target_row < self.rowCount():
@@ -450,7 +477,7 @@ class ChannelTableModel(QAbstractTableModel):
                     insert_after = pos.y() > mid_y
         elif row >= 0 and row < len(self._filtered):
             target_row = row
-            insert_after = True   # явный drop «после» row
+            insert_after = True
         else:
             target_row = -1
 
@@ -518,6 +545,7 @@ class ChannelTableModel(QAbstractTableModel):
             ch.link.link_source = ""
             ch.link.user_agent = ""
             ch.link.extra_headers.clear()
+            ch.link.is_repaired = False
             ch.status.reset()
             if core is not None:
                 core.domain_user_agent_manager\

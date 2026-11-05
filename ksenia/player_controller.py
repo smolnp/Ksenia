@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import QAbstractItemView
 from dialogs_base import _is_qobject_valid
 from logging_setup import logger
 from models import ChannelData
-from paths import error_box, warn_box
+from paths import error_box, info_box, warn_box
 from player import (EmbeddedPlayerDialog, get_mpv_error,
                     is_mpv_available)
 
@@ -38,15 +38,19 @@ class PlayerController(QObject):
 
     @staticmethod
     def _get_visible_channels(tab) -> List[ChannelData]:
+        """Возвращает каналы, видимые в текущем фильтре.
+
+        ВАЖНО: если фильтр активен и даёт 0 результатов,
+        возвращаем пустой список — плеер не должен
+        «прыгать» на все каналы.
+        """
         model = getattr(tab, 'model', None)
         if model is None:
             return list(getattr(tab, 'all_channels', []) or [])
         fn = getattr(model, 'channels_filtered', None)
         if callable(fn):
             try:
-                result = list(fn())
-                if result:
-                    return result
+                return list(fn())
             except Exception:
                 logger.exception("channels_filtered")
         return list(getattr(tab, 'all_channels', []) or [])
@@ -70,6 +74,13 @@ class PlayerController(QObject):
             return
         self.close_dialog()
         playlist = self._get_visible_channels(tab)
+        if not playlist:
+            # Фильтр дал 0 каналов — не запускаем плеер,
+            # чтобы не подменять плейлист «всеми каналами».
+            info_box(tab,
+                     "В текущем фильтре нет каналов.",
+                     "Плеер")
+            return
         dlg = EmbeddedPlayerDialog(ch, tab, playlist=playlist)
         dlg.channel_changed.connect(
             self._on_channel_changed_from_player)

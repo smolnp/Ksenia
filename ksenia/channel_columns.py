@@ -40,6 +40,19 @@ def _index_sort(ch: ChannelData) -> Any:
             else 10**12)
 
 
+def _resolution_value(ch: ChannelData) -> str:
+    """Пустое разрешение показываем как «—», чтобы колонка
+    не выглядела «сломанной» до запуска ffprobe."""
+    return ch.status.resolution or "—"
+
+
+def _resolution_sort(ch: ChannelData) -> Any:
+    """Сортировка по разрешению (лучшее — первым)."""
+    from ffprobe_utils import resolution_rank
+    return (-resolution_rank(ch.status.resolution or ""),
+            ch.status.resolution or "")
+
+
 ALL_COLUMNS: List[ColumnSpec] = [
     ColumnSpec(
         key="index",
@@ -102,6 +115,7 @@ ALL_COLUMNS: List[ColumnSpec] = [
         alignment="left",
         min_width=80,
     ),
+    # ── URL идёт ПЕРЕД «Качество» ──
     ColumnSpec(
         key="url",
         title="URL",
@@ -113,6 +127,17 @@ ALL_COLUMNS: List[ColumnSpec] = [
         min_width=200,
         stretch=True,
     ),
+    # ── «Качество» — после URL ──
+    ColumnSpec(
+        key="resolution",
+        title="Качество",
+        weight=COLUMN_OPTIONAL,
+        get_value=_resolution_value,
+        sort_key=_resolution_sort,
+        editable=False,
+        alignment="center",
+        min_width=80,
+    ),
 ]
 
 
@@ -123,7 +148,6 @@ def columns_for_channels(
 ) -> List[ColumnSpec]:
     user_keys = set(user_visible_keys or [])
     hidden = set(hidden_keys or [])
-    explicit_optional = user_visible_keys is not None
 
     result: List[ColumnSpec] = []
     for spec in ALL_COLUMNS:
@@ -136,8 +160,13 @@ def columns_for_channels(
                 continue
             if spec.key in ("tvg_id", "logo"):
                 result.append(spec)
-            elif explicit_optional and spec.key not in user_keys:
-                continue
+            elif spec.key == "resolution":
+                # «Качество» показываем ВСЕГДА: пользователь
+                # должен видеть колонку ещё до запуска ffprobe.
+                # Скрыть можно только явно через hidden_keys.
+                result.append(spec)
+            elif spec.key in user_keys:
+                result.append(spec)
             elif any(spec.get_value(ch) for ch in channels):
                 result.append(spec)
             continue

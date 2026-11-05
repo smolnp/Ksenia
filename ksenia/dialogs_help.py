@@ -7,13 +7,16 @@ from __future__ import annotations
 import os
 import re
 from contextlib import suppress
+from typing import List, Optional, Tuple
 
 from PyQt6.QtCore import Qt, QTimer, QUrl
 from PyQt6.QtGui import (
-    QDesktopServices, QKeySequence, QPalette, QShortcut)
+    QDesktopServices, QKeySequence, QPalette, QShortcut,
+    QTextCursor, QTextDocument)
 from PyQt6.QtWidgets import (
     QApplication, QDialogButtonBox, QHBoxLayout, QLabel,
-    QPlainTextEdit, QPushButton, QTabWidget, QTextBrowser,
+    QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit,
+    QPushButton, QSplitter, QTabWidget, QTextBrowser,
     QVBoxLayout, QWidget)
 
 from constants import (APP_VERSION, CLOSE_BB, DONATION_URL,
@@ -30,9 +33,10 @@ _ID_ATTR_RE = re.compile(r'\bid\s*=\s*["\']([^"\']+)["\']',
                           re.IGNORECASE)
 
 
-def _generate_toc(html: str) -> str:
+def _generate_toc(html: str) -> Tuple[str, List[Tuple[str, str]]]:
+    """Возвращает (html с id у заголовков, список (anchor, title))."""
     counter = [0]
-    items = []
+    items: List[Tuple[str, str]] = []
 
     def _replace(m):
         level = int(m.group(1))
@@ -47,31 +51,25 @@ def _generate_toc(html: str) -> str:
             attrs = attrs + f' id="{anchor}"'
         title = re.sub(r"<[^>]+>", "", inner).strip()
         if title:
-            indent = "" if level == 2 else "&nbsp;" * 4
-            items.append(
-                f'<li><a href="#{anchor}">'
-                f'{indent}{title}</a></li>')
+            items.append((anchor, title))
         return f'<h{level}{attrs}>{inner}</h{level}>'
 
     html_with_ids = _HEADING_RE.sub(_replace, html)
-    if not items:
-        return html_with_ids
-    toc_html = '<ul>' + ''.join(items) + '</ul>'
-    return re.sub(
-        r'<div\s+id\s*=\s*["\']toc["\']\s*>\s*</div>',
-        f'<div id="toc">{toc_html}</div>',
-        html_with_ids, count=1, flags=re.IGNORECASE)
+    return html_with_ids, items
 
 
 class HelpBrowser(BaseDialog):
     def __init__(self, index_path: str, parent=None):
         super().__init__("Справка — Ksenia M3U Editor", parent,
-                          size=(1000, 720))
+                          size=(1200, 800))
 
         self.index_path = os.path.abspath(index_path)
         self.help_dir = os.path.dirname(self.index_path)
         self._current_file = ""
         self._theme_handler_connected = False
+        self._history: List[Tuple[str, str]] = []  # (file, fragment)
+        self._history_pos: int = -1
+        self._current_toc: List[Tuple[str, str]] = []
 
         if not os.path.isfile(self.index_path):
             error_box(
@@ -81,38 +79,7 @@ class HelpBrowser(BaseDialog):
             QTimer.singleShot(0, self.reject)
             return
 
-        nav = QHBoxLayout()
-        self.btn_home = QPushButton("🏠 Домой")
-        self.btn_refresh = QPushButton("🔄")
-        self.btn_refresh.setToolTip("Обновить страницу (F5)")
-        nav.addWidget(self.btn_home)
-        nav.addWidget(self.btn_refresh)
-        nav.addStretch()
-
-        self.path_label = QLabel("")
-        self.path_label.setForegroundRole(
-            QPalette.ColorRole.PlaceholderText)
-        f = self.path_label.font()
-        f.setPointSize(max(8, f.pointSize() - 1))
-        self.path_label.setFont(f)
-        nav.addWidget(self.path_label)
-        self.root.addLayout(nav)
-
-        self.viewer = QTextBrowser()
-        self.viewer.setOpenExternalLinks(False)
-        self.viewer.setOpenLinks(False)
-        self.viewer.anchorClicked.connect(self._on_anchor)
-        self.viewer.setLineWrapMode(
-            QTextBrowser.LineWrapMode.WidgetWidth)
-        self.root.addWidget(self.viewer, 1)
-
-        self.btn_home.clicked.connect(self._go_home)
-        self.btn_refresh.clicked.connect(self._reload)
-        QShortcut(QKeySequence("F5"), self,
-                  activated=self._reload)
-        QShortcut(QKeySequence("Home"), self,
-                  activated=self._go_home)
-
+        self._setup_ui()
         self._go_home()
 
         app = QApplication.instance()
@@ -128,11 +95,108 @@ class HelpBrowser(BaseDialog):
         bb.rejected.connect(self.reject)
         self.root.addWidget(bb)
 
+    def _setup_ui(self):
+        # Верхняя панель навигации
+        nav = QHBoxLayout()
+        self.btn_back = QPushButton("◀ Назад")
+        self.btn_back.setToolTip("Назад (Alt+Left)")
+        self.btn_back.clicked.connect(self._nav_back)
+        self.btn_forward = QPushButton("Вперёд ▶")
+        self.btn_forward.setToolTip("Вперёд (Alt+Right)")
+        self.btn_forward.clicked.connect(self._nav_forward)
+        self.btn_home = QPushButton("🏠 Домой")
+        self.btn_home.setToolTip("На главную (Home)")
+        self.btn_home.clicked.connect(self._go_home)
+        self.btn_refresh = QPushButton("🔄")
+        self.btn_refresh.setToolTip("Обновить страницу (F5)")
+        self.btn_refresh.clicked.connect(self._reload)
+
+        nav.addWidget(self.btn_back)
+        nav.addWidget(self.btn_forward)
+        nav.addWidget(self.btn_home)
+        nav.addWidget(self.btn_refresh)
+        nav.addStretch()
+
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText(
+            "Поиск по странице… (Ctrl+F)")
+        self.search_edit.setMaximumWidth(280)
+        self.search_edit.textChanged.connect(self._on_search_changed)
+        nav.addWidget(self.search_edit)
+
+        self.path_label = QLabel("")
+        self.path_label.setForegroundRole(
+            QPalette.ColorRole.PlaceholderText)
+        f = self.path_label.font()
+        f.setPointSize(max(8, f.pointSize() - 1))
+        self.path_label.setFont(f)
+        nav.addWidget(self.path_label)
+        self.root.addLayout(nav)
+
+        # Основная область: боковая панель + контент
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+
+        # Левая панель: оглавление
+        left = QWidget()
+        left_l = QVBoxLayout(left)
+        left_l.setContentsMargins(0, 0, 0, 0)
+        left_l.addWidget(QLabel("<b>Содержание</b>"))
+        self.toc_list = QListWidget()
+        self.toc_list.setMaximumWidth(280)
+        self.toc_list.itemClicked.connect(self._on_toc_clicked)
+        self.toc_list.itemActivated.connect(self._on_toc_clicked)
+        left_l.addWidget(self.toc_list, 1)
+        splitter.addWidget(left)
+
+        # Правая панель: контент
+        self.viewer = QTextBrowser()
+        self.viewer.setOpenExternalLinks(False)
+        self.viewer.setOpenLinks(False)
+        self.viewer.anchorClicked.connect(self._on_anchor)
+        self.viewer.setLineWrapMode(
+            QTextBrowser.LineWrapMode.WidgetWidth)
+        splitter.addWidget(self.viewer)
+
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([260, 940])
+        self.root.addWidget(splitter, 1)
+
+        # Горячие клавиши
+        QShortcut(QKeySequence("F5"), self,
+                  activated=self._reload)
+        QShortcut(QKeySequence("Home"), self,
+                  activated=self._go_home)
+        QShortcut(QKeySequence("Alt+Left"), self,
+                  activated=self._nav_back)
+        QShortcut(QKeySequence("Alt+Right"), self,
+                  activated=self._nav_forward)
+        QShortcut(QKeySequence("Ctrl+F"), self,
+                  activated=self._focus_search)
+
+    def _focus_search(self):
+        self.search_edit.setFocus()
+        self.search_edit.selectAll()
+
+    def _on_search_changed(self, text: str):
+        q = (text or "").strip()
+        if not q:
+            return
+        cursor = self.viewer.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.Start)
+        self.viewer.setTextCursor(cursor)
+        found = self.viewer.find(q)
+        if not found:
+            cursor.movePosition(QTextCursor.MoveOperation.Start)
+            self.viewer.setTextCursor(cursor)
+            self.viewer.find(q)
+
     def _on_palette_changed(self, *_args):
         self._reload()
 
     def _prepare_html(self, raw_html: str) -> str:
-        html = _generate_toc(raw_html)
+        html, toc = _generate_toc(raw_html)
+        self._current_toc = toc
         extra = (
             "<style>"
             "pre, code, kbd { font-family: 'Consolas', "
@@ -149,8 +213,52 @@ class HelpBrowser(BaseDialog):
             html = extra + html
         return html
 
+    def _populate_toc(self):
+        self.toc_list.clear()
+        for anchor, title in self._current_toc:
+            item = QListWidgetItem(title)
+            item.setData(Qt.ItemDataRole.UserRole, anchor)
+            self.toc_list.addItem(item)
+
+    def _on_toc_clicked(self, item: QListWidgetItem):
+        anchor = item.data(Qt.ItemDataRole.UserRole)
+        if anchor:
+            self.viewer.scrollToAnchor(anchor)
+
+    def _push_history(self, file_path: str, fragment: str = ""):
+        # Обрезаем «будущее» после текущей позиции
+        if self._history_pos < len(self._history) - 1:
+            self._history = self._history[:self._history_pos + 1]
+        self._history.append((file_path, fragment))
+        self._history_pos = len(self._history) - 1
+        self._update_nav_buttons()
+
+    def _update_nav_buttons(self):
+        self.btn_back.setEnabled(self._history_pos > 0)
+        self.btn_forward.setEnabled(
+            self._history_pos < len(self._history) - 1)
+
+    def _nav_back(self):
+        if self._history_pos <= 0:
+            return
+        self._history_pos -= 1
+        file_path, fragment = self._history[self._history_pos]
+        self._load_html_page(file_path, fragment=fragment,
+                              preserve_scroll=False,
+                              push_history=False)
+
+    def _nav_forward(self):
+        if self._history_pos >= len(self._history) - 1:
+            return
+        self._history_pos += 1
+        file_path, fragment = self._history[self._history_pos]
+        self._load_html_page(file_path, fragment=fragment,
+                              preserve_scroll=False,
+                              push_history=False)
+
     def _load_html_page(self, file_path: str, fragment: str = "",
-                        preserve_scroll: bool = True):
+                        preserve_scroll: bool = True,
+                        push_history: bool = True):
         if not file_path or not os.path.isfile(file_path):
             logger.warning("Help file not found: %s", file_path)
             return
@@ -175,7 +283,12 @@ class HelpBrowser(BaseDialog):
 
         self._current_file = file_path
         self.viewer.setHtml(html)
-        self.path_label.setText(os.path.basename(file_path))
+        self.path_label.setText(
+            os.path.relpath(file_path, self.help_dir))
+        self._populate_toc()
+
+        if push_history:
+            self._push_history(file_path, fragment)
 
         if fragment:
             QTimer.singleShot(
@@ -186,13 +299,16 @@ class HelpBrowser(BaseDialog):
                 0, lambda v=scroll:
                     self.viewer.verticalScrollBar().setValue(v))
 
+        self._update_nav_buttons()
+
     def _go_home(self):
         self._load_html_page(self.index_path,
                              preserve_scroll=False)
 
     def _reload(self):
         target = self._current_file or self.index_path
-        self._load_html_page(target, preserve_scroll=True)
+        self._load_html_page(target, preserve_scroll=True,
+                              push_history=False)
 
     def _on_anchor(self, url: QUrl):
         if url.scheme() in ("http", "https", "mailto"):

@@ -66,7 +66,6 @@ SOURCE_CHECK_TIMEOUT_DEFAULT = 3
 SOURCE_CHECK_TRUST_SEC_DEFAULT = 3600
 SEARCH_FUTURES_TIMEOUT_SEC = 300
 FUTURES_SHUTDOWN_WAIT_SEC = 5.0
-GITHUB_API_TIMEOUT_SEC = 15
 SQLITE_BATCH_CHUNK = 300
 MAX_CHANNELS_PER_PLAYLIST = 500_000
 
@@ -134,16 +133,22 @@ OK_CANCEL_BB = (QDialogButtonBox.StandardButton.Ok |
                 QDialogButtonBox.StandardButton.Cancel)
 CLOSE_BB = QDialogButtonBox.StandardButton.Close
 
-# Авто-поиск источников (лимиты, не ссылки).
-SOURCES_FINDER_MAX_GITHUB_DEFAULT = 15
-SOURCES_FINDER_MAX_M3UGUIDE_DEFAULT = 10
-SOURCES_FINDER_MAX_AGE_DAYS = 30
-SOURCES_FINDER_HEALTH_WORKERS = 8
-SOURCES_FINDER_HEALTH_TIMEOUT = 8
-SOURCES_FINDER_HEALTH_MAX_BYTES = 8192
-SOURCES_FINDER_UPDATE_INTERVAL_HOURS = 24
-# Слова-фильтры для результатов авто-поиска (не ссылки).
-SOURCES_FINDER_EXCLUDE_KEYWORDS = ('zabava', 'забава', 'wink')
+# ── ffprobe (определение реального разрешения потока) ──
+FFPROBE_TIMEOUT_SEC = 5
+FFPROBE_PATH = "ffprobe"
+FFPROBE_MAX_WORKERS = 4
+
+# ── Auto-Repair (починка битых ссылок до обращения к кэшу) ──
+AUTO_REPAIR_MAX_ATTEMPTS = 2
+AUTO_REPAIR_SCHEME_TIMEOUT = 3
+
+# ── Авто-проверка ссылок ──
+# Раз в N часов проверять все ссылки во всех открытых
+# вкладках (в фоне). 0 = отключено.
+AUTO_CHECK_INTERVAL_HOURS_DEFAULT = 24
+# Минимальный интервал между авто-проверками (защита от
+# слишком частого запуска, если пользователь выставил 0).
+AUTO_CHECK_MIN_INTERVAL_HOURS = 1
 
 
 class StatusText:
@@ -160,3 +165,16 @@ class StatusText:
     CANCELLED = "⏹ Отменено"
     BLOCKED_BY_DOMAIN = "🚫 Заблокирован ЧС домен/IP"
     EMPTY_RESPONSE = "📭 Пустой ответ"
+    # ── Content-Type audit ──
+    HTML_INSTEAD_OF_STREAM = "📄 HTML вместо потока"
+    JSON_INSTEAD_OF_STREAM = "📄 JSON вместо потока"
+    NON_VIDEO_CONTENT = "📄 Не видео-контент"
+    # ── Auto-Repair ──
+    REPAIRED = "🔧 Починена"
+    # ── ffprobe ──
+    FFPROBE_MISSING = "🎬 ffprobe недоступен"
+
+
+# ── Кодировки при сохранении (для «Сохранить как») ──
+# 'auto' = как в исходном файле.
+SAVE_ENCODINGS = ('auto', 'utf-8', 'utf-8-sig', 'cp1251')

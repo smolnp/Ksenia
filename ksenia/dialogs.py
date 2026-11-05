@@ -13,7 +13,7 @@ from dialogs_help import (  # noqa: F401
     HelpBrowser, HelpDialog, SupportDialog,
 )
 from dialogs_edit import (  # noqa: F401
-    PlaylistHeaderDialog, RemoveMetadataDialog, MassEditDialog,
+    PlaylistHeaderDialog, RemoveMetadataDialog,
     DuplicateFinderDialog, ComparePlaylistsDialog,
     GroupTemplateListDialog,
 )
@@ -22,7 +22,7 @@ from dialogs_blacklist import (  # noqa: F401
     DomainUserAgentEditDialog, DomainUserAgentDialog,
 )
 from dialogs_sources import (  # noqa: F401
-    LinkSourceEditDialog, SourcesFinderDialog,
+    LinkSourceEditDialog,
     LinkSourceManagerDialog, LinkSelectionDialog,
     PlaylistCreationOptions, PlaylistFromSourcesDialog,
 )

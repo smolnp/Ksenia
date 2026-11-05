@@ -1,7 +1,11 @@
 # Copyright (C) 2025 SmolNP
 # SPDX-License-Identifier: GPL-3.0-or-later
 # См. LICENSE в корне проекта.
-"""Встроенный плеер на mpv через QProcess --wid + JSON IPC."""
+"""Встроенный плеер на mpv через QProcess --wid + JSON IPC.
+
+Путь к mpv: сначала явный `mpv_path` из конфига (если задан),
+затем стандартные пути + PATH.
+"""
 from __future__ import annotations
 
 import json
@@ -32,59 +36,124 @@ from theme import hint_hex
 from utils import URLUtils
 
 
-# ── Поиск mpv ──────────────────────────────────────────────────
+# Кеш поиска mpv.
+_find_mpv_lock = threading.Lock()
+_find_mpv_cache: Optional[str] = None
+_find_mpv_done: bool = False
+
 
 def _app_dir() -> str:
-    """Папка, где лежит ksenia.exe (frozen) или ksenia.py."""
     if getattr(sys, 'frozen', False):
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
 
 
 def _bundle_dir() -> str:
-    """Временная папка распаковки PyInstaller (_MEIPASS) или app_dir."""
     if getattr(sys, 'frozen', False):
         return getattr(sys, '_MEIPASS', _app_dir())
     return _app_dir()
 
 
-def find_mpv() -> Optional[str]:
-    """Ищет mpv в таком порядке (первый найденный побеждает):
+def _configured_mpv_path() -> str:
+    """Путь к mpv из конфига.
 
-    1. <app_dir>/mpv/mpv.exe          — портативная папка проекта
-    2. <app_dir>/mpv.exe              — рядом с ksenia.py / ksenia.exe
-    3. <bundle_dir>/mpv/mpv.exe       — внутри one-file бандла (--add-data)
-    4. <bundle_dir>/mpv.exe           — внутри бандла без подпапки
-    5. C:\\Program Files\\MPV\\mpv.exe — системная установка (Program Files)
-    6. C:\\ProgramData\\MPV\\mpv.exe   — системная установка (ProgramData)
-    7. C:\\mpv\\mpv.exe                — «короткий» путь
-    8. PATH                            — системная установка / пакетный менеджер
+    Читаем НАПРЯМУЮ: mpv ищется и из фоновых потоков
+    (например, при вызове is_mpv_available() до создания
+    главного окна).
     """
-    if sys.platform.startswith("win"):
-        exe_name = "mpv.exe"
-        candidates = [
-            os.path.join(_app_dir(), "mpv", exe_name),
-            os.path.join(_app_dir(), exe_name),
-            os.path.join(_bundle_dir(), "mpv", exe_name),
-            os.path.join(_bundle_dir(), exe_name),
-            r"C:\Program Files\MPV\mpv.exe",
-            r"C:\ProgramData\MPV\mpv.exe",
-            r"C:\mpv\mpv.exe",
-        ]
-    else:
-        exe_name = "mpv"
-        candidates = [
-            os.path.join(_app_dir(), "mpv", exe_name),
-            os.path.join(_app_dir(), exe_name),
-            os.path.join(_bundle_dir(), "mpv", exe_name),
-            os.path.join(_bundle_dir(), exe_name),
-        ]
+    try:
+        from app_core import ApplicationCore
+        core = ApplicationCore._instance
+        if core is not None:
+            p = core.config.get('mpv_path', '')
+            return (p or '').strip()
+    except Exception:
+        pass
+    return ""
 
-    for c in candidates:
-        if os.path.isfile(c):
-            return c
 
-    return shutil.which("mpv")
+def _try_configured_mpv(path: str) -> Optional[str]:
+    """Явный путь: файл mpv(.exe) или директория с ним."""
+    if not path:
+        return None
+    p = os.path.expanduser(path)
+    if os.path.isdir(p):
+        for name in ('mpv.exe', 'mpv'):
+            cand = os.path.join(p, name)
+            if os.path.isfile(cand):
+                return cand
+        return None
+    if os.path.isfile(p):
+        return p
+    return None
+
+
+def reset_mpv_cache() -> None:
+    """Сброс кеша поиска mpv (после смены пути в настройках)."""
+    global _find_mpv_cache, _find_mpv_done
+    with _find_mpv_lock:
+        _find_mpv_cache = None
+        _find_mpv_done = False
+
+
+def find_mpv(force: bool = False) -> Optional[str]:
+    """Ищет mpv: явный путь из конфига → стандартные пути → PATH.
+
+    Кеширует результат до reset_mpv_cache() / force=True.
+    """
+    global _find_mpv_cache, _find_mpv_done
+    with _find_mpv_lock:
+        if force:
+            _find_mpv_cache = None
+            _find_mpv_done = False
+        if _find_mpv_done:
+            return _find_mpv_cache
+
+        # 1. Явный путь из конфига
+        cfg_path = _configured_mpv_path()
+        if cfg_path:
+            explicit = _try_configured_mpv(cfg_path)
+            if explicit:
+                _find_mpv_cache = explicit
+                _find_mpv_done = True
+                logger.info("mpv (из настроек): %s", explicit)
+                return explicit
+            logger.warning(
+                "mpv: указанный путь не найден (%s), "
+                "ищу стандартно", cfg_path)
+
+        # 2. Стандартные пути рядом с приложением
+        if sys.platform.startswith("win"):
+            exe_name = "mpv.exe"
+            candidates = [
+                os.path.join(_app_dir(), "mpv", exe_name),
+                os.path.join(_app_dir(), exe_name),
+                os.path.join(_bundle_dir(), "mpv", exe_name),
+                os.path.join(_bundle_dir(), exe_name),
+                r"C:\Program Files\MPV\mpv.exe",
+                r"C:\ProgramData\MPV\mpv.exe",
+                r"C:\mpv\mpv.exe",
+            ]
+        else:
+            exe_name = "mpv"
+            candidates = [
+                os.path.join(_app_dir(), "mpv", exe_name),
+                os.path.join(_app_dir(), exe_name),
+                os.path.join(_bundle_dir(), "mpv", exe_name),
+                os.path.join(_bundle_dir(), exe_name),
+            ]
+
+        for c in candidates:
+            if os.path.isfile(c):
+                _find_mpv_cache = c
+                _find_mpv_done = True
+                return c
+
+        # 3. PATH
+        path = shutil.which("mpv")
+        _find_mpv_cache = path
+        _find_mpv_done = True
+        return path
 
 
 def is_mpv_available() -> bool:
@@ -96,21 +165,19 @@ def get_mpv_error() -> str:
         return ""
     return (
         "mpv не найден.\n\n"
-        "Варианты установки (любой из них):\n"
-        "1. Положите папку mpv с mpv.exe рядом с программой:\n"
+        "Варианты:\n"
+        "1. Укажите путь к mpv в «Настройки → Общие → "
+        "Путь к mpv».\n\n"
+        "2. Положите папку mpv с mpv.exe рядом с программой:\n"
         f"   {os.path.join(_app_dir(), 'mpv')}\n\n"
-        "2. Установите в систему (Windows):\n"
+        "3. Установите в систему (Windows):\n"
         "   C:\\Program Files\\MPV\\mpv.exe\n"
-        "   C:\\ProgramData\\MPV\\mpv.exe\n"
-        "   C:\\mpv\\mpv.exe\n"
         "   или добавьте папку с mpv.exe в PATH.\n\n"
-        "3. Linux:\n"
+        "4. Linux:\n"
         "   sudo apt install mpv      (Debian/Ubuntu)\n"
         "   sudo dnf install mpv      (Fedora)\n"
         "   sudo pacman -S mpv        (Arch)")
 
-
-# ── Виджет плеера ──────────────────────────────────────────────
 
 class MpvPlayerWidget(QFrame):
     playback_error = pyqtSignal(str)
@@ -231,13 +298,11 @@ class MpvPlayerWidget(QFrame):
         if not is_mpv_available():
             self._show_error_overlay(
                 "<b>mpv не установлен</b><br>"
-                "Установите mpv через менеджер пакетов.<br>"
-                "<span style='color:#cccccc;'>"
-                "sudo apt install mpv</span>")
+                "Укажите путь к mpv в настройках или "
+                "установите его.")
             self.playback_error.emit(get_mpv_error())
             return
 
-        # FIX: если mpv умер — полностью сбрасываем состояние
         if self._started and (
                 self._proc is None
                 or self._proc.state()
@@ -453,7 +518,7 @@ class MpvPlayerWidget(QFrame):
         if not mpv_path:
             self._show_error_overlay(
                 "<b>mpv не установлен</b><br>"
-                "Установите mpv через менеджер пакетов.")
+                "Укажите путь в настройках или установите mpv.")
             self.playback_error.emit(get_mpv_error())
             return False
 
@@ -515,7 +580,6 @@ class MpvPlayerWidget(QFrame):
         proc = QProcess(self)
         proc.setProgram(mpv_path)
         proc.setArguments(args)
-        # Критично: mpv ищет свои DLL/шрифты относительно своего exe
         proc.setWorkingDirectory(os.path.dirname(mpv_path))
         proc.setProcessChannelMode(
             QProcess.ProcessChannelMode.SeparateChannels)
@@ -524,7 +588,7 @@ class MpvPlayerWidget(QFrame):
         if not proc.waitForStarted(3000):
             self._show_error_overlay(
                 "<b>mpv не запустился</b><br>"
-                "Проверьте установку mpv.")
+                "Проверьте путь в настройках.")
             self.playback_error.emit("mpv не запустился")
             return False
         self._proc = proc
@@ -535,8 +599,6 @@ class MpvPlayerWidget(QFrame):
         return True
 
     def _check_mpv_alive(self):
-        # FIX: если mpv упал — сбрасываем состояние, чтобы
-        # следующий play_url() корректно перезапустил процесс.
         if self._proc is None:
             return
         state = self._proc.state()
@@ -569,7 +631,6 @@ class MpvPlayerWidget(QFrame):
     def _try_connect_ipc(self, deadline: float):
         if self._released or self._ipc is None:
             return
-        # FIX: если mpv умер — не пытаемся подключаться
         if self._proc is None or (
                 self._proc.state()
                 == QProcess.ProcessState.NotRunning):
@@ -1241,6 +1302,7 @@ class EmbeddedPlayerDialog(BaseDialog):
             self.channel.link.alternative_urls.remove(url)
         self.channel.link.url = url
         self.channel.link.has_url = True
+        self.channel.link.is_repaired = False
         self.channel.status.reset()
         try:
             self.channel.update_extinf()
@@ -1307,6 +1369,7 @@ class EmbeddedPlayerDialog(BaseDialog):
             return
         self.channel.link.url = ""
         self.channel.link.has_url = False
+        self.channel.link.is_repaired = False
         self.channel.status.reset()
         try:
             self.channel.update_extinf()

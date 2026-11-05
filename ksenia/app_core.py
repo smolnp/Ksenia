@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 import uuid
 import weakref
 from contextlib import suppress
@@ -19,7 +20,9 @@ from blacklists import (BlacklistManager, DomainBlacklistManager,
                         DomainUserAgentManager)
 from config import Config, LinkReplacementSettings
 from constants import (APP_VERSION, CHECK_RESULT_CACHE_TTL_HOURS,
-                        EPG_CACHE_TTL_HOURS, DEFAULT_EPG_URL)
+                        EPG_CACHE_TTL_HOURS, DEFAULT_EPG_URL,
+                        AUTO_CHECK_INTERVAL_HOURS_DEFAULT,
+                        AUTO_CHECK_MIN_INTERVAL_HOURS)
 from epg import EPGDatabase
 from group_templates import GroupTemplateManager
 from logging_setup import logger
@@ -85,7 +88,6 @@ class ApplicationCore(QObject):
     playlist_from_sources_ready = pyqtSignal(list)
     playlist_from_sources_failed = pyqtSignal(str)
     group_templates_updated = pyqtSignal()
-    # FIX 3: сигнал для фоновой перестройки alive-индекса.
     alive_index_rebuild_started = pyqtSignal(str)
     alive_index_rebuild_finished = pyqtSignal(str, int)
 
@@ -179,6 +181,11 @@ class ApplicationCore(QObject):
             self._check_auto_update)
         self.apply_auto_update_setting()
 
+        self._auto_check_timer = QTimer(self)
+        self._auto_check_timer.timeout.connect(
+            self._check_auto_link_validation)
+        self.apply_auto_check_setting()
+
         app = QApplication.instance()
         if app:
             app.aboutToQuit.connect(self._on_app_quit)
@@ -202,14 +209,7 @@ class ApplicationCore(QObject):
         except Exception:
             logger.exception("_bind_managers")
 
-    # ── FIX 3: фоновая перестройка alive-индекса ──
-
     def schedule_alive_index_rebuild(self, reason: str = "") -> None:
-        """Запускает перестройку alive-индекса в фоне.
-
-        Если перестройка уже запланирована или выполняется —
-        просто помечает «ещё раз», чтобы не запускать параллельно.
-        """
         with self._alive_rebuild_lock:
             if self._alive_rebuild_pending:
                 logger.debug(
@@ -247,13 +247,13 @@ class ApplicationCore(QObject):
             self.link_source_manager.invalidate_cache()
         except Exception:
             logger.exception("invalidate_cache")
-        # После изменения списка источников индекс устарел —
-        # запланируем перестройку в фоне.
         self.schedule_alive_index_rebuild("sources_updated")
 
     def _on_app_quit(self):
         with suppress(Exception):
             self._auto_update_timer.stop()
+        with suppress(Exception):
+            self._auto_check_timer.stop()
         self._workers.stop_all()
         try:
             self.link_source_manager.shutdown()
@@ -280,6 +280,8 @@ class ApplicationCore(QObject):
         except Exception:
             bl_index = None
         settings = self.get_replacement_settings()
+        # enable_ffprobe=False по умолчанию: плановое
+        # автообновление должно быть быстрым.
         worker = SourcesRefreshWorker(
             to_update, self.link_source_manager, self.config,
             check_urls=True, settings_snapshot=snap,
@@ -300,6 +302,107 @@ class ApplicationCore(QObject):
         worker.finished.connect(
             lambda w=worker: self._workers.remove_thread(w))
         worker.start()
+
+    # ── Авто-проверка ссылок по расписанию ──
+
+    def apply_auto_check_setting(self):
+        """Запускает/останавливает таймер авто-проверки
+        ссылок в зависимости от `auto_check_interval_hours`.
+
+        Таймер тикает раз в час. Сама проверка запускается
+        только если прошло достаточно времени с
+        `last_auto_check_ts` (см. `_check_auto_link_validation`).
+        """
+        try:
+            hours = int(self.config.get(
+                'auto_check_interval_hours',
+                AUTO_CHECK_INTERVAL_HOURS_DEFAULT))
+        except (ValueError, TypeError):
+            hours = AUTO_CHECK_INTERVAL_HOURS_DEFAULT
+        enabled = hours > 0
+        if enabled and not self._auto_check_timer.isActive():
+            # Тик раз в час — проверяем, не пора ли запускать.
+            self._auto_check_timer.start(60 * 60 * 1000)
+            logger.info(
+                "Авто-проверка ссылок включена: каждые %d ч",
+                hours)
+        elif not enabled and self._auto_check_timer.isActive():
+            self._auto_check_timer.stop()
+            logger.info("Авто-проверка ссылок отключена")
+
+    def _check_auto_link_validation(self):
+        try:
+            hours = int(self.config.get(
+                'auto_check_interval_hours',
+                AUTO_CHECK_INTERVAL_HOURS_DEFAULT))
+        except (ValueError, TypeError):
+            hours = AUTO_CHECK_INTERVAL_HOURS_DEFAULT
+        if hours <= 0:
+            return
+        hours = max(hours, AUTO_CHECK_MIN_INTERVAL_HOURS)
+        try:
+            last_ts = float(self.config.get(
+                'last_auto_check_ts', 0.0) or 0.0)
+        except (ValueError, TypeError):
+            last_ts = 0.0
+        now = time.time()
+        if (now - last_ts) < hours * 3600:
+            return
+        # Не запускаем, если нет открытых вкладок с каналами.
+        tabs = [t for t in self.get_all_tabs()
+                if t is not None]
+        if not tabs:
+            return
+        any_with_urls = False
+        for tab in tabs:
+            with suppress(Exception):
+                channels = list(
+                    getattr(tab, 'all_channels', []) or [])
+                if any(ch.has_valid_url for ch in channels):
+                    any_with_urls = True
+                    break
+        if not any_with_urls:
+            return
+        # Запоминаем время старта, чтобы не запустить
+        # повторно в следующем тике.
+        self.config.set('last_auto_check_ts', now)
+        self.config.save()
+        logger.info(
+            "Авто-проверка ссылок: запуск (прошло %.1f ч)",
+            (now - last_ts) / 3600.0)
+        self._run_auto_link_validation(tabs)
+
+    def _run_auto_link_validation(self, tabs: List[Any]) -> None:
+        """Запускает проверку ссылок в каждой вкладке."""
+        app = QApplication.instance()
+        if app is None:
+            return
+
+        def _run_on_gui():
+            for tab in tabs:
+                if tab is None:
+                    continue
+                try:
+                    if not hasattr(tab, 'check_urls_async'):
+                        continue
+                    channels = list(
+                        getattr(tab, 'all_channels', []) or [])
+                    with_urls = [ch for ch in channels
+                                 if ch.has_valid_url]
+                    if not with_urls:
+                        continue
+                    # Не запускаем, если уже идёт проверка.
+                    w = getattr(tab, '_src_check_worker', None)
+                    if w is not None and w.isRunning():
+                        continue
+                    tab.check_urls_async(with_urls)
+                except Exception:
+                    logger.exception(
+                        "auto link validation on tab")
+
+        # Гарантируем запуск в GUI-потоке.
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(0, _run_on_gui)
 
     def get_default_epg_url(self) -> str:
         try:
@@ -546,9 +649,6 @@ class ApplicationCore(QObject):
         with_url = working = not_working = unknown = \
             unsupported = 0
         groups_set: Set[str] = set()
-        # FIX 4: unknown считается отдельно от unsupported,
-        # чтобы working + not_working + unknown + unsupported
-        # сходилось с with_url.
         for ch in channels:
             has = ch.has_valid_url
             if has:
@@ -558,7 +658,6 @@ class ApplicationCore(QObject):
             elif ch.status.url_status is False:
                 not_working += 1
             else:
-                # url_status is None
                 if has:
                     if ch.status.link_quality == \
                             LinkQuality.UNSUPPORTED:
@@ -596,14 +695,11 @@ class ApplicationCore(QObject):
             only_working=False,
             epg_db=epg_db if epg_db is not None else self.epg_db)
 
-    # ── ЧС каналов ──
-
     def add_to_blacklist(self, name: str,
                          tvg_id: str = "") -> bool:
         r = self.blacklist_manager.add_channel(name, tvg_id)
         if r:
             self.blacklist_updated.emit()
-            # FIX 3: перестройка alive-индекса — в фоне.
             self.schedule_alive_index_rebuild("add_to_blacklist")
         return r
 
@@ -629,8 +725,6 @@ class ApplicationCore(QObject):
             self, channels: List[ChannelData]
     ) -> Tuple[List[ChannelData], int]:
         return self.blacklist_manager.filter_channels(channels)
-
-    # ── ЧС домен/IP ──
 
     def add_domain_to_blacklist(
             self, value: str,
@@ -675,8 +769,6 @@ class ApplicationCore(QObject):
         return self.domain_blacklist_manager.clean_channels(
             channels)
 
-    # ── UA ──
-
     def apply_domain_user_agent(
             self, channels: List[ChannelData]) -> int:
         return (self.domain_user_agent_manager
@@ -689,8 +781,6 @@ class ApplicationCore(QObject):
     def should_remove_user_agent(self, url: str) -> bool:
         return (self.domain_user_agent_manager
                 .should_remove_user_agent(url))
-
-    # ── Настройки / кэш ──
 
     def get_replacement_settings(self) -> LinkReplacementSettings:
         self._bind_managers()
@@ -707,8 +797,6 @@ class ApplicationCore(QObject):
             'check_result_cache_ttl_hours',
             CHECK_RESULT_CACHE_TTL_HOURS))
         return self.cache_manager.get_check_result(name, url, ttl)
-
-    # ── Шаблоны группировки (group-title) ──
 
     def get_group_templates(self) -> List[Any]:
         return self.group_template_manager.get_all()

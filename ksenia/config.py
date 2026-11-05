@@ -26,11 +26,22 @@ from constants import (
     VERIFY_CANDIDATES_TIMEOUT_DEFAULT,
     VERIFY_CANDIDATES_MAX_WORKERS_DEFAULT,
     DEFAULT_EPG_URL,
-    SOURCES_FINDER_MAX_GITHUB_DEFAULT,
-    SOURCES_FINDER_MAX_M3UGUIDE_DEFAULT,
-    SOURCES_FINDER_UPDATE_INTERVAL_HOURS)
+    AUTO_CHECK_INTERVAL_HOURS_DEFAULT)
 from logging_setup import logger
 from paths import Paths
+
+
+# Ключи, которые были в старых версиях и должны быть
+# вычищены из загружаемого JSON (иначе они будут
+# записываться обратно при save()).
+_LEGACY_KEYS_TO_DROP = frozenset({
+    'sources_finder_auto_load_after_add',
+    'sources_finder_include_github',
+    'sources_finder_include_m3uguide',
+    'sources_finder_max_github',
+    'sources_finder_max_m3uguide',
+    'sources_finder_update_interval_hours',
+})
 
 
 class Config:
@@ -123,15 +134,21 @@ class Config:
         'verify_candidates_max_workers':
             VERIFY_CANDIDATES_MAX_WORKERS_DEFAULT,
         'apply_filters_on_file_open': True,
-        'sources_finder_auto_load_after_add': True,
-        'sources_finder_include_github': True,
-        'sources_finder_include_m3uguide': True,
-        'sources_finder_max_github':
-            SOURCES_FINDER_MAX_GITHUB_DEFAULT,
-        'sources_finder_max_m3uguide':
-            SOURCES_FINDER_MAX_M3UGUIDE_DEFAULT,
-        'sources_finder_update_interval_hours':
-            SOURCES_FINDER_UPDATE_INTERVAL_HOURS,
+        # ── Пути к сторонним приложениям ──
+        # Пусто = искать в PATH / стандартных путях.
+        # Пользователь может указать явно, если приложение
+        # не установлено в PATH (актуально для Windows).
+        'ffprobe_path': '',
+        'mpv_path': '',
+        # ── Кодировка при «Сохранить как» ──
+        # 'auto' — как в исходном файле (текущее поведение).
+        # Иначе — явная кодировка (utf-8, utf-8-sig, cp1251).
+        'default_save_encoding': 'auto',
+        # ── Авто-проверка ссылок ──
+        'auto_check_on_open': False,
+        'auto_check_interval_hours':
+            AUTO_CHECK_INTERVAL_HOURS_DEFAULT,
+        'last_auto_check_ts': 0.0,
         # Ширины столбцов таблицы каналов.
         'column_widths': {},
         'language': 'ru',
@@ -203,7 +220,12 @@ class Config:
                 for old, new in self._RENAMES.items():
                     if old in data and new not in data:
                         data[new] = data[old]
-                for k, v in data.items():
+                for k, v in list(data.items()):
+                    if k in _LEGACY_KEYS_TO_DROP:
+                        logger.info(
+                            "Config: удалён устаревший ключ %s",
+                            k)
+                        continue
                     self.config[k] = self._coerce(k, v)
                 logger.info("Config: загружено %d ключей",
                             len(data))

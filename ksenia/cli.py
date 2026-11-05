@@ -40,7 +40,7 @@ def parse_cli_args(argv: Optional[List[str]] = None
     p.add_argument("--headless", action="store_true",
                    help="Запуск без GUI")
     p.add_argument("--sources-file", default=None,
-                   help="JSON-файл источников")
+                   help="JSON-файл пользовательских источников")
     p.add_argument("--export", default=None,
                    help="Путь выходного M3U")
     p.add_argument("--export-stable", action="store_true",
@@ -226,8 +226,12 @@ def run_cli(args: argparse.Namespace) -> int:
                 if (settings.is_blacklisted(u)
                         or settings.is_filtered_domain(u)):
                     continue
-                ok, rt, _, _ = URLUtils.check_url(
-                    u, args.timeout, verify_ssl=False)
+                # Auto-Repair включён: CLI ведёт себя так же,
+                # как GUI-путь LinkReplacementWorker.
+                ok, rt, _msg, _code, _ttfb, _repaired = \
+                    URLUtils.check_url(
+                        u, args.timeout, verify_ssl=False,
+                        try_repair=True)
                 if ok is True and (rt is None
                                    or rt * 1000
                                    <= STABLE_LATENCY_THRESHOLD_MS):

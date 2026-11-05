@@ -17,11 +17,7 @@ from PyQt6.QtWidgets import (
     QInputDialog, QLabel, QLineEdit, QPushButton, QProgressBar,
     QSpinBox, QTableWidgetItem, QVBoxLayout, QWidget)
 
-from constants import (
-    M3U_FILTER, OK_CANCEL_BB,
-    SOURCES_FINDER_MAX_GITHUB_DEFAULT,
-    SOURCES_FINDER_MAX_M3UGUIDE_DEFAULT,
-    SOURCES_FINDER_UPDATE_INTERVAL_HOURS)
+from constants import M3U_FILTER, OK_CANCEL_BB
 from dialogs_base import (BaseDialog, _NumericItem,
                            _is_qobject_valid, hint_label,
                            json_export_dialog, json_import_dialog,
@@ -64,7 +60,8 @@ class LinkSourceEditDialog(BaseDialog):
         layout.addWidget(hint_label(
             "Источник — это ваш локальный файл или URL, "
             "который вы добавили сами. Приложение не содержит "
-            "встроенных ссылок на IPTV."))
+            "встроенных ссылок на IPTV и не ищет их "
+            "автоматически."))
         form = QFormLayout()
         self.name_edit = QLineEdit()
         form.addRow("Название:", self.name_edit)
@@ -205,275 +202,6 @@ class LinkSourceEditDialog(BaseDialog):
             super().accept()
 
 
-class SourcesFinderDialog(BaseDialog):
-    def __init__(self, core=None, parent=None):
-        super().__init__("🔍 Поиск источников автоматически",
-                          parent, size=(760, 560))
-        self.core = core
-        self._worker = None
-        self._found: List[Dict[str, Any]] = []
-        self._worker_cls = None
-        try:
-            from generator import SourcesFinderWorker
-            self._worker_cls = SourcesFinderWorker
-        except ImportError as e:
-            logger.warning("generator unavailable: %s", e)
-        self._setup_ui()
-
-    def _setup_ui(self):
-        l = self.root
-        l.addWidget(hint_label(
-            "Поиск публичных плейлистов выполняется через "
-            "GitHub API в момент запуска.\n"
-            "Приложение не содержит встроенных ссылок: "
-            "всё, что вы видите в результатах, получено "
-            "live-запросом.\n"
-            "Найденные источники будут добавлены в менеджер "
-            "с флагом «Автообновление»."))
-
-        g = QGroupBox("Что искать")
-        gl = QVBoxLayout(g)
-        self.github_check = QCheckBox(
-            "GitHub Search API (по запросу)")
-        self.github_check.setChecked(True)
-        gl.addWidget(self.github_check)
-        self.m3uguide_check = QCheckBox(
-            "Репозиторий m3u.guide (через GitHub API)")
-        self.m3uguide_check.setChecked(True)
-        gl.addWidget(self.m3uguide_check)
-
-        opts = QHBoxLayout()
-        opts.addWidget(QLabel("Макс. GitHub:"))
-        self.max_github_spin = QSpinBox()
-        self.max_github_spin.setRange(1, 100)
-        try:
-            if self.core is not None:
-                val = int(self.core.config.get(
-                    'sources_finder_max_github',
-                    SOURCES_FINDER_MAX_GITHUB_DEFAULT))
-            else:
-                val = SOURCES_FINDER_MAX_GITHUB_DEFAULT
-        except Exception:
-            val = SOURCES_FINDER_MAX_GITHUB_DEFAULT
-        self.max_github_spin.setValue(val)
-        opts.addWidget(self.max_github_spin)
-
-        opts.addWidget(QLabel("Макс. m3u.guide:"))
-        self.max_m3uguide_spin = QSpinBox()
-        self.max_m3uguide_spin.setRange(1, 50)
-        try:
-            if self.core is not None:
-                val = int(self.core.config.get(
-                    'sources_finder_max_m3uguide',
-                    SOURCES_FINDER_MAX_M3UGUIDE_DEFAULT))
-            else:
-                val = SOURCES_FINDER_MAX_M3UGUIDE_DEFAULT
-        except Exception:
-            val = SOURCES_FINDER_MAX_M3UGUIDE_DEFAULT
-        self.max_m3uguide_spin.setValue(val)
-        opts.addWidget(self.max_m3uguide_spin)
-        opts.addStretch()
-        gl.addLayout(opts)
-        l.addWidget(g)
-
-        self.progress_label = QLabel("Готов к поиску")
-        l.addWidget(self.progress_label)
-
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 0)
-        self.progress_bar.setVisible(False)
-        l.addWidget(self.progress_bar)
-
-        l.addWidget(QLabel("Найденные источники:"))
-        self.table = make_table(
-            ["✓", "Название", "Тип", "URL"],
-            stretch_last=False,
-            select_rows=False)
-        h = self.table.horizontalHeader()
-        h.setSectionResizeMode(
-            0, QHeaderView.ResizeMode.ResizeToContents)
-        h.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        h.setSectionResizeMode(
-            2, QHeaderView.ResizeMode.ResizeToContents)
-        h.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
-        self.table.verticalHeader().setVisible(False)
-        l.addWidget(self.table, 1)
-
-        btn_row = QHBoxLayout()
-        self.search_btn = QPushButton("🔍 Начать поиск")
-        self.search_btn.clicked.connect(self._start_search)
-        self.search_btn.setEnabled(self._worker_cls is not None)
-        btn_row.addWidget(self.search_btn)
-
-        self.stop_btn = QPushButton("⏹ Остановить")
-        self.stop_btn.setEnabled(False)
-        self.stop_btn.clicked.connect(self._stop_search)
-        btn_row.addWidget(self.stop_btn)
-
-        self.select_all_btn = QPushButton("Выбрать все")
-        self.select_all_btn.clicked.connect(
-            lambda: self._set_all(True))
-        btn_row.addWidget(self.select_all_btn)
-
-        self.deselect_all_btn = QPushButton("Снять все")
-        self.deselect_all_btn.clicked.connect(
-            lambda: self._set_all(False))
-        btn_row.addWidget(self.deselect_all_btn)
-        btn_row.addStretch()
-        l.addLayout(btn_row)
-
-        from PyQt6.QtWidgets import QDialogButtonBox
-        bb = QDialogButtonBox(OK_CANCEL_BB)
-        bb.button(QDialogButtonBox.StandardButton.Ok).setText(
-            "Добавить выбранные и загрузить")
-        bb.accepted.connect(self.accept)
-        bb.rejected.connect(self.reject)
-        l.addWidget(bb)
-
-        if self._worker_cls is None:
-            self.progress_label.setText(
-                "⚠️ Модуль generator.py не найден — "
-                "поиск недоступен")
-
-    def _set_all(self, checked: bool):
-        for row in range(self.table.rowCount()):
-            it = self.table.item(row, 0)
-            if it is not None:
-                it.setCheckState(
-                    Qt.CheckState.Checked if checked
-                    else Qt.CheckState.Unchecked)
-
-    def _worker_is_running(self) -> bool:
-        if self._worker is None:
-            return False
-        try:
-            return bool(self._worker.isRunning())
-        except RuntimeError:
-            self._worker = None
-            return False
-
-    def _start_search(self):
-        if self._worker_cls is None:
-            warn_box(self, "Модуль generator.py не найден")
-            return
-        if self._worker_is_running():
-            return
-        self._worker = None
-        self._found = []
-        self.table.setRowCount(0)
-        self.progress_label.setText("⏳ Поиск...")
-        self.progress_bar.setVisible(True)
-        self.search_btn.setEnabled(False)
-        self.stop_btn.setEnabled(True)
-
-        self._worker = self._worker_cls(
-            include_github=self.github_check.isChecked(),
-            include_m3uguide=self.m3uguide_check.isChecked(),
-            max_github=self.max_github_spin.value(),
-            max_m3uguide=self.max_m3uguide_spin.value(),
-        )
-        self._worker.progress.connect(
-            self._on_progress, Qt.ConnectionType.QueuedConnection)
-        self._worker.found.connect(
-            self._on_found, Qt.ConnectionType.QueuedConnection)
-        self._worker.search_finished.connect(
-            self._on_finished,
-            Qt.ConnectionType.QueuedConnection)
-        self._worker.error.connect(
-            self._on_error, Qt.ConnectionType.QueuedConnection)
-        self._worker.start()
-
-    def _stop_search(self):
-        if self._worker_is_running():
-            with suppress(Exception):
-                self._worker.stop()
-
-    def _on_progress(self, msg: str):
-        self.progress_label.setText(msg)
-
-    def _on_found(self, items: list):
-        self._found = list(items)
-        self._fill_table()
-
-    def _on_finished(self, items: list):
-        self._worker = None
-        self._found = list(items)
-        self._fill_table()
-        self.progress_bar.setVisible(False)
-        self.search_btn.setEnabled(True)
-        self.stop_btn.setEnabled(False)
-        self.progress_label.setText(
-            f"✓ Найдено источников: {len(self._found)}")
-
-    def _on_error(self, msg: str):
-        self._worker = None
-        self.progress_bar.setVisible(False)
-        self.search_btn.setEnabled(True)
-        self.stop_btn.setEnabled(False)
-        self.progress_label.setText(f"✗ Ошибка: {msg}")
-        QTimer.singleShot(
-            0, lambda m=msg: error_box(
-                self, m, "Ошибка поиска"))
-
-    def _fill_table(self):
-        self.table.setRowCount(len(self._found))
-        for i, item in enumerate(self._found):
-            chk = QTableWidgetItem()
-            chk.setFlags(Qt.ItemFlag.ItemIsUserCheckable |
-                         Qt.ItemFlag.ItemIsEnabled)
-            chk.setCheckState(Qt.CheckState.Checked)
-            self.table.setItem(i, 0, chk)
-
-            name_item = QTableWidgetItem(
-                item.get('name') or '')
-            name_item.setData(
-                Qt.ItemDataRole.UserRole, item)
-            self.table.setItem(i, 1, name_item)
-
-            type_item = QTableWidgetItem(
-                item.get('source') or '')
-            type_item.setTextAlignment(
-                Qt.AlignmentFlag.AlignCenter)
-            self.table.setItem(i, 2, type_item)
-
-            url_item = QTableWidgetItem(item.get('url') or '')
-            url_item.setToolTip(item.get('url') or '')
-            self.table.setItem(i, 3, url_item)
-
-    def get_selected_items(self) -> List[Dict[str, Any]]:
-        result: List[Dict[str, Any]] = []
-        for row in range(self.table.rowCount()):
-            chk = self.table.item(row, 0)
-            if (chk is None
-                    or chk.checkState() != Qt.CheckState.Checked):
-                continue
-            name_item = self.table.item(row, 1)
-            if name_item is None:
-                continue
-            data = name_item.data(Qt.ItemDataRole.UserRole)
-            if isinstance(data, dict):
-                result.append(data)
-        return result
-
-    def closeEvent(self, event):
-        w = self._worker
-        self._worker = None
-        if w is not None:
-            with suppress(Exception):
-                try:
-                    if w.isRunning():
-                        w.stop()
-                        if not w.wait(3000):
-                            logger.warning(
-                                "SourcesFinderDialog: worker did "
-                                "not finish in 3 sec, terminating")
-                            w.terminate()
-                            w.wait(1000)
-                except RuntimeError:
-                    pass
-        super().closeEvent(event)
-
-
 class LinkSourceManagerDialog(BaseDialog):
     sources_updated = pyqtSignal()
 
@@ -492,12 +220,10 @@ class LinkSourceManagerDialog(BaseDialog):
         layout = self.root
         layout.addWidget(hint_label(
             "Источники ссылок — это ваши плейлисты: локальные "
-            "файлы или URL, которые вы добавили сами.\n"
+            "файлы или URL, которые вы добавили сами.\n\n"
             "Приложение не содержит встроенных ссылок на "
-            "IPTV.\n\n"
-            "Кнопка «🔍 Найти источники автоматически» ищет "
-            "публичные плейлисты через GitHub API в момент "
-            "выполнения — конкретные URL не зашиты в программу."))
+            "IPTV и не выполняет автоматический поиск "
+            "источников — их добавляет только пользователь."))
 
         self.sources_table = make_table(
             ["Вкл", "Название", "Тип", "Путь/URL", "Приоритет",
@@ -531,24 +257,6 @@ class LinkSourceManagerDialog(BaseDialog):
         layout.addLayout(bl1)
 
         bl2 = QHBoxLayout()
-        self.auto_find_btn = QPushButton(
-            "🔍 Найти источники автоматически")
-        self.auto_find_btn.setToolTip(
-            "Найти публичные плейлисты через GitHub API "
-            "(live-поиск)\n"
-            "и добавить их как источники с автообновлением.")
-        self.auto_find_btn.clicked.connect(
-            self._auto_find_sources)
-        bl2.addWidget(self.auto_find_btn)
-
-        self.remove_generated_btn = QPushButton(
-            "🧹 Удалить найденные")
-        self.remove_generated_btn.setToolTip(
-            "Удалить все источники, добавленные авто-поиском.")
-        self.remove_generated_btn.clicked.connect(
-            self._remove_generated)
-        bl2.addWidget(self.remove_generated_btn)
-
         bl2.addStretch()
 
         self.refresh_all_btn = QPushButton("🔄 Обновить всё")
@@ -601,13 +309,8 @@ class LinkSourceManagerDialog(BaseDialog):
                 self.sources_table.setItem(i, 0, ei)
 
                 name_text = s.name
-                if s.generated:
-                    name_text = f"✨ {name_text}"
                 ni = QTableWidgetItem(name_text)
                 ni.setData(Qt.ItemDataRole.UserRole, s.name)
-                if s.generated:
-                    ni.setToolTip(
-                        "Источник добавлен авто-поиском")
                 self.sources_table.setItem(i, 1, ni)
 
                 self.sources_table.setItem(
@@ -672,8 +375,6 @@ class LinkSourceManagerDialog(BaseDialog):
             return None
         raw = name_item.data(Qt.ItemDataRole.UserRole)
         name = raw if isinstance(raw, str) else name_item.text()
-        if name.startswith("✨ "):
-            name = name[2:]
         return self.source_manager.get_source_by_name(name)
 
     def _add(self):
@@ -712,105 +413,6 @@ class LinkSourceManagerDialog(BaseDialog):
                 self._load_sources()
                 self.sources_updated.emit()
 
-    def _auto_find_sources(self):
-        core = None
-        w = self.parent()
-        if w is not None and hasattr(w, 'core'):
-            core = w.core
-        dlg = SourcesFinderDialog(core, self)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        items = dlg.get_selected_items()
-        if not items:
-            info_box(self, "Ничего не выбрано")
-            return
-
-        added, skipped = self._add_sources_from_items(items)
-        self._load_sources()
-        self.sources_updated.emit()
-
-        if added == 0:
-            info_box(self,
-                     f"Новых источников не добавлено "
-                     f"(пропущено: {skipped}).")
-            return
-
-        auto_load = bool(self.config.get(
-            'sources_finder_auto_load_after_add', True))
-        if auto_load or confirm(
-                self,
-                f"Добавлено источников: {added}.\n"
-                f"Пропущено (уже есть): {skipped}.\n\n"
-                f"Сразу загрузить их в кэш?"):
-            self._refresh_all()
-        else:
-            info_box(self,
-                     f"Источники добавлены в менеджер.\n"
-                     f"Загрузите их кнопкой "
-                     f"«🔄 Обновить всё».", "Готово")
-
-    def _add_sources_from_items(self, items: List[Dict[str, Any]]
-                                 ) -> Tuple[int, int]:
-        existing_paths = {
-            s.path
-            for s in self.source_manager.get_all_sources()}
-        existing_names = {
-            s.name
-            for s in self.source_manager.get_all_sources()}
-        added = 0
-        skipped = 0
-        for item in items:
-            url = (item.get('url') or '').strip()
-            if not url or url in existing_paths:
-                skipped += 1
-                continue
-            base_name = item.get('name') or url
-            name = base_name
-            suffix = 2
-            while name in existing_names:
-                name = f"{base_name} #{suffix}"
-                suffix += 1
-
-            src = LinkSource()
-            src.name = name
-            src.path = url
-            src.source_type = "online"
-            src.priority = int(item.get('priority') or 5)
-            src.enabled = True
-            src.auto_update = True
-            src.update_interval_hours = int(self.config.get(
-                'sources_finder_update_interval_hours',
-                SOURCES_FINDER_UPDATE_INTERVAL_HOURS))
-            src.encoding = "utf-8"
-            src.apply_blacklist = True
-            src.apply_domain_blacklist = True
-            src.generated = True
-
-            if self.source_manager.add_source(src):
-                added += 1
-                existing_paths.add(url)
-                existing_names.add(name)
-        return added, skipped
-
-    def _remove_generated(self):
-        generated = [s for s
-                     in self.source_manager.get_all_sources()
-                     if s.generated]
-        if not generated:
-            info_box(self,
-                     "Нет источников, добавленных "
-                     "авто-поиском.")
-            return
-        if not confirm(
-                self,
-                f"Удалить {len(generated)} источников, "
-                f"добавленных авто-поиском?"):
-            return
-        n = self.source_manager.remove_generated_sources()
-        self._load_sources()
-        self.sources_updated.emit()
-        info_box(self, f"Удалено: {n}", "Готово")
-
     def _refresh_all(self):
         sources = self.source_manager.get_enabled_sources()
         if not sources:
@@ -835,12 +437,16 @@ class LinkSourceManagerDialog(BaseDialog):
         except Exception:
             logger.exception("_refresh_all: snapshot failed")
 
+        # ffprobe намеренно выключен: «🔄 Обновить всё» должно
+        # оставаться быстрым. Разрешение запрашивается
+        # отдельно через «🎬 Определить разрешение».
         self._refresh_worker = SourcesRefreshWorker(
             sources, self.source_manager, self.config,
             check_urls=True,
             settings_snapshot=settings_snapshot,
             blacklist_index=bl_index,
-            settings=settings)
+            settings=settings,
+            enable_ffprobe=False)
 
         def on_progress(value, total, text):
             v = max(0, min(100, int(value)))
@@ -1067,9 +673,10 @@ class LinkSelectionDialog(BaseDialog):
 
             def _check(u: str):
                 try:
-                    ok, rt, msg, code = URLUtils.check_url(
-                        u, timeout, verify_ssl=False,
-                        stop_token=self._stop_token)
+                    ok, rt, msg, code, ttfb, _ = \
+                        URLUtils.check_url(
+                            u, timeout, verify_ssl=False,
+                            stop_token=self._stop_token)
                 except Exception:
                     logger.exception("verify %s", u[:80])
                     ok, rt = False, None
@@ -1137,9 +744,9 @@ class PlaylistFromSourcesDialog(BaseDialog):
     def _setup_ui(self):
         layout = self.root
         layout.addWidget(hint_label(
-            "Приложение не содержит встроенных источников. "
-            "Добавьте их в менеджере источников или найдите "
-            "через «🔍 Найти источники автоматически»."))
+            "Приложение не содержит встроенных источников и "
+            "не ищет их автоматически. Добавьте свои источники "
+            "в менеджере источников вручную."))
         layout.addWidget(QLabel(
             "Выберите источники для нового плейлиста:"))
 

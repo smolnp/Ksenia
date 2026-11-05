@@ -41,7 +41,6 @@ from dialogs import (
     PlaylistCreationOptions,
     PlaylistFromSourcesDialog,
     RemoveMetadataDialog,
-    SourcesFinderDialog,
     SupportDialog,
     _is_qobject_valid,
     make_action,
@@ -52,7 +51,6 @@ from constants import (
     APP_VERSION, DEFAULT_EPG_URL, GROUP_FILTER_ALL,
     GROUP_FILTER_DUPLICATES,
     M3U_FILTER, RECENT_FILES_MAX,
-    SOURCES_FINDER_UPDATE_INTERVAL_HOURS,
     STATUS_FILTER_ALL, STATUS_FILTER_ITEMS, StatusText,
 )
 from logging_setup import logger
@@ -341,8 +339,6 @@ class _PlaylistCreateTask(QRunnable):
                 return
             self.core.playlist_from_sources_failed.emit(str(e))
         finally:
-            # Снимаем регистрацию — критично, иначе при выходе
-            # или отключении кэша воркер останется «живым».
             with suppress(Exception):
                 self.core._workers.remove_runnable(self)
 
@@ -602,6 +598,7 @@ class MainWindow(QMainWindow):
     def _setup_menu(self):
         mb = self.menuBar()
 
+        # ── Файл ──
         fm = mb.addMenu("Файл")
         self._add_action(fm, "Новый", self._new_file, "Ctrl+N")
         self._add_action(fm, "Открыть", self._open_file, "Ctrl+O")
@@ -625,6 +622,7 @@ class MainWindow(QMainWindow):
         fm.addSeparator()
         self._add_action(fm, "Выход", self.close, "Alt+F4")
 
+        # ── Каналы ──
         cm = mb.addMenu("Каналы")
         self._add_action(cm, "Новый канал",
                          partial(self._with_tab, '_new_channel'),
@@ -639,16 +637,32 @@ class MainWindow(QMainWindow):
                          partial(self._with_tab, '_paste_channel'),
                          "Ctrl+V")
         cm.addSeparator()
-        self._add_action(cm, "Массовая правка выбранных...",
-                         partial(self._with_tab,
-                                 '_mass_edit_selected'))
+        # Подменю «Удалить каналы»
+        del_ch = cm.addMenu("Удалить каналы")
+        self._add_action(
+            del_ch, "Без ссылок",
+            partial(self._with_tab,
+                    'delete_channels_without_urls'))
+        self._add_action(
+            del_ch, "Без метаданных",
+            partial(self._with_tab,
+                    'delete_channels_without_metadata'))
+        self._add_action(
+            del_ch, "Без групп",
+            partial(self._with_tab,
+                    'delete_channels_without_groups'))
         cm.addSeparator()
-        self._add_action(cm, "Удалить каналы без ссылок",
-                         partial(self._with_tab,
-                                 'delete_channels_without_urls'))
-        self._add_action(cm, "Удалить каналы без метаданных",
-                         partial(self._with_tab,
-                                 'delete_channels_without_metadata'))
+        # Подменю «Определить разрешение»
+        res_menu = cm.addMenu("🎬 Определить разрешение (ffprobe)")
+        self._add_action(
+            res_menu, "Текущего канала",
+            partial(self._with_tab, '_detect_resolution_current'))
+        self._add_action(
+            res_menu, "Выбранных каналов",
+            partial(self._with_tab, '_detect_resolution_selected'))
+        self._add_action(
+            res_menu, "Всех каналов с URL",
+            partial(self._with_tab, '_detect_resolution_all'))
         cm.addSeparator()
         self._add_action(cm, "Сравнить плейлисты...",
                          self._show_compare)
@@ -656,6 +670,7 @@ class MainWindow(QMainWindow):
         self._add_action(cm, "Удалить метаданные...",
                          self._remove_metadata)
 
+        # ── Ссылки ──
         lm = mb.addMenu("Ссылки")
         self._add_action(lm, "Проверить все ссылки",
                          partial(self._with_tab, 'check_all_urls'))
@@ -663,47 +678,55 @@ class MainWindow(QMainWindow):
                          partial(self._with_tab,
                                  '_check_selected_urls'))
         lm.addSeparator()
-        self._add_action(lm, "Заменить все ссылки (из кэша)",
-                         partial(self._with_tab,
-                                 'replace_all_links'))
-        self._add_action(lm, "Заменить выбранные ссылки",
-                         partial(self._with_tab,
-                                 'replace_selected_links'))
+        # Подменю «Исправить ссылки»
+        fix_menu = lm.addMenu("Исправить ссылки")
+        self._add_action(
+            fix_menu, "Битые ссылки",
+            partial(self._with_tab, 'replace_broken_links'))
+        self._add_action(
+            fix_menu, "Выбранные ссылки",
+            partial(self._with_tab, 'replace_selected_links'))
+        self._add_action(
+            fix_menu, "Все ссылки",
+            partial(self._with_tab, 'replace_all_links'))
         lm.addSeparator()
-        self._add_action(lm, "Удалить все ссылки",
-                         partial(self._with_tab,
-                                 'remove_all_urls'))
-        self._add_action(lm, "Удалить выбранные ссылки",
-                         partial(self._with_tab,
-                                 '_remove_selected_urls'))
-        lm.addSeparator()
-        self._add_action(lm, "Удалить все битые ссылки",
-                         partial(self._with_tab,
-                                 '_remove_all_broken_urls'))
+        # Подменю «Удалить ссылки»
+        del_links = lm.addMenu("Удалить ссылки")
+        self._add_action(
+            del_links, "Битые",
+            partial(self._with_tab,
+                    '_remove_all_broken_urls'))
+        self._add_action(
+            del_links, "Выбранные",
+            partial(self._with_tab,
+                    '_remove_selected_urls'))
+        self._add_action(
+            del_links, "Все",
+            partial(self._with_tab, 'remove_all_urls'))
         lm.addSeparator()
         self._add_action(lm, "🚫 Заблокировать домен/IP…",
                          self._block_domain_manual)
 
+        # ── Инструменты ──
         tm = mb.addMenu("Инструменты")
         self._add_action(
             tm,
             "Источники ссылок (обновить + проверить URL)...",
             self._manage_sources)
-        self._add_action(
-            tm, "🔍 Найти источники автоматически...",
-            self._auto_find_sources)
         self._add_action(tm, "Редактировать заголовок...",
                          self._edit_header)
         tm.addSeparator()
+        # Подменю «Шаблоны категорий»
+        cat_menu = tm.addMenu("📋 Шаблоны категорий")
         self._add_action(
-            tm, "📋 Шаблоны группировки каналов…",
-            self._manage_group_templates)
-        self._add_action(
-            tm, "💾 Запомнить группировку текущего плейлиста…",
+            cat_menu, "Сохранить шаблон…",
             self._save_current_grouping_as_template)
         self._add_action(
-            tm, "🎯 Применить шаблон группировки…",
+            cat_menu, "Применить шаблон…",
             self._apply_group_template_menu)
+        self._add_action(
+            cat_menu, "Управление шаблонами…",
+            self._manage_group_templates)
         tm.addSeparator()
         self._add_action(tm, "Загрузить EPG", self._load_epg)
         self._add_action(
@@ -734,6 +757,7 @@ class MainWindow(QMainWindow):
         tm.addSeparator()
         self._add_action(tm, "Показать лог", self._show_log)
 
+        # ── Настройки ──
         sm = mb.addMenu("Настройки")
         self._add_action(sm, "Настройки замены ссылок",
                          self._manage_replacement_settings)
@@ -755,6 +779,7 @@ class MainWindow(QMainWindow):
         self._add_action(sm, "Сбросить масштаб",
                          lambda: self._change_font(0), "Ctrl+0")
 
+        # ── Справка ──
         hm = mb.addMenu("Справка")
         self._add_action(hm, "Руководство пользователя",
                          self._show_help, "F1")
@@ -1112,8 +1137,6 @@ class MainWindow(QMainWindow):
         task = _PlaylistCreateTask(
             self.core, sources_to_load, opts, _stop, win_ref,
             epg_sources=None)
-        # Регистрируем задачу, чтобы stop_all() мог её
-        # корректно остановить.
         self.core._workers.add_runnable(task)
         QThreadPool.globalInstance().start(task)
 
@@ -1501,7 +1524,7 @@ class MainWindow(QMainWindow):
                 default_name = base
 
         name, ok = QInputDialog.getText(
-            self, "Запомнить группировку",
+            self, "Сохранить шаблон категорий",
             "Имя шаблона:", QLineEdit.EchoMode.Normal,
             default_name)
         if not ok or not name.strip():
@@ -1533,7 +1556,7 @@ class MainWindow(QMainWindow):
         info_box(
             self,
             f"Шаблон «{name}» сохранён.\n\n{msg}",
-            "Запомнить группировку")
+            "Шаблоны категорий")
 
     def _apply_group_template_menu(self):
         if not self.current_tab or not self.current_tab.all_channels:
@@ -1549,7 +1572,7 @@ class MainWindow(QMainWindow):
             return
 
         chosen, ok = QInputDialog.getItem(
-            self, "Применить шаблон группировки",
+            self, "Применить шаблон категорий",
             "Шаблон:", names, 0, False)
         if not ok or not chosen:
             return
@@ -1594,7 +1617,7 @@ class MainWindow(QMainWindow):
             f"Совпало с шаблоном: {stats['matched']}\n"
             f"Не найдено в шаблоне: {stats['unmatched']}\n"
             f"Правил без каналов: {stats['missing']}",
-            "Шаблоны группировки")
+            "Шаблоны категорий")
 
     def _load_epg(self):
         if self.current_tab:
@@ -1706,82 +1729,6 @@ class MainWindow(QMainWindow):
         dlg.sources_updated.connect(
             self.core.sources_updated.emit)
         dlg.exec()
-
-    def _auto_find_sources(self):
-        dlg = SourcesFinderDialog(self.core, self)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        items = dlg.get_selected_items()
-        if not items:
-            info_box(self, "Ничего не выбрано")
-            return
-
-        mgr = self.core.link_source_manager
-        existing_paths = {s.path
-                          for s in mgr.get_all_sources()}
-        existing_names = {s.name
-                          for s in mgr.get_all_sources()}
-
-        added = 0
-        skipped = 0
-        for item in items:
-            url = (item.get('url') or '').strip()
-            if not url or url in existing_paths:
-                skipped += 1
-                continue
-            base_name = item.get('name') or url
-            name = base_name
-            suffix = 2
-            while name in existing_names:
-                name = f"{base_name} #{suffix}"
-                suffix += 1
-
-            src = LinkSource()
-            src.name = name
-            src.path = url
-            src.source_type = "online"
-            src.priority = int(item.get('priority') or 5)
-            src.enabled = True
-            src.auto_update = True
-            src.update_interval_hours = int(
-                self.core.config.get(
-                    'sources_finder_update_interval_hours',
-                    SOURCES_FINDER_UPDATE_INTERVAL_HOURS))
-            src.encoding = "utf-8"
-            src.apply_blacklist = True
-            src.apply_domain_blacklist = True
-            src.generated = True
-
-            if mgr.add_source(src):
-                added += 1
-                existing_paths.add(url)
-                existing_names.add(name)
-
-        self.core.sources_updated.emit()
-
-        if added == 0:
-            info_box(
-                self,
-                f"Новых источников не добавлено "
-                f"(пропущено: {skipped}).")
-            return
-
-        auto_load = bool(self.core.config.get(
-            'sources_finder_auto_load_after_add', True))
-        if not auto_load:
-            if not confirm(
-                    self,
-                    f"Добавлено источников: {added}.\n"
-                    f"Пропущено (уже есть): {skipped}.\n\n"
-                    f"Открыть менеджер источников и "
-                    f"загрузить их в кэш?"):
-                info_box(
-                    self,
-                    f"Источники добавлены. Обновите их "
-                    f"в менеджере источников.", "Готово")
-                return
-
-        self._manage_sources()
 
     def _manage_replacement_settings(self):
         dlg = self._track_dialog(
@@ -1909,12 +1856,6 @@ class MainWindow(QMainWindow):
                         with suppress(Exception):
                             dlg._refresh_worker.stop()
                         dlg._refresh_worker.wait(10000)
-                if isinstance(dlg, SourcesFinderDialog):
-                    if (dlg._worker
-                            and dlg._worker.isRunning()):
-                        with suppress(Exception):
-                            dlg._worker.stop()
-                        dlg._worker.wait(3000)
                 dlg.reject()
             except Exception:
                 pass

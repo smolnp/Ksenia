@@ -4,6 +4,7 @@
 """Настройки: общие, замена ссылок, кэш."""
 from __future__ import annotations
 
+import os
 from contextlib import suppress
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
@@ -11,15 +12,17 @@ from urllib.parse import urlparse
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QDialogButtonBox, QDoubleSpinBox,
-    QFormLayout, QFrame, QHBoxLayout, QLabel, QLineEdit,
-    QPushButton, QProgressBar, QSpinBox, QTabWidget,
+    QFileDialog, QFormLayout, QFrame, QHBoxLayout, QLabel,
+    QLineEdit, QPushButton, QProgressBar, QSpinBox, QTabWidget,
     QTextEdit, QVBoxLayout, QWidget)
 
 from config import Config
 from constants import (OK_CANCEL_BB, URL_CHECK_MAX_WORKERS,
                         DEFAULT_EPG_URL,
                         CHECK_RESULT_CACHE_TTL_HOURS,
-                        EPG_CACHE_TTL_HOURS)
+                        EPG_CACHE_TTL_HOURS,
+                        SAVE_ENCODINGS,
+                        AUTO_CHECK_INTERVAL_HOURS_DEFAULT)
 from dialogs_base import BaseDialog, hint_label
 from logging_setup import logger
 from paths import confirm, error_box, info_box, warn_box
@@ -240,7 +243,7 @@ def _write_value(kind: str, w: QWidget, value: Any) -> None:
 class LinkReplacementSettingsDialog(BaseDialog):
     def __init__(self, config: Config, parent=None):
         super().__init__("Настройки замены ссылок", parent,
-                          size=(660, 860))
+                          size=(660, 680))
         self.config = config
         self._widgets: Dict[str, QWidget] = {}
         self._setup_ui()
@@ -476,7 +479,9 @@ GENERAL_SPEC: List[Tuple[str, str, str, Dict[str, Any],
     ("enable_icons_check", "enable_icons", "check",
      {}, "main", "Показывать иконки"),
     ("auto_update_sources_check", "auto_update_sources", "check",
-     {}, "main", "Автоматически обновлять источники"),
+     {}, "main",
+     "Автоматически обновлять пользовательские источники "
+     "по расписанию"),
     ("auto_backup_check", "auto_backup_before_save", "check",
      {}, "main", "Автобэкап перед сохранением (.bak)"),
     ("allow_dup_urls_check", "allow_duplicate_urls", "check",
@@ -488,54 +493,173 @@ GENERAL_SPEC: List[Tuple[str, str, str, Dict[str, Any],
      {"placeholder": "http://example.com/epg.xml — "
                      "укажите свой источник EPG"},
      "main", "EPG по умолчанию (URL):"),
-    ("sf_auto_load_check", "sources_finder_auto_load_after_add",
-     "check", {}, "sf",
-     "Сразу загружать в кэш после авто-поиска"),
-    ("sf_github_check", "sources_finder_include_github", "check",
-     {}, "sf", "Включать GitHub в авто-поиск"),
-    ("sf_m3uguide_check", "sources_finder_include_m3uguide",
-     "check", {}, "sf",
-     "Включать поиск в репозитории m3u.guide "
-     "через GitHub API"),
-    ("sf_max_github_spin", "sources_finder_max_github", "spin",
-     {"range": (1, 100)}, "sf", "Макс. GitHub-источников:"),
-    ("sf_max_m3uguide_spin", "sources_finder_max_m3uguide", "spin",
-     {"range": (1, 50)}, "sf",
-     "Макс. m3u.guide-источников:"),
-    ("sf_update_interval_spin",
-     "sources_finder_update_interval_hours", "spin",
-     {"range": (1, 720), "suffix": " ч"},
-     "sf", "Интервал авто-обновления:"),
+    # ── Пути к сторонним приложениям ──
+    ("ffprobe_path_edit", "ffprobe_path", "line",
+     {"placeholder": "Пусто = искать в PATH. Можно указать "
+                     "файл ffprobe(.exe) или папку с ним."},
+     "external", "Путь к ffprobe:"),
+    ("mpv_path_edit", "mpv_path", "line",
+     {"placeholder": "Пусто = искать стандартно. Можно "
+                     "указать файл mpv(.exe) или папку с ним."},
+     "external", "Путь к mpv:"),
+    # ── Кодировка при «Сохранить как» ──
+    ("save_encoding_combo", "default_save_encoding", "combo",
+     {"items": [
+         ("Авто (как в исходном файле)", "auto"),
+         ("UTF-8", "utf-8"),
+         ("UTF-8 с BOM", "utf-8-sig"),
+         ("Windows-1251", "cp1251"),
+     ]},
+     "main", "Кодировка при «Сохранить как»:"),
+    # ── Авто-проверка ссылок ──
+    ("auto_check_on_open_check", "auto_check_on_open", "check",
+     {}, "check",
+     "Проверять все ссылки при открытии файла"),
+    ("auto_check_interval_spin", "auto_check_interval_hours",
+     "spin", {"range": (0, 720), "suffix": " ч"},
+     "check",
+     "Проверять все ссылки в фоне каждые (0 = не проверять):"),
 ]
 
 
 class GeneralSettingsDialog(BaseDialog):
     def __init__(self, core: 'ApplicationCore', parent=None):
         super().__init__("Общие настройки", parent,
-                          size=(520, 940))
+                          size=(620, 720))
         self.core = core
         self._widgets: Dict[str, QWidget] = {}
         self._setup_ui()
 
     def _setup_ui(self):
         l = self.root
-        form = QFormLayout()
+        tabs = QTabWidget()
+
+        # ── Основные ──
+        main_w = QWidget()
+        main_form = QFormLayout(main_w)
+
+        # ── Внешние приложения ──
+        external_w = QWidget()
+        external_form = QFormLayout(external_w)
+        self._add_path_row(
+            external_form, "ffprobe_path_edit",
+            "Путь к ffprobe:",
+            "Кнопка «Определить разрешение» требует ffprobe. "
+            "Если ffprobe не в PATH — укажите путь к файлу "
+            "или папке с ним. Пусто = искать в PATH.",
+            self._browse_ffprobe)
+        self._add_path_row(
+            external_form, "mpv_path_edit",
+            "Путь к mpv:",
+            "Встроенный плеер требует mpv. Если mpv не в PATH "
+            "и не найден стандартно — укажите путь к файлу "
+            "или папке с ним. Пусто = искать стандартно.",
+            self._browse_mpv)
+
+        # ── Проверка ссылок ──
+        check_w = QWidget()
+        check_form = QFormLayout(check_w)
+
+        # ── Кэш ──
+        cache_w = QWidget()
+        cache_form = QFormLayout(cache_w)
+
+        # Раскладываем все поля по своим табам.
         c = self.core.config
-        for attr, cfg_key, kind, params, _g, label in GENERAL_SPEC:
+        for attr, cfg_key, kind, params, group, label in GENERAL_SPEC:
+            if group == "external":
+                w = self._widgets.get(attr)
+                if w is not None:
+                    _write_value(kind, w, c.get(cfg_key))
+                continue
             widget = _make_widget(kind, params, label, self)
             self._widgets[attr] = widget
             _write_value(kind, widget, c.get(cfg_key))
-            if kind == "check":
-                form.addRow(widget)
-            else:
-                form.addRow(label or "", widget)
-        l.addLayout(form)
+            if group == "main":
+                if kind == "check":
+                    main_form.addRow(widget)
+                else:
+                    main_form.addRow(label or "", widget)
+            elif group == "check":
+                if kind == "check":
+                    check_form.addRow(widget)
+                else:
+                    check_form.addRow(label or "", widget)
+
+        main_w.setLayout(main_form)
+        external_w.setLayout(external_form)
+        check_w.setLayout(check_form)
+        cache_w.setLayout(cache_form)
+
+        tabs.addTab(main_w, "Основные")
+        tabs.addTab(external_w, "Внешние приложения")
+        tabs.addTab(check_w, "Проверка ссылок")
+
+        l.addWidget(tabs)
         l.addWidget(hint_label(
             "Приложение не содержит встроенного EPG. Укажите "
             "свой URL в поле «EPG по умолчанию» — он будет "
-            "использоваться, если в шапке плейлиста нет url-tvg."))
+            "использоваться, если в шапке плейлиста нет url-tvg.\n\n"
+            "Источники плейлистов добавляются только вручную "
+            "через «Инструменты → Источники ссылок» — "
+            "автоматического поиска нет."))
         self.add_ok_cancel()
         self.add_reset_button(self._reset_to_defaults)
+
+    def _add_path_row(self, form: QFormLayout, attr: str,
+                      label: str, tooltip: str, on_browse) -> None:
+        edit = QLineEdit()
+        edit.setPlaceholderText(
+            self._get_placeholder(attr))
+        edit.setToolTip(tooltip)
+        self._widgets[attr] = edit
+        row = QHBoxLayout()
+        row.addWidget(edit, 1)
+        btn = QPushButton("Обзор...")
+        btn.clicked.connect(on_browse)
+        row.addWidget(btn)
+        row_w = QWidget()
+        row_w.setLayout(row)
+        form.addRow(label, row_w)
+
+    @staticmethod
+    def _get_placeholder(attr: str) -> str:
+        for a, _k, _kd, params, _g, _l in GENERAL_SPEC:
+            if a == attr:
+                return params.get("placeholder", "")
+        return ""
+
+    def _browse_ffprobe(self):
+        edit = self._widgets.get("ffprobe_path_edit")
+        if edit is None:
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Выбрать ffprobe",
+            edit.text() or "",
+            "ffprobe (ffprobe ffprobe.exe);;Все файлы (*.*)")
+        if not path:
+            d = QFileDialog.getExistingDirectory(
+                self, "Или выберите папку с ffprobe")
+            if d:
+                edit.setText(d)
+            return
+        edit.setText(path)
+
+    def _browse_mpv(self):
+        edit = self._widgets.get("mpv_path_edit")
+        if edit is None:
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Выбрать mpv",
+            edit.text() or "",
+            "mpv (mpv mpv.exe);;Все файлы (*.*)")
+        if not path:
+            d = QFileDialog.getExistingDirectory(
+                self, "Или выберите папку с mpv")
+            if d:
+                edit.setText(d)
+            return
+        edit.setText(path)
 
     def _reset_to_defaults(self):
         if not confirm(self,
@@ -548,6 +672,36 @@ class GeneralSettingsDialog(BaseDialog):
                 continue
             _write_value(kind, w, Config.DEFAULT.get(cfg_key))
 
+    def _validate_path(self, attr: str, key: str,
+                       label: str,
+                       exe_names: Tuple[str, ...]) -> bool:
+        w = self._widgets.get(attr)
+        if w is None:
+            return True
+        raw = w.text().strip()
+        if not raw:
+            return True  # пусто = искать стандартно
+        p = os.path.expanduser(raw)
+        if os.path.isdir(p):
+            found = any(
+                os.path.isfile(os.path.join(p, n))
+                for n in exe_names)
+            if not found:
+                warn_box(
+                    self,
+                    f"{label}: в папке не найден ни один из "
+                    f"файлов: {', '.join(exe_names)}.\n\n"
+                    f"Папка: {p}")
+                return False
+            return True
+        if not os.path.isfile(p):
+            if not confirm(
+                    self,
+                    f"{label}: файл не найден:\n{p}\n\n"
+                    f"Всё равно сохранить?"):
+                return False
+        return True
+
     def apply(self) -> bool:
         c = self.core.config
         epg_url = self._widgets[
@@ -558,6 +712,21 @@ class GeneralSettingsDialog(BaseDialog):
                 warn_box(self,
                          "EPG по умолчанию: нужен http(s):// URL")
                 return False
+
+        if not self._validate_path(
+                "ffprobe_path_edit", "ffprobe_path",
+                "Путь к ffprobe",
+                ("ffprobe", "ffprobe.exe")):
+            return False
+        if not self._validate_path(
+                "mpv_path_edit", "mpv_path",
+                "Путь к mpv",
+                ("mpv", "mpv.exe")):
+            return False
+
+        old_ffprobe = (c.get('ffprobe_path', '') or '').strip()
+        old_mpv = (c.get('mpv_path', '') or '').strip()
+
         for attr, cfg_key, kind, _p, _g, _l in GENERAL_SPEC:
             w = self._widgets.get(attr)
             if w is None:
@@ -566,7 +735,31 @@ class GeneralSettingsDialog(BaseDialog):
         if not c.save():
             warn_box(self, "Не удалось сохранить настройки")
             return False
+
+        # Сброс кешей поиска, если пути изменились.
+        new_ffprobe = (c.get('ffprobe_path', '') or '').strip()
+        new_mpv = (c.get('mpv_path', '') or '').strip()
+        try:
+            if new_ffprobe != old_ffprobe:
+                from ffprobe_utils import reset_ffprobe_cache
+                reset_ffprobe_cache()
+                logger.info(
+                    "ffprobe_path изменён: %r -> %r",
+                    old_ffprobe, new_ffprobe)
+            if new_mpv != old_mpv:
+                from player import reset_mpv_cache
+                reset_mpv_cache()
+                logger.info(
+                    "mpv_path изменён: %r -> %r",
+                    old_mpv, new_mpv)
+        except Exception:
+            logger.exception("reset_*_cache после смены путей")
+
         self.core.apply_auto_update_setting()
+        try:
+            self.core.apply_auto_check_setting()
+        except Exception:
+            logger.exception("apply_auto_check_setting")
         self.core.settings_changed.emit()
         return True
 
