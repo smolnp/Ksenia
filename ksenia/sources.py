@@ -440,11 +440,6 @@ class LinkSourceManager:
             self, channels: List[ChannelData], bl_mgr,
             settings: Optional[LinkReplacementSettings] = None
     ) -> Dict[str, List[ChannelData]]:
-        """Строит индекс «ключ поиска → живые каналы».
-
-        Фильтрация по temp_domains/unsafe_domains выполняется
-        через settings.is_filtered_domain() — не дублируем.
-        """
         alive_index: Dict[str, List[ChannelData]] = defaultdict(
             list)
         if self.cache_manager is None or not channels:
@@ -506,6 +501,11 @@ class LinkSourceManager:
             channels: List[ChannelData],
             settings: Optional[LinkReplacementSettings] = None,
     ) -> int:
+        """P0.3: normalized_index — ТОЛЬКО для поиска.
+
+        Храним минимум: search_key, name, tvg_id, url, priority.
+        Полные каналы — в link_cache (JSON).
+        """
         if self.cache_manager is None or not channels:
             return 0
         settings_fp = self._settings_fingerprint(settings)
@@ -577,51 +577,27 @@ class LinkSourceManager:
             bl_mgr=None,
             settings: Optional[LinkReplacementSettings] = None
     ):
+        """P0.3: НЕ восстанавливаем каналы из normalized_index.
+
+        normalized_index — только для поиска (search_key → url).
+        Для восстановления полных каналов используем link_cache
+        (JSON) в load_links_from_source. Если кэша нет —
+        load_links_from_source загрузит заново.
+        """
         if not name:
             logger.warning(
                 "_store_loaded: empty source name, skipping")
             return
 
-        settings_fp = self._settings_fingerprint(settings)
-        from_db: Optional[Dict[str, List[Dict[str, Any]]]] = None
-        if self.cache_manager is not None:
-            try:
-                loaded = self.cache_manager.load_normalized_index(
-                    settings_fp, max_age_hours=24, source=name)
-                from_db = loaded
-            except Exception:
-                logger.exception("load_normalized_index")
-
         index: Dict[str, List[ChannelData]] = defaultdict(list)
         alive_index: Dict[str, List[ChannelData]] = defaultdict(list)
 
-        if from_db and name in from_db and from_db[name]:
-            by_url: Dict[str, ChannelData] = {}
-            for row in from_db[name]:
-                url = (row.get('url') or '').strip()
-                if not url:
-                    continue
-                ch = by_url.get(url)
-                if ch is None:
-                    ch = ChannelData()
-                    ch.meta.name = (row.get('name') or '')
-                    ch.meta.tvg_id = (row.get('tvg_id') or '')
-                    ch.link.url = url
-                    ch.link.has_url = True
-                    ch.link.link_source = name
-                    ch.update_extinf()
-                    by_url[url] = ch
-                sk = (row.get('search_key') or '').strip()
-                if not sk:
-                    continue
-                index[sk].append(ch)
-                alive_index[sk].append(ch)
-        else:
-            for ch in channels:
-                for key in ch.search_keys(settings):
-                    index[key].append(ch)
-            alive_index = self._build_alive_index(
-                channels, bl_mgr, settings=settings)
+        # Всегда строим индекс из реальных каналов.
+        for ch in channels:
+            for key in ch.search_keys(settings):
+                index[key].append(ch)
+        alive_index = self._build_alive_index(
+            channels, bl_mgr, settings=settings)
 
         with self._lock:
             self._loaded[name] = (time.time(), path, channels)
@@ -825,19 +801,19 @@ class LinkSourceManager:
             settings: Optional[LinkReplacementSettings] = None
     ) -> List[ChannelData]:
         if not os.path.exists(source.path):
-            source.last_error = f"File not found: {source.path}"
+            source.last_error = f"Файл не найден: {source.path}"
             return []
         try:
             if os.path.getsize(source.path) > MAX_SOURCE_FILE_BYTES:
-                source.last_error = "File is too large"
+                source.last_error = "Файл слишком большой"
                 return []
             with open(source.path, 'rb') as f:
                 raw = f.read()
         except PermissionError as e:
-            source.last_error = f"Access denied: {e}"
+            source.last_error = f"Нет доступа: {e}"
             return []
         except OSError as e:
-            source.last_error = f"Read error: {e}"
+            source.last_error = f"Ошибка чтения: {e}"
             return []
 
         if source.encoding and source.encoding != 'auto':
@@ -862,10 +838,22 @@ class LinkSourceManager:
         source.raw_total_links = len(parsed)
         source.raw_total_with_url = sum(
             1 for c in parsed if c.has_valid_url)
-        return self._post_process_channels(
+        channels = self._post_process_channels(
             parsed, source,
             blacklist_manager, domain_blacklist_manager,
             domain_user_agent_manager)
+        # P0.3: сохраняем локальные каналы в link_cache,
+        # чтобы при следующем открытии не терять данные.
+        if channels and self.cache_manager is not None:
+            try:
+                self.cache_manager.put_link_cache(
+                    source.path,
+                    [c.to_dict() for c in channels])
+            except Exception:
+                logger.warning(
+                    "put_link_cache failed for local %s",
+                    source.path, exc_info=True)
+        return channels
 
     def _load_remote(
             self, source: LinkSource, use_cache: bool,
@@ -918,10 +906,13 @@ class LinkSourceManager:
                             if cancelled(stop_token):
                                 was_stopped = True
                                 break
-                            buf.extend(chunk)
-                            if len(buf) > MAX_SOURCE_FILE_BYTES:
-                                primary_error = "File is too large"
+                            # P0.8: лимит ДО extend
+                            if (len(buf) + len(chunk)
+                                    > MAX_SOURCE_FILE_BYTES):
+                                primary_error = (
+                                    "Файл слишком большой")
                                 break
+                            buf.extend(chunk)
                         if not primary_error and not was_stopped:
                             content, _ = decode_m3u_bytes(
                                 bytes(buf))
@@ -1196,10 +1187,22 @@ class LinkSourceManager:
             domain_user_agent_manager=None,
             only_working: bool = True
     ) -> List[ChannelData]:
+        """P1.4: использует _name_index, не загружает источники."""
         if not search_keys:
             return []
         results: List[ChannelData] = []
         enabled = self.get_enabled_sources()
+
+        # Проверяем, есть ли что искать.
+        with self._lock:
+            has_any_index = any(
+                bool(self._name_index.get(s.name))
+                for s in enabled)
+        if not has_any_index:
+            logger.info(
+                "search_channel: _name_index пуст — "
+                "сначала обновите источники")
+            return []
 
         dm = domain_blacklist_manager
 
@@ -1270,47 +1273,15 @@ class LinkSourceManager:
                 keys_cache[ch.uid] = k
             return k
 
-        ex = self._get_search_pool()
-        futures = {
-            ex.submit(
-                self.load_links_from_source,
-                s, True, config, True, stop_token,
-                blacklist_manager=blacklist_manager,
-                domain_blacklist_manager=
-                    domain_blacklist_manager,
-                domain_user_agent_manager=
-                    domain_user_agent_manager,
-                settings=settings
-            ): s
-            for s in enabled
-        }
-        try:
-            for fut in concurrent.futures.as_completed(
-                    futures,
-                    timeout=SEARCH_FUTURES_TIMEOUT_SEC):
-                if cancelled(stop_token):
-                    continue
-                try:
-                    fut.result()
-                except Exception:
-                    logger.exception("Source search failed")
-                    continue
-                src = futures[fut]
-                with self._lock:
-                    index = self._name_index.get(src.name)
-                if not index:
-                    continue
-                results.extend(
-                    _collect_from_index(
-                        index, settings.search_type))
-        except concurrent.futures.TimeoutError:
-            logger.warning(
-                "search_channel: timeout %ds, cancelling "
-                "pending futures",
-                SEARCH_FUTURES_TIMEOUT_SEC)
-            for f in futures:
-                with suppress(Exception):
-                    f.cancel()
+        # Ищем по уже загруженным индексам (без загрузки).
+        for src in enabled:
+            with self._lock:
+                index = self._name_index.get(src.name)
+            if not index:
+                continue
+            results.extend(
+                _collect_from_index(
+                    index, settings.search_type))
 
         def key(ch: ChannelData):
             sp = self._source_priority(ch.link.link_source)

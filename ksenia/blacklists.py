@@ -1,7 +1,7 @@
 # Copyright (C) 2025 SmolNP
 # SPDX-License-Identifier: GPL-3.0-or-later
 # См. LICENSE в корне проекта.
-"""Чёрные списки и правила UA."""
+"""Чёрные списки, правила UA, SSL-исключения."""
 from __future__ import annotations
 
 import ipaddress
@@ -129,7 +129,6 @@ class DomainBlacklistRule:
         try:
             ia, ib = (ipaddress.ip_address(a),
                       ipaddress.ip_address(b))
-            # Нормализуем IPv4-mapped IPv6 к IPv4 в обе стороны.
             if ia.version == 6 and ia.ipv4_mapped:
                 ia = ia.ipv4_mapped
             if ib.version == 6 and ib.ipv4_mapped:
@@ -358,8 +357,6 @@ class DomainUserAgentRule:
 
 
 class DomainUserAgentManager:
-    """Правила UA по доменам. Более специфичные правила первыми."""
-
     def __init__(self, config_dir: str):
         self._store = BaseJsonStore(
             os.path.join(config_dir,
@@ -568,3 +565,74 @@ class DomainUserAgentManager:
         logger.info("UA rules: total=%d, matched=%d, changed=%d",
                     total, matched, changed)
         return changed
+
+
+# ── SslExceptionManager (P9) ──
+
+class SslExceptionManager:
+    """Per-domain SSL-исключения.
+
+    Когда `verify_ssl=True` глобально, но у домена
+    самоподписанный сертификат — пользователь может
+    добавить домен в исключения, и HttpClient будет
+    ходить с verify=False только для этого домена.
+    """
+    __slots__ = ('_store', '_lock', '_domains')
+
+    def __init__(self, config_dir: str):
+        self._store = BaseJsonStore(
+            os.path.join(config_dir, "ssl_exceptions.json"), [])
+        self._lock = threading.RLock()
+        self._domains: Set[str] = {
+            str(d).strip().lower()
+            for d in self._store._data if d
+        }
+
+    def _persist_locked(self) -> bool:
+        self._store._data = sorted(self._domains)
+        return self._store.save()
+
+    def add(self, domain: str) -> bool:
+        d = (URLUtils.normalize_host(domain)
+             or (domain or '').strip().lower())
+        if not d:
+            return False
+        with self._lock:
+            if d in self._domains:
+                return False
+            self._domains.add(d)
+            return self._persist_locked()
+
+    def remove(self, domain: str) -> bool:
+        d = (URLUtils.normalize_host(domain)
+             or (domain or '').strip().lower())
+        if not d:
+            return False
+        with self._lock:
+            if d not in self._domains:
+                return False
+            self._domains.discard(d)
+            return self._persist_locked()
+
+    def is_allowed(self, url: str) -> bool:
+        """True, если для этого URL можно verify=False."""
+        if not url:
+            return False
+        host = URLUtils.extract_host(url)
+        if not host:
+            return False
+        with self._lock:
+            if not self._domains:
+                return False
+            return any(
+                host == d or host.endswith('.' + d)
+                for d in self._domains)
+
+    def get_all(self) -> List[str]:
+        with self._lock:
+            return sorted(self._domains)
+
+    def clear(self):
+        with self._lock:
+            self._domains.clear()
+            self._persist_locked()

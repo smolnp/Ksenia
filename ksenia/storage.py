@@ -90,7 +90,8 @@ class StableStateManager:
             with open(self.path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             if isinstance(data, dict):
-                self._data = {str(k): str(v) for k, v in data.items()}
+                self._data = {str(k): str(v)
+                              for k, v in data.items()}
         except Exception:
             logger.exception("StableState load")
 
@@ -274,31 +275,36 @@ class CacheManager:
                 CREATE INDEX IF NOT EXISTS idx_norm_cached
                     ON normalized_index(cached_at);
             """)
-            # Миграция: добавляем новые колонки, если их нет в
-            # существующей БД (обратная совместимость).
+            # P0.12: гонка миграции — try/except вокруг ALTER
             cols = {r['name'] for r in
                     conn.execute(
                         "PRAGMA table_info(url_status_cache)")}
             if 'ttfb_ms' not in cols:
                 logger.info(
                     "Migration: url_status_cache ADD COLUMN ttfb_ms")
-                conn.execute(
-                    "ALTER TABLE url_status_cache "
-                    "ADD COLUMN ttfb_ms REAL")
+                try:
+                    conn.execute(
+                        "ALTER TABLE url_status_cache "
+                        "ADD COLUMN ttfb_ms REAL")
+                except sqlite3.OperationalError as e:
+                    if "duplicate column" not in str(e).lower():
+                        raise
             if 'resolution' not in cols:
                 logger.info(
                     "Migration: url_status_cache "
                     "ADD COLUMN resolution TEXT DEFAULT ''")
-                conn.execute(
-                    "ALTER TABLE url_status_cache "
-                    "ADD COLUMN resolution TEXT DEFAULT ''")
+                try:
+                    conn.execute(
+                        "ALTER TABLE url_status_cache "
+                        "ADD COLUMN resolution TEXT DEFAULT ''")
+                except sqlite3.OperationalError as e:
+                    if "duplicate column" not in str(e).lower():
+                        raise
             conn.commit()
 
     @staticmethod
     def _row_to_check_dict(row: sqlite3.Row) -> Dict[str, Any]:
         sc = row['status_code']
-        # sqlite3.Row поддерживает .keys(); при отсутствии
-        # колонки (очень старая БД) — дефолт.
         try:
             ttfb = row['ttfb_ms']
         except (IndexError, KeyError):
@@ -426,12 +432,6 @@ class CacheManager:
             results: List[Tuple[str, str, bool, float, str,
                                 Optional[int], Optional[float],
                                 str]]) -> None:
-        """Батч-запись результатов проверок.
-
-        Каждый элемент:
-          (name, url, alive, response_ms, status_text,
-           status_code, ttfb_ms, resolution)
-        """
         if not results:
             return
         now = time.time()
@@ -629,18 +629,12 @@ class CacheManager:
             settings_fp: str,
             replace_source: bool = True,
     ) -> int:
+        """P0.4: атомарная замена.
+
+        Используем SAVEPOINT + порции по 1000. При ошибке —
+        ROLLBACK TO SAVEPOINT, старое остаётся.
+        """
         if not source or not settings_fp:
-            return 0
-        if not rows:
-            if replace_source:
-                try:
-                    conn = self._connect()
-                    with conn:
-                        conn.execute(
-                            "DELETE FROM normalized_index "
-                            "WHERE source = ?", (source,))
-                except Exception:
-                    pass
             return 0
         now = time.time()
         prepared: List[Tuple[str, str, str, str, str, int, str,
@@ -674,18 +668,28 @@ class CacheManager:
             return 0
         try:
             conn = self._connect()
-            with conn:
+            conn.execute("SAVEPOINT norm_save")
+            try:
                 if replace_source:
                     conn.execute(
                         "DELETE FROM normalized_index "
                         "WHERE source = ?", (source,))
-                conn.executemany("""
-                    INSERT OR REPLACE INTO normalized_index
-                        (source, search_key, name, tvg_id, url,
-                         priority, settings_fp, cached_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """, prepared)
-            return len(prepared)
+                for i in range(0, len(prepared), 1000):
+                    chunk = prepared[i:i + 1000]
+                    conn.executemany("""
+                        INSERT OR REPLACE INTO normalized_index
+                            (source, search_key, name, tvg_id, url,
+                             priority, settings_fp, cached_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """, chunk)
+                conn.execute("RELEASE SAVEPOINT norm_save")
+                conn.commit()
+                return len(prepared)
+            except Exception:
+                conn.execute("ROLLBACK TO SAVEPOINT norm_save")
+                conn.execute("RELEASE SAVEPOINT norm_save")
+                conn.commit()
+                raise
         except sqlite3.ProgrammingError:
             return 0
         except Exception:

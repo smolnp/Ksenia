@@ -6,17 +6,12 @@ from __future__ import annotations
 
 from PyQt6.QtWidgets import QDialogButtonBox, QMessageBox
 
-APP_VERSION = "0.2.2"
+APP_VERSION = "0.2.3"  # ← bump версии после P0
 APP_ORG = "Ksenia"
 APP_NAME = "KseniaM3UEditor"
 
-# ── EPG по умолчанию ──
-# ПРИНЦИПИАЛЬНО ПУСТО: приложение не содержит встроенных ссылок
-# на EPG. Пользователь указывает свой URL в настройках
-# («Настройки → Общие → EPG по умолчанию») или в диалоге загрузки.
 DEFAULT_EPG_URL = ""
 
-# Отпечаток настроек нормализации, которые влияют на ключи индекса.
 NORMALIZATION_SETTINGS_KEYS = (
     'remove_parentheses_in_names',
     'remove_brackets_in_names',
@@ -25,7 +20,6 @@ NORMALIZATION_SETTINGS_KEYS = (
     'use_iptv_org_aliases',
 )
 
-# ── Лимиты ──
 UNDO_MAX_STATES = 100
 RECENT_FILES_MAX = 10
 URL_CHECK_MAX_WORKERS = 8
@@ -51,7 +45,6 @@ MAX_SOURCE_FILE_BYTES = 256 * 1024 * 1024
 EPG_CACHE_TTL_HOURS = 24
 CHECK_RESULT_CACHE_TTL_HOURS = 24
 
-# ── IconProvider ──
 THEME_ICON_NEGATIVE_TTL_SEC = 300
 THEME_ICON_CACHE_MAX = 256
 
@@ -74,7 +67,6 @@ VERIFY_CANDIDATES_MAX_WORKERS_DEFAULT = 4
 SAFETY_MAX_SNAPSHOTS_DEFAULT = 100
 EPG_ALTERNATIVE_NAMES_MAX = 20
 
-# ── Player (mpv) ──
 PLAYER_DEFAULT_VOLUME = 100
 PLAYER_ASPECT_DEFAULT = "auto"
 PLAYER_HWDEC_DEFAULT = "auto-safe"
@@ -84,7 +76,6 @@ PLAYER_LIVE_CACHING_DEFAULT_MS = 1500
 PLAYER_STATUS_POLL_MS = 300
 PLAYER_IPC_CONNECT_TIMEOUT_MS = 10000
 
-# ── EPG (нечёткий поиск) ──
 EPG_FUZZY_ENABLED_DEFAULT = True
 EPG_FUZZY_THRESHOLD_DEFAULT = 0.85
 EPG_FUZZY_MIN_LENGTH_DEFAULT = 5
@@ -93,27 +84,24 @@ EPG_FUZZY_CACHE_LIMIT = 4096
 EPG_ALLOWED_META_FIELDS = frozenset(
     {'tvg_id', 'tvg_name', 'tvg_logo', 'tvg_chno'})
 
-# ── Stable-экспорт ──
 STABLE_STATE_FILE = "stable_state.json"
 STABLE_LATENCY_THRESHOLD_MS = 1500
 STABLE_CHECK_TIMEOUT_SEC = 5
 STABLE_CHECK_MAX_WORKERS = 8
 
-# ── Файловые фильтры ──
 M3U_FILTER = "M3U (*.m3u *.m3u8);;Все файлы (*.*)"
 JSON_FILTER = "JSON (*.json);;Все файлы (*.*)"
 CSV_FILTER = "CSV (*.csv);;Все файлы (*.*)"
 ALL_FILTER = "Все файлы (*.*)"
 
-# ── Группы ──
 GROUP_FILTER_ALL = "Все группы"
 GROUP_FILTER_DUPLICATES = "🔁 Дубликаты"
 DEFAULT_GROUP = "Без группы"
 
-# ── Фильтр статуса (панель фильтров) ──
+# ── Фильтр статуса ──
 STATUS_FILTER_ALL = "Всего"
-STATUS_FILTER_WITH_URL = "С URL"
-STATUS_FILTER_WITHOUT_URL = "Без URL"
+STATUS_FILTER_WITH_URL = "Со ссылками"
+STATUS_FILTER_WITHOUT_URL = "Без ссылок"
 STATUS_FILTER_WORKING = "Работают"
 STATUS_FILTER_NOT_WORKING = "Не работают"
 STATUS_FILTER_UNCHECKED = "Не проверены"
@@ -133,48 +121,36 @@ OK_CANCEL_BB = (QDialogButtonBox.StandardButton.Ok |
                 QDialogButtonBox.StandardButton.Cancel)
 CLOSE_BB = QDialogButtonBox.StandardButton.Close
 
-# ── ffprobe (определение реального разрешения потока) ──
 FFPROBE_TIMEOUT_SEC = 5
 FFPROBE_PATH = "ffprobe"
 FFPROBE_MAX_WORKERS = 4
 
-# ── Auto-Repair (починка битых ссылок до обращения к кэшу) ──
 AUTO_REPAIR_MAX_ATTEMPTS = 2
 AUTO_REPAIR_SCHEME_TIMEOUT = 3
 
-# ── Авто-проверка ссылок ──
-# Раз в N часов проверять все ссылки во всех открытых
-# вкладках (в фоне). 0 = отключено.
 AUTO_CHECK_INTERVAL_HOURS_DEFAULT = 24
-# Минимальный интервал между авто-проверками (защита от
-# слишком частого запуска, если пользователь выставил 0).
 AUTO_CHECK_MIN_INTERVAL_HOURS = 1
 
 
 class StatusText:
-    UNCHECKED = "⚪ Не проверен"
-    NO_URL = "∅ Нет URL"
+    UNCHECKED = "⚪ Не проверено"
+    NO_URL = "∅ Нет ссылки"           # ← было «Нет URL»
     WORKING = "✓ Работает"
     NOT_WORKING = "✗ Не работает"
     UNSUPPORTED = "🟦 Не поддерживается"
     TIMEOUT = "⏳ Таймаут"
-    DNS_FAIL = "🌐 DNS не резолвится"
+    DNS_FAIL = "🌐 DNS не разрешается"  # ← было «DNS не резолвится»
     CONN_ERROR = "🔗 Ошибка соединения"
     GEOBLOCK = "🌍 Геоблок (403)"
     NOT_FOUND = "❌ Не найден (404)"
     CANCELLED = "⏹ Отменено"
-    BLOCKED_BY_DOMAIN = "🚫 Заблокирован ЧС домен/IP"
+    BLOCKED_BY_DOMAIN = "🚫 Домен/IP в чёрном списке"  # ← было «Заблокирован ЧС домен/IP»
     EMPTY_RESPONSE = "📭 Пустой ответ"
-    # ── Content-Type audit ──
     HTML_INSTEAD_OF_STREAM = "📄 HTML вместо потока"
     JSON_INSTEAD_OF_STREAM = "📄 JSON вместо потока"
     NON_VIDEO_CONTENT = "📄 Не видео-контент"
-    # ── Auto-Repair ──
-    REPAIRED = "🔧 Починена"
-    # ── ffprobe ──
+    REPAIRED = "🔧 Автопочинка"       # ← было «Починена»
     FFPROBE_MISSING = "🎬 ffprobe недоступен"
 
 
-# ── Кодировки при сохранении (для «Сохранить как») ──
-# 'auto' = как в исходном файле.
 SAVE_ENCODINGS = ('auto', 'utf-8', 'utf-8-sig', 'cp1251')

@@ -63,6 +63,9 @@ from paths import (Paths, confirm, confirm_three, error_box,
 from sources import LinkSource
 from theme import invalidate_cache as theme_invalidate
 from utils import _StopToken
+from plural_ru import (
+    channels_word, links_word, sources_word,
+)
 
 
 OK_CANCEL_BB = (QDialogButtonBox.StandardButton.Ok |
@@ -454,7 +457,7 @@ class MainWindow(QMainWindow):
                     tab._state_save_timer.stop()
                 tab.undo_manager.save_state(
                     tab.all_channels,
-                    "Применение ч.с. каналов")
+                    "Применение чёрного списка каналов")
                 tab._pending_state_desc = ""
                 tab.all_channels = filtered
                 tab._normalize_order()
@@ -572,13 +575,13 @@ class MainWindow(QMainWindow):
             self.status_combo.addItem(label)
         self.status_combo.setMinimumWidth(150)
         self.status_combo.setToolTip(
-            "Фильтр по наличию и состоянию URL:\n"
+            "Фильтр по наличию и состоянию ссылок:\n"
             "• Всего — без фильтра;\n"
-            "• С URL — has_valid_url;\n"
-            "• Без URL — каналы-заготовки;\n"
+            "• Со ссылками — has_valid_url;\n"
+            "• Без ссылок — каналы-заготовки;\n"
             "• Работают — url_status is True;\n"
             "• Не работают — url_status is False;\n"
-            "• Не проверены — с URL, но url_status is None.")
+            "• Не проверены — со ссылкой, но url_status is None.")
         self.status_combo.currentTextChanged.connect(
             self._on_status_filter_changed)
         fl.addWidget(self.status_combo, 0)
@@ -598,7 +601,6 @@ class MainWindow(QMainWindow):
     def _setup_menu(self):
         mb = self.menuBar()
 
-        # ── Файл ──
         fm = mb.addMenu("Файл")
         self._add_action(fm, "Новый", self._new_file, "Ctrl+N")
         self._add_action(fm, "Открыть", self._open_file, "Ctrl+O")
@@ -613,7 +615,7 @@ class MainWindow(QMainWindow):
                          "Ctrl+Shift+S")
         self._add_action(fm, "Сохранить всё", self._save_all)
         fm.addSeparator()
-        self._add_action(fm, "Экспорт Stable-плейлиста...",
+        self._add_action(fm, "Стабильный экспорт плейлиста...",
                          self._export_stable)
         fm.addSeparator()
         self._add_action(fm, "Импорт", self._import_file)
@@ -622,7 +624,6 @@ class MainWindow(QMainWindow):
         fm.addSeparator()
         self._add_action(fm, "Выход", self.close, "Alt+F4")
 
-        # ── Каналы ──
         cm = mb.addMenu("Каналы")
         self._add_action(cm, "Новый канал",
                          partial(self._with_tab, '_new_channel'),
@@ -637,7 +638,6 @@ class MainWindow(QMainWindow):
                          partial(self._with_tab, '_paste_channel'),
                          "Ctrl+V")
         cm.addSeparator()
-        # Подменю «Удалить каналы»
         del_ch = cm.addMenu("Удалить каналы")
         self._add_action(
             del_ch, "Без ссылок",
@@ -652,7 +652,6 @@ class MainWindow(QMainWindow):
             partial(self._with_tab,
                     'delete_channels_without_groups'))
         cm.addSeparator()
-        # Подменю «Определить разрешение»
         res_menu = cm.addMenu("🎬 Определить разрешение (ffprobe)")
         self._add_action(
             res_menu, "Текущего канала",
@@ -661,7 +660,7 @@ class MainWindow(QMainWindow):
             res_menu, "Выбранных каналов",
             partial(self._with_tab, '_detect_resolution_selected'))
         self._add_action(
-            res_menu, "Всех каналов с URL",
+            res_menu, "Всех каналов со ссылками",
             partial(self._with_tab, '_detect_resolution_all'))
         cm.addSeparator()
         self._add_action(cm, "Сравнить плейлисты...",
@@ -670,7 +669,6 @@ class MainWindow(QMainWindow):
         self._add_action(cm, "Удалить метаданные...",
                          self._remove_metadata)
 
-        # ── Ссылки ──
         lm = mb.addMenu("Ссылки")
         self._add_action(lm, "Проверить все ссылки",
                          partial(self._with_tab, 'check_all_urls'))
@@ -678,7 +676,6 @@ class MainWindow(QMainWindow):
                          partial(self._with_tab,
                                  '_check_selected_urls'))
         lm.addSeparator()
-        # Подменю «Исправить ссылки»
         fix_menu = lm.addMenu("Исправить ссылки")
         self._add_action(
             fix_menu, "Битые ссылки",
@@ -690,7 +687,6 @@ class MainWindow(QMainWindow):
             fix_menu, "Все ссылки",
             partial(self._with_tab, 'replace_all_links'))
         lm.addSeparator()
-        # Подменю «Удалить ссылки»
         del_links = lm.addMenu("Удалить ссылки")
         self._add_action(
             del_links, "Битые",
@@ -707,16 +703,14 @@ class MainWindow(QMainWindow):
         self._add_action(lm, "🚫 Заблокировать домен/IP…",
                          self._block_domain_manual)
 
-        # ── Инструменты ──
         tm = mb.addMenu("Инструменты")
         self._add_action(
             tm,
-            "Источники ссылок (обновить + проверить URL)...",
+            "Управление источниками (обновить + проверить)...",
             self._manage_sources)
         self._add_action(tm, "Редактировать заголовок...",
                          self._edit_header)
         tm.addSeparator()
-        # Подменю «Шаблоны категорий»
         cat_menu = tm.addMenu("📋 Шаблоны категорий")
         self._add_action(
             cat_menu, "Сохранить шаблон…",
@@ -737,16 +731,18 @@ class MainWindow(QMainWindow):
         self._add_action(tm, "Управление кэшем...",
                          self._manage_cache)
         tm.addSeparator()
-        self._add_action(tm, "Менеджер чёрного списка каналов",
+        self._add_action(tm,
+                         "Чёрный список каналов",
                          self._manage_blacklist)
-        self._add_action(tm, "Применить чёрный список каналов",
+        self._add_action(tm,
+                         "Применить чёрный список каналов",
                          self._apply_blacklist)
         tm.addSeparator()
         self._add_action(
-            tm, "Менеджер чёрного списка домен/IP",
+            tm, "Чёрный список доменов/IP",
             self._manage_domain_blacklist)
         self._add_action(
-            tm, "Очистить ссылки по чёрному списку домен/IP",
+            tm, "Очистить ссылки по чёрному списку доменов/IP",
             self._apply_domain_blacklist)
         tm.addSeparator()
         self._add_action(tm, "User-Agent по доменам",
@@ -757,7 +753,6 @@ class MainWindow(QMainWindow):
         tm.addSeparator()
         self._add_action(tm, "Показать лог", self._show_log)
 
-        # ── Настройки ──
         sm = mb.addMenu("Настройки")
         self._add_action(sm, "Настройки замены ссылок",
                          self._manage_replacement_settings)
@@ -779,7 +774,6 @@ class MainWindow(QMainWindow):
         self._add_action(sm, "Сбросить масштаб",
                          lambda: self._change_font(0), "Ctrl+0")
 
-        # ── Справка ──
         hm = mb.addMenu("Справка")
         self._add_action(hm, "Руководство пользователя",
                          self._show_help, "F1")
@@ -871,10 +865,10 @@ class MainWindow(QMainWindow):
             "Вставить (Ctrl+V)")
         self._toolbar.addSeparator()
 
-        add("Плеер", self._play_selected,
+        add("Проигрыватель", self._play_selected,
             self._std_icon(SP.SP_MediaPlay,
                            "media-playback-start"),
-            "Открыть в плеере")
+            "Открыть в проигрывателе")
         self._toolbar.addSeparator()
 
         add("Увеличить", lambda: self._change_font(+1),
@@ -917,11 +911,11 @@ class MainWindow(QMainWindow):
         self.hide_progress()
         info_box(
             self,
-            f"Stable-экспорт завершён.\n\n"
+            f"Стабильный экспорт завершён.\n\n"
             f"Записано: {written}\n"
-            f"Пропущено (нет живых URL): {skipped}\n\n"
+            f"Пропущено (нет живых ссылок): {skipped}\n\n"
             f"Состояние сохранено в stable_state.json.",
-            "Stable")
+            "Стабильный экспорт")
 
     def _on_stable_export_failed(self, err: str):
         if not _is_qobject_valid(self):
@@ -1149,7 +1143,7 @@ class MainWindow(QMainWindow):
             info_box(
                 self,
                 "Источники не содержат каналов "
-                "(или все отфильтрованы ЧС).")
+                "(или все отфильтрованы чёрным списком).")
             self.set_action("Готов")
             return
         tab = PlaylistTab(parent_window=self)
@@ -1180,7 +1174,8 @@ class MainWindow(QMainWindow):
         tab.set_group_filter(self.group_combo.currentText()
                               or GROUP_FILTER_ALL)
         self.set_action(
-            f"✓ Создан плейлист: {len(channels)} каналов")
+            f"✓ Создан плейлист: {len(channels)} "
+            f"{channels_word(len(channels))}")
 
     def _handle_playlist_creation_error(self, error_message: str):
         if not _is_qobject_valid(self):
@@ -1269,7 +1264,7 @@ class MainWindow(QMainWindow):
         if not self.current_tab:
             info_box(self, "Нет открытого плейлиста")
             return
-        fp = save_file_dialog(self, "Экспорт Stable",
+        fp = save_file_dialog(self, "Стабильный экспорт",
                               "stable.m3u", M3U_FILTER, ".m3u")
         if not fp:
             return
@@ -1302,7 +1297,8 @@ class MainWindow(QMainWindow):
             with tab._suppress_save():
                 tab._rebuild_model_safely()
             self._update_groups()
-            self.set_action(f"✓ Импортировано: {len(new_chs)}")
+            self.set_action(
+                f"✓ Импортировано: {len(new_chs)}")
         except Exception as e:
             logger.exception("import failed")
             error_box(self, str(e))
@@ -1496,8 +1492,9 @@ class MainWindow(QMainWindow):
             if ch and ch.has_valid_url:
                 tab._play_in_player(r)
                 return
-        info_box(self, "Нет каналов с URL в текущем фильтре",
-                 "Плеер")
+        info_box(self, "Нет каналов со ссылками "
+                        "в текущем фильтре",
+                 "Проигрыватель")
 
     def _edit_header(self):
         if self.current_tab:
@@ -1654,7 +1651,8 @@ class MainWindow(QMainWindow):
             removed = self.current_tab.apply_blacklist()
             if removed > 0:
                 self.set_action(
-                    f"✓ Удалено по ч.с. каналов: {removed}")
+                    f"✓ Удалено по чёрному списку каналов: "
+                    f"{removed}")
 
     def _apply_domain_blacklist(self):
         if not self.current_tab:
@@ -1662,7 +1660,8 @@ class MainWindow(QMainWindow):
         cleaned = self.current_tab._clean_blocked_by_domain()
         if cleaned > 0:
             self.set_action(
-                f"✓ Очищено ссылок по ч.с. домен/IP: {cleaned}")
+                f"✓ Очищено ссылок по чёрному списку "
+                f"доменов/IP: {cleaned}")
         else:
             info_box(self, "Совпадений не найдено")
 

@@ -35,23 +35,22 @@ def _get_core_if_gui():
 
 
 def _resolution_qcolor(ch: ChannelData) -> Optional[QColor]:
-    """Цветовая метка разрешения (для колонки «Качество»).
-    Возвращает None, если разрешение не определено."""
     res = (ch.status.resolution or "").lower()
     if not res:
         return None
     if "4k" in res or "2160" in res:
-        return QColor(255, 200, 0)      # 4K — золотой
+        return QColor(255, 200, 0)
     if "1080" in res:
-        return QColor(50, 190, 100)     # 1080p — зелёный
+        return QColor(50, 190, 100)
     if "720" in res:
-        return QColor(60, 170, 230)     # 720p — голубой
-    return QColor(150, 150, 150)        # SD/прочее — серый
+        return QColor(60, 170, 230)
+    return QColor(150, 150, 150)
 
 
 class ChannelTableModel(QAbstractTableModel):
     MIME_TYPE = "application/x-ksenia-channel-uids"
 
+    # P0.1: сигнал с insert_after (0 = до, 1 = после)
     request_move = pyqtSignal(list, object, int)
 
     def __init__(self, parent=None):
@@ -355,13 +354,9 @@ class ChannelTableModel(QAbstractTableModel):
                 if self._duplicate_mode:
                     return self._dup_text_color_for_uid(ch.uid)
                 return None
-            # Квадратик разрешения убран: разрешение теперь
-            # отображается цветными цифрами в колонке «Качество».
             return None
 
         if spec.key == "resolution":
-            # «—» (пустое значение) не подсвечиваем цветом —
-            # используем нейтральный цвет из палитры.
             if role == Qt.ItemDataRole.ForegroundRole:
                 if not ch.status.resolution:
                     return semantic_colors()['no_url']
@@ -450,6 +445,18 @@ class ChannelTableModel(QAbstractTableModel):
         return mime
 
     def dropMimeData(self, data, action, row, column, parent):
+        """P0.2: insert_after вычисляется из parent/row.
+
+        Qt передаёт:
+          - parent.isValid() → drop НА строку parent.row()
+          - row == -1 → drop в конец
+          - row >= 0 → drop ПЕРЕД строкой row (если parent
+            не валиден)
+
+        Внутренний drag&drop с InsertAfter вычисляется
+        в PlaylistTab.dropEvent и передаётся через
+        _pending_insert_after.
+        """
         if not data.hasFormat(self.MIME_TYPE):
             return False
         if action == Qt.DropAction.IgnoreAction:
@@ -462,29 +469,22 @@ class ChannelTableModel(QAbstractTableModel):
         if not uids:
             return False
 
-        insert_after = False
+        insert_after = getattr(
+            self, '_pending_insert_after', 0)
         target_row = -1
+
         if parent.isValid():
             target_row = parent.row()
-            try:
-                pos = self._last_drop_pos
-            except AttributeError:
-                pos = None
-            if pos is not None and 0 <= target_row < self.rowCount():
-                rect = self._view_visual_rect(target_row)
-                if rect is not None:
-                    mid_y = rect.y() + rect.height() // 2
-                    insert_after = pos.y() > mid_y
         elif row >= 0 and row < len(self._filtered):
             target_row = row
-            insert_after = True
         else:
             target_row = -1
 
         ref_uid: Optional[int] = None
         if 0 <= target_row < len(self._filtered):
             ref_uid = self._filtered[target_row].uid
-        self.request_move.emit(uids, ref_uid, 1 if insert_after else 0)
+        self.request_move.emit(
+            uids, ref_uid, 1 if insert_after else 0)
         return True
 
     def setData(self, index: QModelIndex, value,

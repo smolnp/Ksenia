@@ -82,7 +82,7 @@ SETTINGS_SPEC: List[Tuple[str, str, str, Dict[str, Any],
     ("max_urls_per_channel_spin",
      "max_urls_to_check_per_channel", "spin",
      {"range": (1, 50)},
-     "auto", "Макс. URL на канал:"),
+     "auto", "Макс. ссылок на канал:"),
     ("cache_trust_spin", "check_cache_trust_seconds", "spin",
      {"range": (60, 86400), "suffix": " с"},
      "auto", "Доверять кэшу проверок (сек):"),
@@ -123,7 +123,7 @@ SETTINGS_SPEC: List[Tuple[str, str, str, Dict[str, Any],
       "step": 0.1, "suffix": " с"},
      "net", "Задержка между повторами:"),
     ("verify_ssl_check", "verify_ssl", "check",
-     {}, "net", "Проверять SSL сертификаты"),
+     {}, "net", "Проверять SSL-сертификаты"),
     ("use_ip_filter_check", "use_ip_filtering", "check",
      {}, "filt", "Использовать IP/домен-фильтры"),
     ("temporary_domains_edit", "temporary_domains", "text",
@@ -298,7 +298,7 @@ class LinkReplacementSettingsDialog(BaseDialog):
         if fast_w is not None:
             fast_w.setToolTip(
                 "При включении игнорируются: таймаут, повторы, "
-                "макс. URL на канал, доверие кэшу и проверка "
+                "макс. ссылок на канал, доверие кэшу и проверка "
                 "кандидатов. Используются агрессивные значения "
                 "по умолчанию.")
             fast_w.toggled.connect(
@@ -317,7 +317,7 @@ class LinkReplacementSettingsDialog(BaseDialog):
             "⚡ Быстрая замена эффективна для массовой "
             "замены сотен битых каналов."))
         tabs_by_key["filt"][2].addRow(hint_label(
-            "ЧС домен/IP управляется отдельно. "
+            "Чёрный список доменов/IP управляется отдельно. "
             "По умолчанию: ОЧИЩАЕТ ссылку, канал сохраняется."))
         tabs_by_key["epg"][2].addRow(hint_label(
             "Имена каналов (meta.name) не перезаписываются "
@@ -464,7 +464,8 @@ GENERAL_SPEC: List[Tuple[str, str, str, Dict[str, Any],
      {}, "main", "Учитывать TVG-ID при дедупликации"),
     ("apply_filters_on_open_check", "apply_filters_on_file_open",
      "check", {},
-     "main", "Применять ЧС каналов и ЧС домен/IP "
+     "main", "Применять чёрный список каналов и "
+             "чёрный список доменов/IP "
              "при открытии файла"),
     ("preserve_order_check", "preserve_original_order", "check",
      {}, "main", "Сохранять оригинальный порядок каналов"),
@@ -486,13 +487,13 @@ GENERAL_SPEC: List[Tuple[str, str, str, Dict[str, Any],
      {}, "main", "Автобэкап перед сохранением (.bak)"),
     ("allow_dup_urls_check", "allow_duplicate_urls", "check",
      {}, "main",
-     "Разрешать одинаковые URL у разных каналов"),
+     "Разрешать одинаковые ссылки у разных каналов"),
     ("days_to_check_spin", "days_to_check", "spin",
      {"range": (0, 30)}, "main", "Дней для fallback:"),
     ("default_epg_url_edit", "default_epg_url", "line",
      {"placeholder": "http://example.com/epg.xml — "
                      "укажите свой источник EPG"},
-     "main", "EPG по умолчанию (URL):"),
+     "main", "Программа передач по умолчанию (URL):"),
     # ── Пути к сторонним приложениям ──
     ("ffprobe_path_edit", "ffprobe_path", "line",
      {"placeholder": "Пусто = искать в PATH. Можно указать "
@@ -534,11 +535,9 @@ class GeneralSettingsDialog(BaseDialog):
         l = self.root
         tabs = QTabWidget()
 
-        # ── Основные ──
         main_w = QWidget()
         main_form = QFormLayout(main_w)
 
-        # ── Внешние приложения ──
         external_w = QWidget()
         external_form = QFormLayout(external_w)
         self._add_path_row(
@@ -551,20 +550,17 @@ class GeneralSettingsDialog(BaseDialog):
         self._add_path_row(
             external_form, "mpv_path_edit",
             "Путь к mpv:",
-            "Встроенный плеер требует mpv. Если mpv не в PATH "
-            "и не найден стандартно — укажите путь к файлу "
-            "или папке с ним. Пусто = искать стандартно.",
+            "Встроенный проигрыватель требует mpv. Если mpv "
+            "не в PATH и не найден стандартно — укажите путь "
+            "к файлу или папке с ним. Пусто = искать стандартно.",
             self._browse_mpv)
 
-        # ── Проверка ссылок ──
         check_w = QWidget()
         check_form = QFormLayout(check_w)
 
-        # ── Кэш ──
         cache_w = QWidget()
         cache_form = QFormLayout(cache_w)
 
-        # Раскладываем все поля по своим табам.
         c = self.core.config
         for attr, cfg_key, kind, params, group, label in GENERAL_SPEC:
             if group == "external":
@@ -598,10 +594,11 @@ class GeneralSettingsDialog(BaseDialog):
         l.addWidget(tabs)
         l.addWidget(hint_label(
             "Приложение не содержит встроенного EPG. Укажите "
-            "свой URL в поле «EPG по умолчанию» — он будет "
-            "использоваться, если в шапке плейлиста нет url-tvg.\n\n"
+            "свой URL в поле «Программа передач по умолчанию» "
+            "— он будет использоваться, если в шапке плейлиста "
+            "нет url-tvg.\n\n"
             "Источники плейлистов добавляются только вручную "
-            "через «Инструменты → Источники ссылок» — "
+            "через «Инструменты → Управление источниками» — "
             "автоматического поиска нет."))
         self.add_ok_cancel()
         self.add_reset_button(self._reset_to_defaults)
@@ -615,7 +612,7 @@ class GeneralSettingsDialog(BaseDialog):
         self._widgets[attr] = edit
         row = QHBoxLayout()
         row.addWidget(edit, 1)
-        btn = QPushButton("Обзор...")
+        btn = QPushButton("Выбрать…")
         btn.clicked.connect(on_browse)
         row.addWidget(btn)
         row_w = QWidget()
@@ -680,7 +677,7 @@ class GeneralSettingsDialog(BaseDialog):
             return True
         raw = w.text().strip()
         if not raw:
-            return True  # пусто = искать стандартно
+            return True
         p = os.path.expanduser(raw)
         if os.path.isdir(p):
             found = any(
@@ -710,7 +707,8 @@ class GeneralSettingsDialog(BaseDialog):
             p = urlparse(epg_url)
             if p.scheme not in ('http', 'https') or not p.netloc:
                 warn_box(self,
-                         "EPG по умолчанию: нужен http(s):// URL")
+                         "Программа передач по умолчанию: "
+                         "нужен http(s):// URL")
                 return False
 
         if not self._validate_path(
@@ -736,7 +734,6 @@ class GeneralSettingsDialog(BaseDialog):
             warn_box(self, "Не удалось сохранить настройки")
             return False
 
-        # Сброс кешей поиска, если пути изменились.
         new_ffprobe = (c.get('ffprobe_path', '') or '').strip()
         new_mpv = (c.get('mpv_path', '') or '').strip()
         try:

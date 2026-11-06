@@ -6,11 +6,8 @@
 Кэш ~2-3 МБ в config-каталоге. TTL 24 ч. Загрузка ленивая.
 Защита от рекурсии через thread-local флаг _building.
 
-Алиасы хранятся в «сыром» виде (casefold, без нормализации).
-Нормализация применяется потребителем (name_normalizer) с
-учётом пользовательских настроек. Это гарантирует, что
-отключение любой опции нормализации (скобки, эмодзи,
-спецсимволы) не ломает поиск алиасов.
+P12: перевод на HttpClient (единый сетевой слой,
+verify_ssl из настроек, ретраи).
 """
 from __future__ import annotations
 
@@ -18,14 +15,13 @@ import json
 import os
 import threading
 import time
-import urllib.request
 from typing import Dict, Optional
 
 from logging_setup import logger
+from net.http_client import HttpClient
 
 _URL = "https://iptv-org.github.io/api/channels.json"
 _TTL_SEC = 24 * 60 * 60
-_UA = "Ksenia-M3U-Editor/0.2"
 _TIMEOUT_SEC = 30
 _CACHE_FILENAME = "iptv_org_aliases.json"
 
@@ -101,13 +97,14 @@ def _write_cache(aliases: Dict[str, str], source_count: int) -> None:
 
 
 def _download_channels() -> Optional[list]:
+    """P12: через HttpClient (verify_ssl из настроек)."""
     try:
-        req = urllib.request.Request(
-            _URL, headers={"User-Agent": _UA})
-        with urllib.request.urlopen(req,
-                                     timeout=_TIMEOUT_SEC) as r:
-            raw = r.read()
-        data = json.loads(raw.decode("utf-8"))
+        r = HttpClient.get(_URL, timeout=_TIMEOUT_SEC)
+        if r.status_code != 200:
+            logger.warning(
+                "iptv_org_aliases: HTTP %s", r.status_code)
+            return None
+        data = r.json()
         return data if isinstance(data, list) else None
     except Exception as e:
         logger.warning("iptv_org_aliases: download failed: %s", e)

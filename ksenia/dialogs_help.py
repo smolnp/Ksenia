@@ -34,7 +34,6 @@ _ID_ATTR_RE = re.compile(r'\bid\s*=\s*["\']([^"\']+)["\']',
 
 
 def _generate_toc(html: str) -> Tuple[str, List[Tuple[str, str]]]:
-    """Возвращает (html с id у заголовков, список (anchor, title))."""
     counter = [0]
     items: List[Tuple[str, str]] = []
 
@@ -67,7 +66,7 @@ class HelpBrowser(BaseDialog):
         self.help_dir = os.path.dirname(self.index_path)
         self._current_file = ""
         self._theme_handler_connected = False
-        self._history: List[Tuple[str, str]] = []  # (file, fragment)
+        self._history: List[Tuple[str, str]] = []
         self._history_pos: int = -1
         self._current_toc: List[Tuple[str, str]] = []
 
@@ -96,7 +95,6 @@ class HelpBrowser(BaseDialog):
         self.root.addWidget(bb)
 
     def _setup_ui(self):
-        # Верхняя панель навигации
         nav = QHBoxLayout()
         self.btn_back = QPushButton("◀ Назад")
         self.btn_back.setToolTip("Назад (Alt+Left)")
@@ -133,10 +131,8 @@ class HelpBrowser(BaseDialog):
         nav.addWidget(self.path_label)
         self.root.addLayout(nav)
 
-        # Основная область: боковая панель + контент
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        # Левая панель: оглавление
         left = QWidget()
         left_l = QVBoxLayout(left)
         left_l.setContentsMargins(0, 0, 0, 0)
@@ -148,7 +144,6 @@ class HelpBrowser(BaseDialog):
         left_l.addWidget(self.toc_list, 1)
         splitter.addWidget(left)
 
-        # Правая панель: контент
         self.viewer = QTextBrowser()
         self.viewer.setOpenExternalLinks(False)
         self.viewer.setOpenLinks(False)
@@ -162,7 +157,6 @@ class HelpBrowser(BaseDialog):
         splitter.setSizes([260, 940])
         self.root.addWidget(splitter, 1)
 
-        # Горячие клавиши
         QShortcut(QKeySequence("F5"), self,
                   activated=self._reload)
         QShortcut(QKeySequence("Home"), self,
@@ -226,7 +220,6 @@ class HelpBrowser(BaseDialog):
             self.viewer.scrollToAnchor(anchor)
 
     def _push_history(self, file_path: str, fragment: str = ""):
-        # Обрезаем «будущее» после текущей позиции
         if self._history_pos < len(self._history) - 1:
             self._history = self._history[:self._history_pos + 1]
         self._history.append((file_path, fragment))

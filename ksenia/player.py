@@ -1,7 +1,7 @@
 # Copyright (C) 2025 SmolNP
 # SPDX-License-Identifier: GPL-3.0-or-later
 # См. LICENSE в корне проекта.
-"""Встроенный плеер на mpv через QProcess --wid + JSON IPC.
+"""Встроенный проигрыватель на mpv через QProcess --wid + JSON IPC.
 
 Путь к mpv: сначала явный `mpv_path` из конфига (если задан),
 затем стандартные пути + PATH.
@@ -36,7 +36,6 @@ from theme import hint_hex
 from utils import URLUtils
 
 
-# Кеш поиска mpv.
 _find_mpv_lock = threading.Lock()
 _find_mpv_cache: Optional[str] = None
 _find_mpv_done: bool = False
@@ -55,12 +54,6 @@ def _bundle_dir() -> str:
 
 
 def _configured_mpv_path() -> str:
-    """Путь к mpv из конфига.
-
-    Читаем НАПРЯМУЮ: mpv ищется и из фоновых потоков
-    (например, при вызове is_mpv_available() до создания
-    главного окна).
-    """
     try:
         from app_core import ApplicationCore
         core = ApplicationCore._instance
@@ -73,7 +66,6 @@ def _configured_mpv_path() -> str:
 
 
 def _try_configured_mpv(path: str) -> Optional[str]:
-    """Явный путь: файл mpv(.exe) или директория с ним."""
     if not path:
         return None
     p = os.path.expanduser(path)
@@ -89,7 +81,6 @@ def _try_configured_mpv(path: str) -> Optional[str]:
 
 
 def reset_mpv_cache() -> None:
-    """Сброс кеша поиска mpv (после смены пути в настройках)."""
     global _find_mpv_cache, _find_mpv_done
     with _find_mpv_lock:
         _find_mpv_cache = None
@@ -97,10 +88,6 @@ def reset_mpv_cache() -> None:
 
 
 def find_mpv(force: bool = False) -> Optional[str]:
-    """Ищет mpv: явный путь из конфига → стандартные пути → PATH.
-
-    Кеширует результат до reset_mpv_cache() / force=True.
-    """
     global _find_mpv_cache, _find_mpv_done
     with _find_mpv_lock:
         if force:
@@ -109,7 +96,6 @@ def find_mpv(force: bool = False) -> Optional[str]:
         if _find_mpv_done:
             return _find_mpv_cache
 
-        # 1. Явный путь из конфига
         cfg_path = _configured_mpv_path()
         if cfg_path:
             explicit = _try_configured_mpv(cfg_path)
@@ -122,7 +108,6 @@ def find_mpv(force: bool = False) -> Optional[str]:
                 "mpv: указанный путь не найден (%s), "
                 "ищу стандартно", cfg_path)
 
-        # 2. Стандартные пути рядом с приложением
         if sys.platform.startswith("win"):
             exe_name = "mpv.exe"
             candidates = [
@@ -149,7 +134,6 @@ def find_mpv(force: bool = False) -> Optional[str]:
                 _find_mpv_done = True
                 return c
 
-        # 3. PATH
         path = shutil.which("mpv")
         _find_mpv_cache = path
         _find_mpv_done = True
@@ -185,6 +169,8 @@ class MpvPlayerWidget(QFrame):
     status_updated = pyqtSignal(dict)
     channel_status_changed = pyqtSignal(int, bool)
     tracks_updated = pyqtSignal(list, list, int, int)
+    # mpv как приоритетный источник разрешения
+    video_resolution_detected = pyqtSignal(int, int, int)
 
     def __init__(self, parent=None, *,
                  hwdec: str = "auto",
@@ -263,6 +249,8 @@ class MpvPlayerWidget(QFrame):
 
         self._pending_uid: int = -1
         self._last_loaded_uid: int = -1
+        self._resolution_emitted_for_uid: int = -1
+        self._last_resolution_wh: Tuple[int, int] = (0, 0)
 
         self._pref_audio_lang: str = ""
         self._pref_video_lang: str = ""
@@ -286,13 +274,13 @@ class MpvPlayerWidget(QFrame):
 
         if not url:
             self._show_error_overlay(
-                "<b>Пустой URL</b><br>"
+                "<b>Пустая ссылка</b><br>"
                 "У канала не задана ссылка.<br><br>"
                 "Добавьте ссылку через контекстное меню "
                 "или «🔁 Альтернативы».")
             if uid >= 0:
                 self.channel_status_changed.emit(uid, False)
-            self.playback_error.emit("Пустой URL")
+            self.playback_error.emit("Пустая ссылка")
             return
 
         if not is_mpv_available():
@@ -330,6 +318,8 @@ class MpvPlayerWidget(QFrame):
         self._current_vid = -1
         self._pref_audio_lang = pref_audio_lang or ""
         self._pref_video_lang = pref_video_lang or ""
+        self._resolution_emitted_for_uid = -1
+        self._last_resolution_wh = (0, 0)
 
         self._hide_error_overlay()
 
@@ -529,7 +519,7 @@ class MpvPlayerWidget(QFrame):
                 not qpa and not wayland)
             if wayland and not using_xcb:
                 msg = (
-                    "Встроенный плеер требует X11 "
+                    "Встроенный проигрыватель требует X11 "
                     "(или XWayland).<br><br>"
                     "Обнаружен Wayland. Запустите приложение "
                     "так:<br>"
@@ -594,12 +584,30 @@ class MpvPlayerWidget(QFrame):
         self._proc = proc
         self._started = True
 
-        QTimer.singleShot(1500, self._check_mpv_alive)
+        # P0.10: 5 с + ретраи вместо 1.5 с.
+        self._schedule_mpv_alive_check()
         self._connect_ipc_with_retry()
         return True
 
-    def _check_mpv_alive(self):
-        if self._proc is None:
+    def _schedule_mpv_alive_check(self,
+                                   elapsed_ms: int = 0,
+                                   step_ms: int = 500,
+                                   total_ms: int = 5000):
+        """P0.10: проверяем mpv каждые 500 мс до 5 с.
+
+        На Windows антивирусы замедляют старт — 1.5 с мало.
+        """
+        if self._released or self._proc is None:
+            return
+        QTimer.singleShot(
+            step_ms,
+            lambda e=elapsed_ms + step_ms, s=step_ms, t=total_ms:
+                self._check_mpv_alive(e, s, t))
+
+    def _check_mpv_alive(self, elapsed_ms: int = 0,
+                          step_ms: int = 500,
+                          total_ms: int = 5000):
+        if self._released or self._proc is None:
             return
         state = self._proc.state()
         if state == QProcess.ProcessState.NotRunning:
@@ -611,8 +619,16 @@ class MpvPlayerWidget(QFrame):
             self._hide_error_overlay()
             self._show_error_overlay(
                 "<b>mpv завершился неожиданно</b><br>"
-                "Плеер будет перезапущен при следующем "
+                "Проигрыватель будет перезапущен при следующем "
                 "воспроизведении.")
+            return
+        if state == QProcess.ProcessState.Running:
+            return
+        if elapsed_ms < total_ms:
+            QTimer.singleShot(
+                step_ms,
+                lambda e=elapsed_ms + step_ms, s=step_ms, t=total_ms:
+                    self._check_mpv_alive(e, s, t))
 
     def _connect_ipc_with_retry(self):
         if not self._ipc_path:
@@ -743,7 +759,7 @@ class MpvPlayerWidget(QFrame):
         if not low:
             return "Неизвестная ошибка воспроизведения"
         if "empty" in low or "пуст" in low:
-            return "Пустой URL"
+            return "Пустая ссылка"
         if "loading failed" in low:
             return ("Поток недоступен — ссылка мертва или "
                     "сервер не отдаёт видео")
@@ -831,6 +847,23 @@ class MpvPlayerWidget(QFrame):
             return
         elif name == "video-params" and isinstance(data, dict):
             self._fps = float(data.get("fps") or 0.0)
+            # mpv как приоритетный источник разрешения:
+            # w/h — реальный декодированный кадр.
+            try:
+                w = int(data.get("w") or 0)
+                h = int(data.get("h") or 0)
+            except (TypeError, ValueError):
+                w, h = 0, 0
+            if (w > 0 and h > 0
+                    and self._last_loaded_uid >= 0):
+                if (self._last_loaded_uid
+                        != self._resolution_emitted_for_uid
+                        or (w, h) != self._last_resolution_wh):
+                    self._resolution_emitted_for_uid = \
+                        self._last_loaded_uid
+                    self._last_resolution_wh = (w, h)
+                    self.video_resolution_detected.emit(
+                        self._last_loaded_uid, w, h)
         elif name == "cache-speed":
             try:
                 self._cache_speed = float(data or 0.0)
@@ -954,11 +987,12 @@ class EmbeddedPlayerDialog(BaseDialog):
     channel_changed = pyqtSignal(int)
     channel_status_changed = pyqtSignal(int, bool)
     channel_modified = pyqtSignal(int)
+    channel_resolution_detected = pyqtSignal(int, int, int)
 
     def __init__(self, channel: ChannelData, parent=None,
                  playlist: Optional[List[ChannelData]] = None):
         super().__init__(
-            f"Ksenia Player — {channel.meta.name}",
+            f"Ksenia — проигрыватель — {channel.meta.name}",
             parent, size=(1000, 720))
 
         from app_core import ApplicationCore
@@ -1048,7 +1082,7 @@ class EmbeddedPlayerDialog(BaseDialog):
         self.alts_btn = QPushButton("🔁 Альтернативы")
         self.alts_btn.setToolTip(
             "Показать альтернативы: сохранённые у канала и "
-            "живые URL\n"
+            "живые ссылки\n"
             "из кэша источников (наполняется кнопкой "
             "«🔄 Обновить всё»)")
         self.alts_btn.clicked.connect(self._show_alts_menu)
@@ -1121,6 +1155,8 @@ class EmbeddedPlayerDialog(BaseDialog):
             self._on_channel_status_changed)
         self.player.tracks_updated.connect(
             self._on_tracks_updated)
+        self.player.video_resolution_detected.connect(
+            self._on_player_resolution)
 
         self._shortcuts: List[QShortcut] = []
         for keys, slot in (
@@ -1139,6 +1175,14 @@ class EmbeddedPlayerDialog(BaseDialog):
         self.player.set_volume(saved_vol)
         self._update_link_buttons()
         QTimer.singleShot(0, lambda: self._play_at(self.index))
+
+    def _on_player_resolution(self, uid: int, w: int, h: int):
+        """mpv как приоритетный источник: эмитим наружу."""
+        real_uid = uid if uid >= 0 else (
+            self.channel.uid if self.channel else -1)
+        if real_uid < 0:
+            return
+        self.channel_resolution_detected.emit(real_uid, w, h)
 
     def _current_has_alts(self) -> bool:
         if self.channel is None:
@@ -1262,7 +1306,7 @@ class EmbeddedPlayerDialog(BaseDialog):
                 "источнике.\n\n"
                 "Подробности — в логе "
                 "(Инструменты → Показать лог).",
-                "Плеер")
+                "Проигрыватель")
             return
 
         from PyQt6.QtWidgets import QMenu
@@ -1356,7 +1400,7 @@ class EmbeddedPlayerDialog(BaseDialog):
                 "альтернативы.\n"
                 "Используйте «🔁 Альтернативы», чтобы "
                 "переключиться.",
-                "Плеер")
+                "Проигрыватель")
             return
         reason = ("ссылка не работает" if broken
                   else "у канала нет альтернатив")
@@ -1390,7 +1434,7 @@ class EmbeddedPlayerDialog(BaseDialog):
         if not host:
             from paths import info_box
             info_box(self,
-                     "Не удалось определить домен/IP из URL.")
+                     "Не удалось определить домен/IP из ссылки.")
             return
         from dialogs import BlockDomainDialog
         from paths import info_box
@@ -1468,7 +1512,7 @@ class EmbeddedPlayerDialog(BaseDialog):
         self.index = index
         self.channel = self.playlist[index]
         self.setWindowTitle(
-            f"Ksenia Player — {self.channel.meta.name}")
+            f"Ksenia — проигрыватель — {self.channel.meta.name}")
         ua = self.channel.link.user_agent or ""
         extra = (dict(self.channel.link.extra_headers)
                  if self.channel.link.extra_headers else None)
@@ -1615,7 +1659,7 @@ class EmbeddedPlayerDialog(BaseDialog):
             "Дорожки сохранены для канала:\n"
             f"аудио: {audio_lang or '—'}\n"
             f"видео: {video_lang or '—'}",
-            "Плеер")
+            "Проигрыватель")
 
     def _on_status(self, st: dict):
         if not _is_qobject_valid(self):

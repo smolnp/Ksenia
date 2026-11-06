@@ -24,6 +24,9 @@ from models import ChannelData
 from paths import confirm, info_box, warn_box
 from theme import semantic_colors
 from utils import URLUtils
+from plural_ru import (
+    channels_word, rules_word,
+)
 
 
 class BlockDomainDialog(BaseDialog):
@@ -59,7 +62,7 @@ class BlockDomainDialog(BaseDialog):
         layout.addWidget(QLabel(
             "Будут очищены ссылки у каналов:"))
         self.preview = make_table(
-            ["Название", "Группа", "URL"],
+            ["Название", "Группа", "Ссылка"],
             edit_disabled=True,
             select_mode=(
                 QAbstractItemView.SelectionMode.ExtendedSelection))
@@ -111,7 +114,7 @@ class BlockDomainDialog(BaseDialog):
 
 class DomainBlacklistDialog(BaseDialog):
     def __init__(self, core: 'ApplicationCore', parent=None):
-        super().__init__("Менеджер чёрного списка домен/IP",
+        super().__init__("Чёрный список доменов/IP",
                           parent, size=(880, 600))
         self.core = core
         self._setup_ui()
@@ -122,7 +125,7 @@ class DomainBlacklistDialog(BaseDialog):
         l.addWidget(hint_label(
             "Единый чёрный список доменов и IP-адресов для "
             "ссылок.\n"
-            "При срабатывании правила ссылка ОЧИЩАЕТСЯ, но канал "
+            "При срабатывании правила ссылка удаляется, но канал "
             "сохраняется вместе с метаданными."))
 
         self.table = make_table(
@@ -215,7 +218,7 @@ class DomainBlacklistDialog(BaseDialog):
                 info_box(
                     self,
                     f"Правило '{normalized}' уже существует.",
-                    "Добавить правило")
+                    "Готово")
                 return
             self._load_table()
             return
@@ -232,7 +235,7 @@ class DomainBlacklistDialog(BaseDialog):
                 value, include_subdomains=include, note=note):
             info_box(self,
                      f"Правило '{value}' уже существует.",
-                     "Добавить правило")
+                     "Готово")
             return
         self._load_table()
 
@@ -253,7 +256,7 @@ class DomainBlacklistDialog(BaseDialog):
     def _clear_all(self):
         if confirm(
                 self,
-                "Очистить чёрный список домен/IP?\n"
+                "Очистить чёрный список доменов/IP?\n"
                 "Уже очищенные ссылки не восстановятся."):
             self.core.clear_domain_blacklist()
             self._load_table()
@@ -261,7 +264,7 @@ class DomainBlacklistDialog(BaseDialog):
     def _export_bl(self):
         items = self.core.get_domain_blacklist()
         if json_export_dialog(
-                self, "Экспорт ч.с. домен/IP",
+                self, "Экспорт ч.с. доменов/IP",
                 "domain_blacklist.json", items):
             info_box(self,
                      f"Сохранено правил: {len(items)}",
@@ -332,7 +335,7 @@ class BlacklistDialog(BaseDialog):
                 name.strip(), tid.strip()):
             info_box(self,
                      f"Правило уже существует: {name.strip()}",
-                     "Добавить")
+                     "Готово")
             return
         self._load_table()
 
@@ -363,11 +366,11 @@ class BlacklistDialog(BaseDialog):
             self._load_table()
             return len(data)
         json_import_dialog(
-            self, "Импорт ЧС каналов", on_items)
+            self, "Импорт ч.с. каналов", on_items)
 
     def _export_bl(self):
         json_export_dialog(
-            self, "Экспорт ЧС каналов",
+            self, "Экспорт ч.с. каналов",
             "blacklist.json", self.core.get_blacklist())
 
 
@@ -578,7 +581,9 @@ class DomainUserAgentDialog(BaseDialog):
                 tab.model.refresh_all()
             tab.update_info()
             tab.groups_changed.emit()
-            info_box(self, f"Обновлено {modified} каналов",
-                     "Успех")
+            info_box(self,
+                     f"Обновлено {modified} "
+                     f"{channels_word(modified)}",
+                     "Готово")
         else:
             info_box(self, "Изменений не требуется")

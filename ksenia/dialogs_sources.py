@@ -28,6 +28,9 @@ from paths import (confirm, error_box, info_box,
 from sources import LinkSource, LinkSourceManager
 from theme import semantic_colors
 from utils import URLUtils, _StopToken
+from plural_ru import (
+    channels_word, links_word, sources_word,
+)
 from workers import SourceCheckConfig, SourcesRefreshWorker
 
 
@@ -73,7 +76,7 @@ class LinkSourceEditDialog(BaseDialog):
         form.addRow("Тип:", self.type_combo)
         self.path_edit = QLineEdit()
         form.addRow("Путь/URL:", self.path_edit)
-        self.browse_btn = QPushButton("Обзор...")
+        self.browse_btn = QPushButton("Выбрать…")
         self.browse_btn.clicked.connect(self._browse)
         form.addRow("", self.browse_btn)
         self.priority_spin = QSpinBox()
@@ -109,7 +112,7 @@ class LinkSourceEditDialog(BaseDialog):
         self.apply_blacklist_check.setChecked(True)
         fl.addWidget(self.apply_blacklist_check)
         self.apply_domain_blacklist_check = QCheckBox(
-            "Очищать ссылки по ЧС домен/IP "
+            "Очищать ссылки по чёрному списку доменов/IP "
             "(каналы сохраняются)")
         self.apply_domain_blacklist_check.setChecked(True)
         fl.addWidget(self.apply_domain_blacklist_check)
@@ -207,7 +210,7 @@ class LinkSourceManagerDialog(BaseDialog):
 
     def __init__(self, source_manager: LinkSourceManager,
                  config, parent=None):
-        super().__init__("Менеджер источников", parent,
+        super().__init__("Управление источниками", parent,
                           size=(1150, 680))
         self.source_manager = source_manager
         self.config = config
@@ -219,11 +222,10 @@ class LinkSourceManagerDialog(BaseDialog):
     def _setup_ui(self):
         layout = self.root
         layout.addWidget(hint_label(
-            "Источники ссылок — это ваши плейлисты: локальные "
-            "файлы или URL, которые вы добавили сами.\n\n"
-            "Приложение не содержит встроенных ссылок на "
-            "IPTV и не выполняет автоматический поиск "
-            "источников — их добавляет только пользователь."))
+            "Источники — это ваши плейлисты: локальные "
+            "файлы или ссылки, которые вы добавили сами.\n\n"
+            "Приложение не ищет источники автоматически — "
+            "их добавляет только пользователь."))
 
         self.sources_table = make_table(
             ["Вкл", "Название", "Тип", "Путь/URL", "Приоритет",
@@ -351,7 +353,7 @@ class LinkSourceManagerDialog(BaseDialog):
                         f"Проверено: "
                         f"{ts.strftime('%Y-%m-%d %H:%M')}\n"
                         f"Рабочих: {s.total_working}\n"
-                        f"Всего (после ЧС): {s.total_links}")
+                        f"Всего (после ч.с.): {s.total_links}")
                     if s.total_working > 0:
                         wrk.setForeground(colors['working'])
                 else:
@@ -437,9 +439,6 @@ class LinkSourceManagerDialog(BaseDialog):
         except Exception:
             logger.exception("_refresh_all: snapshot failed")
 
-        # ffprobe намеренно выключен: «🔄 Обновить всё» должно
-        # оставаться быстрым. Разрешение запрашивается
-        # отдельно через «🎬 Определить разрешение».
         self._refresh_worker = SourcesRefreshWorker(
             sources, self.source_manager, self.config,
             check_urls=True,
@@ -483,7 +482,7 @@ class LinkSourceManagerDialog(BaseDialog):
                     info_box(
                         self,
                         f"Обновлено {s} из {t}",
-                        "Успех"))
+                        "Готово"))
 
         def on_error(msg):
             self._progress_label.setText(
@@ -524,7 +523,10 @@ class LinkSourceManagerDialog(BaseDialog):
         n = json_import_dialog(
             self, "Импорт источников", on_items)
         if n is not None:
-            info_box(self, f"Импортировано {n}", "Успех")
+            info_box(self,
+                     f"Импортировано {n} "
+                     f"{sources_word(n)}",
+                     "Готово")
 
     def _export(self):
         sources = self.source_manager.get_all_sources()
@@ -532,8 +534,10 @@ class LinkSourceManagerDialog(BaseDialog):
                 self, "Экспорт источников",
                 "link_sources.json",
                 [s.to_dict() for s in sources]):
-            info_box(self, f"Экспортировано {len(sources)}",
-                     "Успех")
+            info_box(self,
+                     f"Экспортировано {len(sources)} "
+                     f"{sources_word(len(sources))}",
+                     "Готово")
 
     def closeEvent(self, event):
         w = self._refresh_worker
@@ -564,11 +568,11 @@ class LinkSelectionDialog(BaseDialog):
 
         l = self.root
         l.addWidget(QLabel(
-            f"Найдено {len(alts)} ссылок в разных источниках. "
-            f"Выберите нужную:"))
+            f"Найдено {len(alts)} {links_word(len(alts))} "
+            f"в разных источниках. Выберите нужную:"))
 
         self.table = make_table(
-            ["Источник", "URL", "Приоритет", "Проверка",
+            ["Источник", "Ссылка", "Приоритет", "Проверка",
              "Выбрать"],
             stretch_last=False,
             select_mode=(
@@ -611,7 +615,7 @@ class LinkSelectionDialog(BaseDialog):
             valid = a.has_valid_url
             btn.setEnabled(valid)
             if not valid:
-                btn.setToolTip("Пустой URL")
+                btn.setToolTip("Пустая ссылка")
             btn.clicked.connect(
                 lambda checked, idx=i: self._choose(idx))
             self.table.setCellWidget(i, 4, btn)
@@ -644,7 +648,7 @@ class LinkSelectionDialog(BaseDialog):
             if not url or not url.strip():
                 if _is_qobject_valid(self):
                     warn_box(self,
-                             "Пустой URL нельзя выбрать")
+                             "Пустую ссылку нельзя выбрать")
                 return
         self.selected_index = idx
         self.accept()
@@ -675,7 +679,8 @@ class LinkSelectionDialog(BaseDialog):
                 try:
                     ok, rt, msg, code, ttfb, _ = \
                         URLUtils.check_url(
-                            u, timeout, verify_ssl=False,
+                            u, timeout,
+                            verify_ssl=None,
                             stop_token=self._stop_token)
                 except Exception:
                     logger.exception("verify %s", u[:80])
@@ -758,7 +763,7 @@ class PlaylistFromSourcesDialog(BaseDialog):
 
         cache_row = QHBoxLayout()
         self.refresh_cache_btn = QPushButton(
-            "🔄 Обновить всё (загрузить + проверить URL)")
+            "🔄 Обновить всё (загрузить + проверить ссылки)")
         self.refresh_cache_btn.setToolTip(
             "Открывает менеджер источников и запускает "
             "«🔄 Обновить всё».\n"
@@ -788,7 +793,7 @@ class PlaylistFromSourcesDialog(BaseDialog):
         options_layout = QFormLayout(options_group)
 
         self.dedupe_by_url_check = QCheckBox(
-            "Удалять дубликаты по URL "
+            "Удалять дубликаты по ссылке "
             "(оставить первый канал)")
         self.dedupe_by_url_check.setChecked(True)
         options_layout.addRow(self.dedupe_by_url_check)
@@ -810,7 +815,7 @@ class PlaylistFromSourcesDialog(BaseDialog):
         options_layout.addRow(self.apply_bl_check)
 
         self.apply_domain_bl_check = QCheckBox(
-            "Применять ЧС домен/IP "
+            "Применять чёрный список доменов/IP "
             "(ОЧИЩАЕТ ссылки, каналы сохраняются)")
         self.apply_domain_bl_check.setChecked(True)
         options_layout.addRow(self.apply_domain_bl_check)
@@ -845,28 +850,28 @@ class PlaylistFromSourcesDialog(BaseDialog):
 
         if count <= 0:
             self.cache_status_label.setText(
-                "<b>Кэш живых URL:</b> пуст.<br>"
+                "<b>Кэш живых ссылок:</b> пуст.<br>"
                 "Будет выполнена полная загрузка источников "
-                "с проверкой URL (медленно).<br>"
+                "с проверкой ссылок (медленно).<br>"
                 "<i>Совет: нажмите «🔄 Обновить всё», чтобы "
                 "наполнить кэш и ускорить создание.</i>")
         elif not settings_match:
             self.cache_status_label.setText(
-                f"<b>Кэш живых URL:</b> {count} записей, "
+                f"<b>Кэш живых ссылок:</b> {count} записей, "
                 f"{sources} источников.<br>"
                 f"<span style='color:#b00020;'>Настройки "
                 f"нормализации изменились — кэш устарел.</span><br>"
                 f"Будет выполнена полная загрузка источников.")
         elif is_fresh:
             self.cache_status_label.setText(
-                f"<b>Кэш живых URL:</b> {fresh} свежих записей "
+                f"<b>Кэш живых ссылок:</b> {fresh} свежих записей "
                 f"({sources} источников).<br>"
                 f"<span style='color:#1a7f37;'>Плейлист будет "
                 f"создан из кэша (только живые ссылки) — "
                 f"быстро.</span>")
         else:
             self.cache_status_label.setText(
-                f"<b>Кэш живых URL:</b> {count} записей "
+                f"<b>Кэш живых ссылок:</b> {count} записей "
                 f"({sources} источников), но устарел.<br>"
                 f"Будет выполнена полная загрузка источников.")
 

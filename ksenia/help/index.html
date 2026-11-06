@@ -818,6 +818,140 @@ brew install ffmpeg
 <h3>Ошибка SSL</h3>
 <p>Отключите проверку SSL в настройках сети.</p>
 
+<h2 id="conventions">Соглашения</h2>
+
+<h3>Термины</h3>
+
+<table>
+  <tr>
+    <th>Термин</th>
+    <th>Что это</th>
+    <th>Где используется</th>
+  </tr>
+  <tr>
+    <td><strong>Ссылка (URL)</strong></td>
+    <td>Адрес потока, например
+        <code>http://example.com/stream.m3u8</code></td>
+    <td>В UI — «ссылка», в колонке таблицы — «ссылка»,
+        в CLI — «URL»</td>
+  </tr>
+  <tr>
+    <td><strong>Чёрный список (ЧС)</strong></td>
+    <td>Список запрещённых каналов, доменов или IP</td>
+    <td>В UI — «чёрный список», в меню — «чёрный список»
+        (полная форма)</td>
+  </tr>
+  <tr>
+    <td><strong>Проигрыватель (плеер)</strong></td>
+    <td>Встроенный mpv</td>
+    <td>В UI — «проигрыватель», в tooltip — «плеер»
+        (допустимо)</td>
+  </tr>
+  <tr>
+    <td><strong>EPG (программа передач)</strong></td>
+    <td>Electronic Program Guide, XMLTV</td>
+    <td>В UI — «EPG», при первом упоминании —
+        «EPG (программа передач)»</td>
+  </tr>
+  <tr>
+    <td><strong>Автопочинка (Auto-Repair)</strong></td>
+    <td>Автоматическое исправление битой ссылки
+        (http↔https, редиректы)</td>
+    <td>В UI — «автопочинка», в логах — «Auto-Repair»</td>
+  </tr>
+  <tr>
+    <td><strong>Стабильный экспорт</strong></td>
+    <td>Экспорт с живой проверкой URL</td>
+    <td>В UI — «стабильный экспорт», в коде — «stable»</td>
+  </tr>
+  <tr>
+    <td><strong>Режим без интерфейса</strong></td>
+    <td>CLI-режим без GUI</td>
+    <td>В UI — «режим без интерфейса», в CLI —
+        «headless»</td>
+  </tr>
+  <tr>
+    <td><strong>Источник (плейлист)</strong></td>
+    <td>Пользовательский плейлист (локальный файл или URL),
+        добавленный вручную</td>
+    <td>В UI — «источник», в коде — «source»</td>
+  </tr>
+  <tr>
+    <td><strong>Домен/IP</strong></td>
+    <td>Доменное имя (<code>example.com</code>) или
+        IP-адрес (<code>192.168.1.1</code>)</td>
+    <td>В UI — «домен/IP» (им.) или «доменов/IP» (род.)</td>
+  </tr>
+</table>
+
+<h3>Значки и цвета</h3>
+
+<h4>Статусы проверки</h4>
+<table>
+  <tr><th>Значок</th><th>Что значит</th></tr>
+  <tr><td>⚪</td><td>Не проверено</td></tr>
+  <tr><td>✓</td><td>Работает</td></tr>
+  <tr><td>✗</td><td>Не работает</td></tr>
+  <tr><td>⏳</td><td>Таймаут</td></tr>
+  <tr><td>🌐</td><td>DNS не разрешается</td></tr>
+  <tr><td>🔗</td><td>Ошибка соединения</td></tr>
+  <tr><td>🌍</td><td>Геоблок (403)</td></tr>
+  <tr><td>❌</td><td>Не найден (404)</td></tr>
+  <tr><td>📭</td><td>Пустой ответ</td></tr>
+  <tr><td>📄</td><td>HTML/JSON вместо потока</td></tr>
+  <tr><td>🟦</td><td>Не поддерживается</td></tr>
+  <tr><td>🚫</td><td>Домен/IP в чёрном списке</td></tr>
+  <tr><td>🔧</td><td>Автопочинка</td></tr>
+  <tr><td>∅</td><td>Нет ссылки</td></tr>
+  <tr><td>⏹</td><td>Отменено</td></tr>
+</table>
+
+<h4>Разрешение</h4>
+<table>
+  <tr><th>Цвет</th><th>Разрешение</th></tr>
+  <tr><td><span style="color:#ffc800;">●</span> золотой</td>
+      <td>4K (2160p)</td></tr>
+  <tr><td><span style="color:#32be64;">●</span> зелёный</td>
+      <td>1080p (FHD)</td></tr>
+  <tr><td><span style="color:#3caae6;">●</span> голубой</td>
+      <td>720p (HD)</td></tr>
+  <tr><td><span style="color:#969696;">●</span> серый</td>
+      <td>SD (576p, 480p, прочее)</td></tr>
+  <tr><td><span style="color:#8c959f;">—</span> прочерк</td>
+      <td>Не определено (запустите «🎬 Определить
+          разрешение»)</td></tr>
+</table>
+
+<h4>Кнопки</h4>
+<table>
+  <tr><th>Значок</th><th>Кнопка</th></tr>
+  <tr><td>🎬</td><td>Определить разрешение (ffprobe)</td></tr>
+  <tr><td>🔁</td><td>Альтернативы</td></tr>
+  <tr><td>🔄</td><td>Обновить всё</td></tr>
+  <tr><td>🚫</td><td>Заблокировать домен/IP</td></tr>
+  <tr><td>📋</td><td>Шаблоны категорий</td></tr>
+  <tr><td>💾</td><td>Сохранить</td></tr>
+  <tr><td>🗑</td><td>Удалить</td></tr>
+  <tr><td>▶</td><td>Воспроизвести</td></tr>
+  <tr><td>⏸</td><td>Пауза</td></tr>
+</table>
+
+<h3>Формы слов</h3>
+
+<p>В UI используются правильные формы слов после
+числительных:</p>
+
+<ul>
+  <li>1 канал, 2 канала, 5 каналов</li>
+  <li>1 ссылка, 2 ссылки, 5 ссылок</li>
+  <li>1 правило, 2 правила, 5 правил</li>
+  <li>1 источник, 2 источника, 5 источников</li>
+  <li>1 ошибка, 2 ошибки, 5 ошибок</li>
+</ul>
+
+<p>Если вы видите «1 каналов» или «канал(ов)» — это баг,
+сообщите о нём.</p>
+
 <hr>
 
 <p style="text-align:center; color:#57606a;">

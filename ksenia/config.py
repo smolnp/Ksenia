@@ -32,8 +32,7 @@ from paths import Paths
 
 
 # Ключи, которые были в старых версиях и должны быть
-# вычищены из загружаемого JSON (иначе они будут
-# записываться обратно при save()).
+# вычищены из загружаемого JSON.
 _LEGACY_KEYS_TO_DROP = frozenset({
     'sources_finder_auto_load_after_add',
     'sources_finder_include_github',
@@ -73,7 +72,8 @@ class Config:
         'keep_backup_links': True,
         'max_alternative_urls': 5,
         'use_ip_filtering': True,
-        'verify_ssl': False,
+        # P0.7: verify_ssl=True по умолчанию
+        'verify_ssl': True,
         'cell_font_size': 10,
         'cache_cleanup_days': 30,
         'keep_duplicates': False,
@@ -103,7 +103,6 @@ class Config:
         'epg_avoid_name_conflicts': True,
         'epg_prefer_tvg_id_over_name': True,
         'epg_alternative_names_max': 20,
-        # ПУСТО: приложение не содержит встроенного EPG.
         'default_epg_url': DEFAULT_EPG_URL,
         'auto_backup_before_save': True,
         'allow_duplicate_urls': False,
@@ -135,14 +134,9 @@ class Config:
             VERIFY_CANDIDATES_MAX_WORKERS_DEFAULT,
         'apply_filters_on_file_open': True,
         # ── Пути к сторонним приложениям ──
-        # Пусто = искать в PATH / стандартных путях.
-        # Пользователь может указать явно, если приложение
-        # не установлено в PATH (актуально для Windows).
         'ffprobe_path': '',
         'mpv_path': '',
         # ── Кодировка при «Сохранить как» ──
-        # 'auto' — как в исходном файле (текущее поведение).
-        # Иначе — явная кодировка (utf-8, utf-8-sig, cp1251).
         'default_save_encoding': 'auto',
         # ── Авто-проверка ссылок ──
         'auto_check_on_open': False,

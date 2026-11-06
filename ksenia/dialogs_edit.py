@@ -33,6 +33,9 @@ from paths import (confirm, error_box, info_box, open_file_dialog,
                     save_file_dialog, warn_box)
 from theme import is_dark, semantic_colors, semantic_hex
 from undo import SimpleDuplicateFinder
+from plural_ru import (
+    channels_word, rules_word, rows_word,
+)
 
 
 def _mono_font(point_size: int = 10) -> QFont:
@@ -297,8 +300,6 @@ class DuplicateFinderDialog(BaseDialog):
                  settings: Any = None):
         super().__init__("Поиск дубликатов", parent,
                           size=(980, 640))
-        # ВАЖНО: работаем с копией, чтобы не мутировать
-        # tab.all_channels до явного подтверждения.
         self._original_channels = list(channels)
         self._working_channels = list(channels)
         self.use_tvg_id = use_tvg_id
@@ -337,18 +338,18 @@ class DuplicateFinderDialog(BaseDialog):
         url_tab = QWidget()
         url_l = QVBoxLayout(url_tab)
         self.url_table = make_table(
-            ["Название", "Группа", "URL"])
+            ["Название", "Группа", "Ссылка"])
         url_l.addWidget(self.url_table)
         self.remove_url_btn = QPushButton(
-            "Удалить дубликаты по URL")
+            "Удалить дубликаты по ссылке")
         self.remove_url_btn.clicked.connect(self._remove_by_url)
         url_l.addWidget(self.remove_url_btn)
-        tabs.addTab(url_tab, "По URL")
+        tabs.addTab(url_tab, "По ссылке")
 
         name_tab = QWidget()
         name_l = QVBoxLayout(name_tab)
         self.name_table = make_table(
-            ["Название", "Группа", "URL"])
+            ["Название", "Группа", "Ссылка"])
         name_l.addWidget(self.name_table)
         self.remove_name_btn = QPushButton(
             "Удалить дубликаты по названию")
@@ -370,7 +371,7 @@ class DuplicateFinderDialog(BaseDialog):
         self.stats_label.setText(
             f"<b>Всего каналов:</b> "
             f"{len(self._working_channels)} | "
-            f"<b>Дубликатов по URL:</b> "
+            f"<b>Дубликатов по ссылке:</b> "
             f"{report['total_url_duplicates']} | "
             f"<b>Дубликатов по названию:</b> "
             f"{report['total_name_duplicates']}")
@@ -400,7 +401,7 @@ class DuplicateFinderDialog(BaseDialog):
     def _remove_by_url(self):
         if not confirm(
                 self,
-                "Удалить дубликаты по URL? "
+                "Удалить дубликаты по ссылке? "
                 "Останется первый канал."):
             return
         new_list, removed = \
@@ -410,7 +411,9 @@ class DuplicateFinderDialog(BaseDialog):
             self._working_channels = new_list
         self.duplicates_removed.emit(removed)
         self._update_stats()
-        info_box(self, f"Удалено: {removed}", "Готово")
+        info_box(self,
+                 f"Удалено {removed} {channels_word(removed)}",
+                 "Готово")
 
     def _remove_by_name(self):
         if not confirm(
@@ -426,7 +429,9 @@ class DuplicateFinderDialog(BaseDialog):
             self._working_channels = new_list
         self.duplicates_removed.emit(removed)
         self._update_stats()
-        info_box(self, f"Удалено: {removed}", "Готово")
+        info_box(self,
+                 f"Удалено {removed} {channels_word(removed)}",
+                 "Готово")
 
     def get_result(self) -> List[ChannelData]:
         return list(self._working_channels)
@@ -474,7 +479,8 @@ class DuplicateFinderDialog(BaseDialog):
                         ])
                         rows += 1
             info_box(self,
-                     f"Отчёт сохранён:\n{fp}\n\nСтрок: {rows}",
+                     f"Отчёт сохранён:\n{fp}\n\n"
+                     f"Каналов в отчёте: {rows}",
                      "Готово")
         except Exception as e:
             logger.exception("export_duplicates_report")
@@ -745,7 +751,7 @@ class GroupTemplateListDialog(BaseDialog):
             "Создайте шаблон из текущего плейлиста, затем "
             "применяйте его к любому открытому плейлисту.\n"
             "При применении меняется ТОЛЬКО group-title — "
-            "имена, URL и метаданные каналов не трогаются."))
+            "имена, ссылки и метаданные каналов не трогаются."))
 
         self.table = make_table(
             ["Имя шаблона", "Правил", "Создан", "Изменён"],
@@ -945,8 +951,7 @@ class GroupTemplateListDialog(BaseDialog):
             f"Каналов изменено: {stats['changed']}\n"
             f"Совпало с шаблоном: {stats['matched']}\n"
             f"Не найдено в шаблоне: {stats['unmatched']}\n"
-            f"Правил шаблона без каналов в плейлисте: "
-            f"{stats['missing']}",
+            f"Правил без каналов: {stats['missing']}",
             "Шаблоны группировки")
 
         self.template_applied.emit(name)

@@ -5,6 +5,10 @@
 
 Все цвета берутся из QApplication.palette(). Никаких жёстких
 QColor(...) в других модулях — только semantic_colors().
+
+P2.7: убрана циклическая зависимость с dup_colors.
+invalidate_cache() НЕ вызывает clear_dup_color_cache() —
+это делает MainWindow._on_palette_changed() явно.
 """
 from __future__ import annotations
 
@@ -34,15 +38,16 @@ def _palette() -> Optional[QPalette]:
 
 
 def invalidate_cache() -> None:
+    """Сбрасывает кеш цветов.
+
+    P2.7: НЕ вызывает clear_dup_color_cache() — это делает
+    MainWindow._on_palette_changed() явно, чтобы не было
+    циклической зависимости theme → dup_colors → theme.
+    """
     global _dark_cache, _semantic_cache, _semantic_hex_cache
     _dark_cache = None
     _semantic_cache = None
     _semantic_hex_cache = None
-    try:
-        from dup_colors import clear_dup_color_cache
-        clear_dup_color_cache()
-    except Exception:
-        pass
 
 
 def is_dark() -> bool:

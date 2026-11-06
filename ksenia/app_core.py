@@ -17,12 +17,13 @@ from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 from PyQt6.QtWidgets import QApplication
 
 from blacklists import (BlacklistManager, DomainBlacklistManager,
-                        DomainUserAgentManager)
+                        DomainUserAgentManager, SslExceptionManager)
 from config import Config, LinkReplacementSettings
 from constants import (APP_VERSION, CHECK_RESULT_CACHE_TTL_HOURS,
                         EPG_CACHE_TTL_HOURS, DEFAULT_EPG_URL,
                         AUTO_CHECK_INTERVAL_HOURS_DEFAULT,
                         AUTO_CHECK_MIN_INTERVAL_HOURS)
+from dialogs_base import _is_qobject_valid
 from epg import EPGDatabase
 from group_templates import GroupTemplateManager
 from logging_setup import logger
@@ -127,6 +128,8 @@ class ApplicationCore(QObject):
             DomainBlacklistManager(config_dir))
         self.domain_user_agent_manager = (
             DomainUserAgentManager(config_dir))
+        # P9: per-domain SSL-исключения
+        self.ssl_exception_manager = SslExceptionManager(config_dir)
 
         self.cache_manager = (
             CacheManager()
@@ -280,8 +283,6 @@ class ApplicationCore(QObject):
         except Exception:
             bl_index = None
         settings = self.get_replacement_settings()
-        # enable_ffprobe=False по умолчанию: плановое
-        # автообновление должно быть быстрым.
         worker = SourcesRefreshWorker(
             to_update, self.link_source_manager, self.config,
             check_urls=True, settings_snapshot=snap,
@@ -306,13 +307,6 @@ class ApplicationCore(QObject):
     # ── Авто-проверка ссылок по расписанию ──
 
     def apply_auto_check_setting(self):
-        """Запускает/останавливает таймер авто-проверки
-        ссылок в зависимости от `auto_check_interval_hours`.
-
-        Таймер тикает раз в час. Сама проверка запускается
-        только если прошло достаточно времени с
-        `last_auto_check_ts` (см. `_check_auto_link_validation`).
-        """
         try:
             hours = int(self.config.get(
                 'auto_check_interval_hours',
@@ -321,7 +315,6 @@ class ApplicationCore(QObject):
             hours = AUTO_CHECK_INTERVAL_HOURS_DEFAULT
         enabled = hours > 0
         if enabled and not self._auto_check_timer.isActive():
-            # Тик раз в час — проверяем, не пора ли запускать.
             self._auto_check_timer.start(60 * 60 * 1000)
             logger.info(
                 "Авто-проверка ссылок включена: каждые %d ч",
@@ -348,7 +341,6 @@ class ApplicationCore(QObject):
         now = time.time()
         if (now - last_ts) < hours * 3600:
             return
-        # Не запускаем, если нет открытых вкладок с каналами.
         tabs = [t for t in self.get_all_tabs()
                 if t is not None]
         if not tabs:
@@ -363,8 +355,6 @@ class ApplicationCore(QObject):
                     break
         if not any_with_urls:
             return
-        # Запоминаем время старта, чтобы не запустить
-        # повторно в следующем тике.
         self.config.set('last_auto_check_ts', now)
         self.config.save()
         logger.info(
@@ -373,7 +363,7 @@ class ApplicationCore(QObject):
         self._run_auto_link_validation(tabs)
 
     def _run_auto_link_validation(self, tabs: List[Any]) -> None:
-        """Запускает проверку ссылок в каждой вкладке."""
+        """P0.11: проверяем _is_qobject_valid перед вызовом."""
         app = QApplication.instance()
         if app is None:
             return
@@ -381,6 +371,10 @@ class ApplicationCore(QObject):
         def _run_on_gui():
             for tab in tabs:
                 if tab is None:
+                    continue
+                if not _is_qobject_valid(tab):
+                    logger.debug(
+                        "auto link validation: вкладка удалена")
                     continue
                 try:
                     if not hasattr(tab, 'check_urls_async'):
@@ -391,16 +385,18 @@ class ApplicationCore(QObject):
                                  if ch.has_valid_url]
                     if not with_urls:
                         continue
-                    # Не запускаем, если уже идёт проверка.
                     w = getattr(tab, '_src_check_worker', None)
                     if w is not None and w.isRunning():
                         continue
                     tab.check_urls_async(with_urls)
+                except RuntimeError:
+                    logger.debug(
+                        "auto link validation: RuntimeError "
+                        "(вкладка удалена)")
                 except Exception:
                     logger.exception(
                         "auto link validation on tab")
 
-        # Гарантируем запуск в GUI-потоке.
         from PyQt6.QtCore import QTimer
         QTimer.singleShot(0, _run_on_gui)
 

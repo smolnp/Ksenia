@@ -1,7 +1,7 @@
 # Copyright (C) 2025 SmolNP
 # SPDX-License-Identifier: GPL-3.0-or-later
 # См. LICENSE в корне проекта.
-"""PlayerController — управление встроенным mpv-плеером."""
+"""PlayerController — управление встроенным mpv-проигрывателем."""
 from __future__ import annotations
 
 import weakref
@@ -9,7 +9,8 @@ from contextlib import suppress
 from typing import List, Optional
 
 from PyQt6.QtCore import QObject, QItemSelectionModel
-from PyQt6.QtWidgets import QAbstractItemView
+from PyQt6.QtWidgets import (
+    QAbstractItemView, QMessageBox)
 
 from dialogs_base import _is_qobject_valid
 from logging_setup import logger
@@ -38,12 +39,6 @@ class PlayerController(QObject):
 
     @staticmethod
     def _get_visible_channels(tab) -> List[ChannelData]:
-        """Возвращает каналы, видимые в текущем фильтре.
-
-        ВАЖНО: если фильтр активен и даёт 0 результатов,
-        возвращаем пустой список — плеер не должен
-        «прыгать» на все каналы.
-        """
         model = getattr(tab, 'model', None)
         if model is None:
             return list(getattr(tab, 'all_channels', []) or [])
@@ -63,30 +58,51 @@ class PlayerController(QObject):
         if not ch:
             return
         if not ch.has_valid_url:
-            warn_box(tab, "Нет URL", "Плеер")
+            warn_box(tab, "У канала нет ссылки",
+                     "Проигрыватель")
             return
         if not is_mpv_available():
             error_box(
                 tab,
-                "Встроенный плеер недоступен.\n\n"
+                "Встроенный проигрыватель недоступен.\n\n"
                 + get_mpv_error(),
-                "Плеер")
+                "Проигрыватель")
             return
         self.close_dialog()
         playlist = self._get_visible_channels(tab)
         if not playlist:
-            # Фильтр дал 0 каналов — не запускаем плеер,
-            # чтобы не подменять плейлист «всеми каналами».
-            info_box(tab,
-                     "В текущем фильтре нет каналов.",
-                     "Плеер")
-            return
+            # P1.7: предлагаем сбросить фильтр
+            msg = QMessageBox(tab)
+            msg.setWindowTitle("Проигрыватель")
+            msg.setIcon(QMessageBox.Icon.Information)
+            msg.setText("В текущем фильтре нет каналов.")
+            reset_btn = msg.addButton(
+                "Сбросить фильтр и играть",
+                QMessageBox.ButtonRole.AcceptRole)
+            cancel_btn = msg.addButton(
+                "Отмена", QMessageBox.ButtonRole.RejectRole)
+            msg.exec()
+            if msg.clickedButton() is reset_btn:
+                with suppress(Exception):
+                    tab.set_search_text("")
+                    tab.set_group_filter("Все группы")
+                    tab.set_duplicate_filter(False)
+                playlist = self._get_visible_channels(tab)
+                if not playlist:
+                    info_box(tab,
+                             "Нет каналов со ссылками.",
+                             "Проигрыватель")
+                    return
+            else:
+                return
         dlg = EmbeddedPlayerDialog(ch, tab, playlist=playlist)
         dlg.channel_changed.connect(
             self._on_channel_changed_from_player)
         dlg.channel_status_changed.connect(
             self._on_channel_status_changed)
         dlg.channel_modified.connect(self._on_channel_modified)
+        dlg.channel_resolution_detected.connect(
+            self._on_channel_resolution_detected)
         dlg.destroyed.connect(self._on_destroyed)
         self._dialog = dlg
         dlg.show()
@@ -94,6 +110,17 @@ class PlayerController(QObject):
         if w is not None and _is_qobject_valid(w):
             w.set_action(
                 f"▶ Воспроизведение: {ch.meta.name}")
+
+    def _on_channel_resolution_detected(self, uid: int,
+                                         w: int, h: int):
+        """mpv как приоритетный источник разрешения."""
+        tab = self._tab()
+        if tab is None:
+            return
+        try:
+            tab.apply_resolution_from_player(uid, w, h)
+        except Exception:
+            logger.exception("apply_resolution_from_player")
 
     def _on_channel_status_changed(self, uid: int, ok: bool):
         tab = self._tab()

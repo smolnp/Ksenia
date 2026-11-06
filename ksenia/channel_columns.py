@@ -41,13 +41,10 @@ def _index_sort(ch: ChannelData) -> Any:
 
 
 def _resolution_value(ch: ChannelData) -> str:
-    """Пустое разрешение показываем как «—», чтобы колонка
-    не выглядела «сломанной» до запуска ffprobe."""
     return ch.status.resolution or "—"
 
 
 def _resolution_sort(ch: ChannelData) -> Any:
-    """Сортировка по разрешению (лучшее — первым)."""
     from ffprobe_utils import resolution_rank
     return (-resolution_rank(ch.status.resolution or ""),
             ch.status.resolution or "")
@@ -115,10 +112,9 @@ ALL_COLUMNS: List[ColumnSpec] = [
         alignment="left",
         min_width=80,
     ),
-    # ── URL идёт ПЕРЕД «Качество» ──
     ColumnSpec(
         key="url",
-        title="URL",
+        title="Ссылка",
         weight=COLUMN_CORE,
         get_value=lambda ch: ch.link.url or "",
         sort_key=lambda ch: (ch.link.url or "").lower(),
@@ -127,7 +123,6 @@ ALL_COLUMNS: List[ColumnSpec] = [
         min_width=200,
         stretch=True,
     ),
-    # ── «Качество» — после URL ──
     ColumnSpec(
         key="resolution",
         title="Качество",
@@ -161,10 +156,12 @@ def columns_for_channels(
             if spec.key in ("tvg_id", "logo"):
                 result.append(spec)
             elif spec.key == "resolution":
-                # «Качество» показываем ВСЕГДА: пользователь
-                # должен видеть колонку ещё до запуска ffprobe.
-                # Скрыть можно только явно через hidden_keys.
-                result.append(spec)
+                # P1.9: если пользователь явно включил —
+                # показываем всегда, даже если пусто.
+                if spec.key in user_keys:
+                    result.append(spec)
+                elif any(ch.status.resolution for ch in channels):
+                    result.append(spec)
             elif spec.key in user_keys:
                 result.append(spec)
             elif any(spec.get_value(ch) for ch in channels):

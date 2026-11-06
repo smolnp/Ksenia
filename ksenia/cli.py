@@ -13,7 +13,7 @@ import sys
 from contextlib import suppress
 from typing import List, Optional
 
-from PyQt6.QtCore import QCoreApplication, QTranslator
+from PyQt6.QtCore import QCoreApplication
 
 from constants import (APP_VERSION, APP_ORG, APP_NAME,
     STABLE_CHECK_MAX_WORKERS, STABLE_CHECK_TIMEOUT_SEC,
@@ -36,7 +36,7 @@ def parse_cli_args(argv: Optional[List[str]] = None
                    ) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         prog="ksenia",
-        description=f"Ksenia M3U Editor {APP_VERSION} — CLI/headless")
+        description=f"Ksenia M3U Editor {APP_VERSION} — CLI")
     p.add_argument("--headless", action="store_true",
                    help="Запуск без GUI")
     p.add_argument("--sources-file", default=None,
@@ -52,28 +52,12 @@ def parse_cli_args(argv: Optional[List[str]] = None
                    default=STABLE_CHECK_TIMEOUT_SEC,
                    help="Таймаут проверки, сек")
     p.add_argument("--epg-url", default=None,
-                   help="URL EPG (XMLTV/GZ) для применения метаданных. "
-                        "Если не указан — EPG не используется.")
+                   help="URL EPG (XMLTV/GZ) для применения "
+                        "метаданных. Если не указан — EPG "
+                        "не используется.")
     p.add_argument("--version", action="version",
                    version=f"Ksenia {APP_VERSION}")
     return p.parse_args(argv)
-
-
-def _install_translation_headless(app: QCoreApplication,
-                                  lang: str) -> None:
-    try:
-        from paths import Paths
-        qm = os.path.join(
-            Paths.get_app_dir(), "locale", f"ksenia_{lang}.qm")
-        if not os.path.isfile(qm):
-            return
-        tr_ = QTranslator()
-        if not tr_.load(qm):
-            return
-        app._ksenia_translator = tr_
-        app.installTranslator(tr_)
-    except Exception:
-        logger.exception("install translation (headless)")
 
 
 def run_cli(args: argparse.Namespace) -> int:
@@ -82,18 +66,19 @@ def run_cli(args: argparse.Namespace) -> int:
               or QCoreApplication(sys.argv))
     _qcore.setOrganizationName(APP_ORG)
     _qcore.setApplicationName(APP_NAME)
-    if getattr(args, "lang", None):
-        _install_translation_headless(_qcore, args.lang)
+    # P0.9: --lang не существует, удалён.
 
     from app_core import ApplicationCore
     core = ApplicationCore.instance()
 
     if not args.sources_file:
-        print("Ошибка: --sources-file обязателен в headless",
+        print("Ошибка: --sources-file обязателен "
+              "в режиме без интерфейса",
               file=sys.stderr)
         return 2
     if not args.export:
-        print("Ошибка: --export обязателен в headless",
+        print("Ошибка: --export обязателен "
+              "в режиме без интерфейса",
               file=sys.stderr)
         return 2
     if not os.path.exists(args.sources_file):
@@ -226,8 +211,6 @@ def run_cli(args: argparse.Namespace) -> int:
                 if (settings.is_blacklisted(u)
                         or settings.is_filtered_domain(u)):
                     continue
-                # Auto-Repair включён: CLI ведёт себя так же,
-                # как GUI-путь LinkReplacementWorker.
                 ok, rt, _msg, _code, _ttfb, _repaired = \
                     URLUtils.check_url(
                         u, args.timeout, verify_ssl=False,

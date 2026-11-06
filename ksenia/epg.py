@@ -37,6 +37,21 @@ def _new_session() -> requests.Session:
     return s
 
 
+def _default_verify_ssl() -> bool:
+    """P0.7: verify_ssl=True по умолчанию.
+
+    Читаем из конфига, если доступен; иначе True.
+    """
+    try:
+        from app_core import ApplicationCore
+        core = ApplicationCore._instance
+        if core is not None:
+            return bool(core.config.get('verify_ssl', True))
+    except Exception:
+        pass
+    return True
+
+
 def _utcnow_naive() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
@@ -96,8 +111,6 @@ class EPGDatabase:
         self._channel_info_lock = threading.RLock()
         self._channel_info_settings_key: Optional[tuple] = None
         self._indexes_built: bool = False
-        # Множество cid, для которых canonical/alternative
-        # пересчитаны. Используется для инкрементального обновления.
         self._canonical_dirty: Set[str] = set()
 
         self._index_full: Dict[str, List[Tuple[str, int]]] = {}
@@ -263,8 +276,6 @@ class EPGDatabase:
                     existing.source = info.source
                 self._canonical_dirty.add(cid)
 
-            # Пересчитываем canonical/alternative ТОЛЬКО для тех
-            # cid, которые реально обновились.
             for cid in self._canonical_dirty:
                 info = self._channel_info.get(cid)
                 if info is None or not info.display_names:
@@ -343,6 +354,8 @@ class EPGDatabase:
         total = 0
         errors: List[str] = []
         session = _new_session()
+        # P0.7: verify_ssl из настроек (по умолчанию True)
+        verify_ssl = _default_verify_ssl()
         try:
             for idx, url in enumerate(urls):
                 if cancelled(stop_token):
@@ -354,7 +367,7 @@ class EPGDatabase:
                         self._source_priority[url] = max(1, 10 - idx)
                 try:
                     with session.get(url, timeout=timeout,
-                                     verify=False,
+                                     verify=verify_ssl,
                                      stream=True) as r:
                         if r.status_code != 200:
                             errors.append(
@@ -367,12 +380,15 @@ class EPGDatabase:
                             if cancelled(stop_token):
                                 truncated = True
                                 break
-                            buf.extend(chunk)
-                            if len(buf) > EPG_MAX_BYTES:
+                            # P0.8: лимит ДО extend
+                            if (len(buf) + len(chunk)
+                                    > EPG_MAX_BYTES):
                                 errors.append(
-                                    f"{url}: size limit exceeded")
+                                    f"{url}: превышен лимит "
+                                    f"размера")
                                 truncated = True
                                 break
+                            buf.extend(chunk)
                         if truncated:
                             continue
                         content = bytes(buf)
@@ -381,7 +397,8 @@ class EPGDatabase:
                             try:
                                 content = gzip.decompress(content)
                             except Exception as e:
-                                errors.append(f"{url}: gzip {e}")
+                                errors.append(
+                                    f"{url}: ошибка gzip: {e}")
                                 continue
                         text = content.decode('utf-8',
                                               errors='replace')

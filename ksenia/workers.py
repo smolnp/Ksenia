@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import queue
 import threading
 import time
 from contextlib import suppress
@@ -28,7 +29,8 @@ from constants import (
     AUTO_REPAIR_MAX_ATTEMPTS,
 )
 from epg import EPGDatabase
-from ffprobe_utils import get_stream_resolution
+from ffprobe_utils import (
+    get_stream_resolution, normalize_resolution)
 from logging_setup import logger
 from models import ChannelData, LinkQuality
 from sources import LinkSource, LinkSourceManager
@@ -86,7 +88,8 @@ class SourceCheckConfig:
     timeout: int = SOURCE_CHECK_TIMEOUT_DEFAULT
     trust_sec: int = SOURCE_CHECK_TRUST_SEC_DEFAULT
     batch_size: int = SOURCE_CHECK_BATCH_SIZE_DEFAULT
-    verify_ssl: bool = False
+    # P0.7: verify_ssl=True по умолчанию
+    verify_ssl: bool = True
 
     @classmethod
     def from_app_config(cls, config: Optional[Config]
@@ -102,9 +105,94 @@ class SourceCheckConfig:
                                      SOURCE_CHECK_TRUST_SEC_DEFAULT)),
             batch_size=int(config.get('source_check_batch_size',
                                       SOURCE_CHECK_BATCH_SIZE_DEFAULT)),
-            verify_ssl=bool(config.get('verify_ssl', False)),
+            verify_ssl=bool(config.get('verify_ssl', True)),
         )
 
+
+# ── BackgroundResolutionWorker (P2-фаза) ──
+
+class BackgroundResolutionWorker(BaseWorker):
+    """Фоновое определение разрешения после проверки ссылок.
+
+    НЕ трогает ChannelData напрямую — результаты кладутся
+    в потокобезопасную очередь, которую забирает GUI-поток.
+
+    Низкий приоритет: 2-4 потока, задержка между запусками,
+    таймаут 5 с. Не мешает пользователю работать.
+    """
+    resolution_ready = pyqtSignal(int, str)
+
+    def __init__(self, channels: List[ChannelData], *,
+                 max_workers: int = 3,
+                 timeout: int = FFPROBE_TIMEOUT_SEC,
+                 delay_ms: int = 150):
+        super().__init__()
+        self._items: List[
+            Tuple[int, str, str, Dict[str, str]]] = []
+        for ch in channels:
+            if not ch.has_valid_url:
+                continue
+            if ch.status.url_status is not True:
+                continue
+            if ch.status.resolution:
+                continue
+            self._items.append((
+                ch.uid,
+                ch.link.url,
+                ch.link.user_agent or "",
+                dict(ch.link.extra_headers or {}),
+            ))
+        self._max_workers = max(1, min(int(max_workers), 4))
+        self._timeout = max(2, int(timeout))
+        self._delay = max(0, int(delay_ms)) / 1000.0
+        self._queue: "queue.Queue" = queue.Queue()
+
+    @property
+    def result_queue(self) -> "queue.Queue":
+        return self._queue
+
+    def _execute(self):
+        total = len(self._items)
+        if total == 0:
+            return
+        self.progress.emit(
+            0, total, "ffprobe: определение разрешения…")
+        done = [0]
+        lock = threading.Lock()
+
+        def _one(item):
+            if self.is_stopped():
+                return
+            uid, url, ua, hdrs = item
+            if self._delay > 0:
+                time.sleep(self._delay)
+            if self.is_stopped():
+                return
+            try:
+                res, _err = get_stream_resolution(
+                    url, timeout=self._timeout,
+                    user_agent=ua,
+                    extra_headers=hdrs or None)
+            except Exception:
+                logger.exception("ffprobe bg: %s", url[:80])
+                res = None
+            if self.is_stopped():
+                return
+            with lock:
+                done[0] += 1
+                cur = done[0]
+            if res:
+                # В очередь — GUI-поток заберёт.
+                self._queue.put((uid, res))
+                self.resolution_ready.emit(uid, res)
+            self.progress.emit(
+                cur, total, f"ffprobe: {cur}/{total}")
+
+        list(run_parallel(self._items, _one,
+                          self._max_workers, self._stop_token))
+
+
+# ── Existing workers ──
 
 class LinkReplacementWorker(BaseWorker):
     channel_updated = pyqtSignal(int, str, str, str, bool)
@@ -160,15 +248,8 @@ class LinkReplacementWorker(BaseWorker):
             return False
         return URLUtils.validate_url(url) is None
 
-    # ── Auto-Repair ──
-
     def _try_auto_repair(self, channel: ChannelData
                          ) -> Optional[str]:
-        """Пытается починить текущую ссылку канала.
-
-        Возвращает новый URL при успехе, иначе None.
-        Не трогает ссылки, заблокированные ЧС.
-        """
         old_url = (channel.link.url or "").strip()
         if not old_url:
             return None
@@ -178,10 +259,13 @@ class LinkReplacementWorker(BaseWorker):
         if s.is_filtered_domain(old_url):
             return None
         try:
+            verify = bool(self.config.get('verify_ssl', True)) \
+                if self.config is not None else True
             repaired = URLUtils.try_repair(
                 old_url,
                 timeout=max(2, s.get_replace_timeout()),
                 max_attempts=AUTO_REPAIR_MAX_ATTEMPTS,
+                verify_ssl=verify,
             )
         except Exception:
             logger.exception("Auto-Repair crashed for %s",
@@ -189,7 +273,6 @@ class LinkReplacementWorker(BaseWorker):
             return None
         if not repaired or repaired == old_url:
             return None
-        # Защита: не подменяем на ЧС/фильтрованные домены.
         if s.is_blacklisted(repaired) or \
                 s.is_filtered_domain(repaired):
             logger.debug(
@@ -201,8 +284,6 @@ class LinkReplacementWorker(BaseWorker):
                     old_url[:80], repaired[:80])
         return repaired
 
-    # ── Verify (для нескольких живых кандидатов) ──
-
     def _verify_candidates(self, urls: List[str]) -> Optional[str]:
         if not urls:
             return None
@@ -212,6 +293,8 @@ class LinkReplacementWorker(BaseWorker):
         max_workers = min(
             self.settings.get_verify_candidates_max_workers(),
             len(urls))
+        verify = bool(self.config.get('verify_ssl', True)) \
+            if self.config is not None else True
         results: List[Tuple[str, float, float]] = []
         lock = threading.Lock()
 
@@ -220,7 +303,7 @@ class LinkReplacementWorker(BaseWorker):
                 return
             try:
                 ok, rt, msg, code, ttfb, _ = URLUtils.check_url(
-                    u, timeout, verify_ssl=False,
+                    u, timeout, verify_ssl=verify,
                     stop_token=self._stop_token)
             except Exception:
                 logger.exception("verify candidate %s", u[:80])
@@ -245,8 +328,6 @@ class LinkReplacementWorker(BaseWorker):
                     fut.result()
         if not results:
             return None
-        # Сортировка: сначала по TTFB (меньше = лучше),
-        # затем по времени ответа.
         results.sort(key=lambda x: (x[2], x[1]))
         return results[0][0]
 
@@ -294,7 +375,8 @@ class LinkReplacementWorker(BaseWorker):
             return
         self._preload_sources()
         workers = min(self.max_workers, total)
-        processed = 0
+        # P1.6: list[0] + lock вместо nonlocal
+        processed_box = [0]
         progress_lock = threading.Lock()
         last_emit = [0.0]
 
@@ -308,7 +390,6 @@ class LinkReplacementWorker(BaseWorker):
                 f"Обработано: {cur}/{total}")
 
         def process_one(ch: ChannelData):
-            nonlocal processed
             if self.is_stopped():
                 return None
             try:
@@ -317,8 +398,8 @@ class LinkReplacementWorker(BaseWorker):
                 logger.exception("Error processing %s", ch.meta.name)
                 res = None
             with progress_lock:
-                processed += 1
-                cur = processed
+                processed_box[0] += 1
+                cur = processed_box[0]
             if res:
                 old_url, new_url, from_alive, from_repair = res
                 self.channel_updated.emit(
@@ -344,17 +425,9 @@ class LinkReplacementWorker(BaseWorker):
     def _find_replacement_for(
             self, channel: ChannelData
     ) -> Optional[Tuple[str, str, bool, bool]]:
-        """Возвращает (old_url, new_url, from_alive, from_repair).
-
-        Порядок шагов:
-          1. Auto-Repair текущей ссылки (только если она есть
-             и не заблокирована ЧС).
-          2. Поиск из кэша живых URL.
-        """
         if self.is_stopped() or not self._should_replace(channel):
             return None
 
-        # ── Шаг 1: Auto-Repair ──
         if channel.has_valid_url:
             repaired = self._try_auto_repair(channel)
             if repaired:
@@ -363,10 +436,9 @@ class LinkReplacementWorker(BaseWorker):
                             False, True)
                 else:
                     logger.debug(
-                        "Auto-Repair: URL уже занят другим каналом: %s",
+                        "Auto-Repair: URL уже занят: %s",
                         repaired[:80])
 
-        # ── Шаг 2: Кэш живых URL ──
         res = self._find_replacement(channel)
         if not res:
             return None
@@ -510,10 +582,6 @@ class SourceUrlCheckWorker(BaseWorker):
         self.trust_sec = int(cfg.trust_sec)
         self.batch_size = max(1, int(cfg.batch_size))
         self.verify_ssl = bool(cfg.verify_ssl)
-        # ffprobe (определение разрешения) — только для UI,
-        # не пишется в M3U. Включается явно из UI
-        # (кнопка «🎬 Определить разрешение»).
-        # При массовых проверках должен быть False.
         self.enable_ffprobe = bool(enable_ffprobe)
 
         self._settings_snapshot = settings_snapshot or {}
@@ -606,7 +674,10 @@ class SourceUrlCheckWorker(BaseWorker):
                              Optional[int], Optional[float],
                              str]] = []
         pending_lock = threading.Lock()
+        # P1.6: list[0] вместо nonlocal
         emit_counter = [0]
+        working_box = [working]
+        checked_box = [checked]
 
         def flush_batch(items):
             if not items or self.cache_manager is None:
@@ -618,13 +689,12 @@ class SourceUrlCheckWorker(BaseWorker):
                                exc_info=True)
 
         def check_one(ch: ChannelData):
-            nonlocal working, checked
             if self.is_stopped():
                 return
             url = ch.link.url
             if not url:
                 with lock:
-                    checked += 1
+                    checked_box[0] += 1
                 return
             try:
                 ok, rt, msg, code, ttfb, _repaired = \
@@ -643,9 +713,9 @@ class SourceUrlCheckWorker(BaseWorker):
                     ch.status.status_text = StatusText.CANCELLED
                 return
             with lock:
-                checked += 1
+                checked_box[0] += 1
                 if ok is True:
-                    working += 1
+                    working_box[0] += 1
 
             resolution = ""
             if ok is True and self.enable_ffprobe and \
@@ -720,7 +790,7 @@ class SourceUrlCheckWorker(BaseWorker):
                 if self.is_stopped():
                     continue
                 with lock:
-                    cur = checked
+                    cur = checked_box[0]
                 if cur - last_emit >= 5 or cur == len(to_check):
                     last_emit = cur
                     self.source_check_progress.emit(
@@ -735,15 +805,14 @@ class SourceUrlCheckWorker(BaseWorker):
             flush_batch(leftover)
 
         self.source_check_done.emit(
-            self.source_name, working, total)
+            self.source_name, working_box[0], total)
 
 
 class ResolutionWorker(BaseWorker):
-    """Определение реального разрешения через ffprobe.
+    """Ручное определение разрешения по запросу.
 
-    Используется по контекстному меню из UI. Результаты
-    НЕ пишутся в M3U — только в ChannelStatus.resolution
-    для отображения.
+    Результат идёт через signal resolution_ready(uid, res) —
+    ChannelData не меняется напрямую (это делает GUI-поток).
     """
     resolution_ready = pyqtSignal(int, str)
 
@@ -823,12 +892,6 @@ class SourcesRefreshWorker(BaseWorker):
         self._settings_snapshot = settings_snapshot or {}
         self._bl_index = blacklist_index or BlacklistIndex(set(), set())
         self._settings = settings
-        # ffprobe (определение разрешения) — только для UI,
-        # не пишется в M3U. По умолчанию ВЫКЛЮЧЕН для
-        # «🔄 Обновить всё»: это отдельный сетевой запрос
-        # на каждый живой канал, сильно замедляет массовое
-        # обновление. Разрешение запрашивается отдельно
-        # через «🎬 Определить разрешение».
         self._enable_ffprobe = bool(enable_ffprobe)
 
         self._phase2_lock = threading.Lock()
@@ -887,7 +950,7 @@ class SourcesRefreshWorker(BaseWorker):
             self._last_phase2_pct = pct
         self.progress.emit(
             pct, self.PHASE3_END,
-            f"[2/3] Проверка URL: {checked_sum}/{total_sum}")
+            f"[2/3] Проверка ссылок: {checked_sum}/{total_sum}")
 
     def _execute(self):
         processed = 0
@@ -970,7 +1033,7 @@ class SourcesRefreshWorker(BaseWorker):
 
         self.progress.emit(
             self.PHASE1_END, self.PHASE3_END,
-            f"[2/3] Проверка URL: 0/{self._phase2_total}")
+            f"[2/3] Проверка ссылок: 0/{self._phase2_total}")
 
         for w in workers:
             if self.is_stopped():
@@ -999,7 +1062,7 @@ class SourcesRefreshWorker(BaseWorker):
             self._last_phase2_pct = self.PHASE2_END
         self.progress.emit(
             self.PHASE2_END, self.PHASE3_END,
-            f"[2/3] Проверка URL: "
+            f"[2/3] Проверка ссылок: "
             f"{self._phase2_total}/{self._phase2_total}")
 
         if self.is_stopped():
