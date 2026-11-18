@@ -9,6 +9,16 @@
 
 ---
 
+## 📥 Скачать (Windows 10/11)
+
+Для пользователей Windows доступен **готовый установщик**, который не требует установки Python или настройки окружения. В него уже встроен плеер `mpv`.
+
+👉 **[Перейти в раздел Releases](https://github.com/smolnp/Ksenia/releases)** и скачайте файл `.exe` из последнего релиза.
+
+*Примечание: для определения разрешения (4K/1080p) всё ещё потребуется отдельно скачать FFmpeg (см. ниже).*
+
+---
+
 ## ⚠️ Важно
 
 **Приложение не содержит встроенных источников.** Ни IPTV-плейлистов,
@@ -24,15 +34,16 @@ EPG — свой URL в «Настройки → Общие → Программ
 
 ---
 
-## Установка
+## Установка из исходников (Linux / macOS)
 
-**Требования:** Python 3.10+, PyQt6, requests, urllib3, defusedxml,
-`mpv` (для проигрывателя), `ffprobe` (для разрешения, входит в FFmpeg).
+**Требования:** Python 3.10+, `mpv`, `ffprobe` (опционально).
+Для работы плеера в Linux также нужны библиотеки X11/XWayland.
 
-**Linux (Debian/Ubuntu/Mint):**
+**Debian / Ubuntu / Mint:**
 ```bash
+sudo apt update
 sudo apt install -y python3 python3-pip python3-venv \
                     mpv libmpv-dev ffmpeg \
                     libxcb-cursor0 libxcb-xinerama0 \
                     adwaita-icon-theme
-pip install PyQt6 requests urllib3 defusedxml
+pip install -r requirements.txt
