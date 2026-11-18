@@ -5,9 +5,8 @@
 
 P0.7: модуль НЕ импортирует PyQt6.QtWidgets на уровне модуля,
 чтобы CLI/headless-режим не тянул GUI-зависимости.
-
-Qt-константы (YES_NO, OK_CANCEL_BB, CLOSE_BB) живут в
-qt_constants.py. Импортировать их из constants.py — ошибка.
+Константы YES_NO / OK_CANCEL_BB / CLOSE_BB оставлены как
+ленивые callables для обратной совместимости.
 """
 from __future__ import annotations
 
@@ -119,6 +118,50 @@ STATUS_FILTER_ITEMS = [
     STATUS_FILTER_NOT_WORKING,
     STATUS_FILTER_UNCHECKED,
 ]
+
+# ── Qt-константы: ленивые обёртки, чтобы не тянуть QtWidgets ──
+def _yes_no():
+    from PyQt6.QtWidgets import QMessageBox
+    return (QMessageBox.StandardButton.Yes
+            | QMessageBox.StandardButton.No)
+
+
+def _ok_cancel_bb():
+    from PyQt6.QtWidgets import QDialogButtonBox
+    return (QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel)
+
+
+def _close_bb():
+    from PyQt6.QtWidgets import QDialogButtonBox
+    return QDialogButtonBox.StandardButton.Close
+
+
+class _LazyConst:
+    __slots__ = ('_fn', '_cached')
+
+    def __init__(self, fn):
+        self._fn = fn
+        self._cached = None
+
+    def __call__(self):
+        if self._cached is None:
+            self._cached = self._fn()
+        return self._cached
+
+    def __or__(self, other):
+        return self() | other
+
+    def __and__(self, other):
+        return self() & other
+
+    def __int__(self):
+        return int(self())
+
+
+YES_NO = _LazyConst(_yes_no)
+OK_CANCEL_BB = _LazyConst(_ok_cancel_bb)
+CLOSE_BB = _LazyConst(_close_bb)
 
 FFPROBE_TIMEOUT_SEC = 5
 FFPROBE_PATH = "ffprobe"

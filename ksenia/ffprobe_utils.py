@@ -11,7 +11,14 @@
   - protocol_whitelist: http,https,tcp,tls,crypto (без file)
   - env: только безопасные переменные, без *_PROXY
   - shell=False явно
-  - явная проверка file://, concat://, subfile:// до запуска
+  - запрещённые схемы (file://, concat://, subfile://,
+    rtmp://, rtsp://, udp://, tcp://, rtp://) отбрасываются
+    до запуска процесса
+  - на Windows дочерний процесс запускается с
+    CREATE_NO_WINDOW: в `--windowed`-сборке PyInstaller
+    у приложения нет консоли, и без этого флага каждое
+    определение разрешения открывало бы новое окно
+    терминала (при параллельной проверке — десятки окон).
 
 Проблема 240p vs 1080p:
   HLS-мастер-плейлист может содержать несколько вариантов
@@ -39,11 +46,16 @@ _find_cache_done: bool = False
 
 _ALLOWED_PROTOCOLS = "http,https,tcp,tls,crypto"
 
-# Схемы, которые ffprobe НЕ должен обрабатывать даже если
-# каким-то образом попали в URL.
-_DENIED_SCHEMES = ('file://', 'concat://', 'subfile://',
-                    'rtmp://', 'rtsp://', 'udp://', 'tcp://',
-                    'rtp://')
+_DENIED_SCHEMES = (
+    'file://', 'concat://', 'subfile://',
+    'rtmp://', 'rtsp://', 'udp://', 'tcp://', 'rtp://',
+)
+
+
+def _get_app_dir() -> str:
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
 
 
 def _configured_path() -> str:
@@ -56,6 +68,19 @@ def _configured_path() -> str:
     except Exception:
         pass
     return ""
+
+
+def _bundled_ffprobe() -> Optional[str]:
+    """Ищет ffprobe рядом с приложением (assets/ffprobe/)."""
+    base = _get_app_dir()
+    for name in ('ffprobe.exe', 'ffprobe'):
+        cand = os.path.join(base, 'assets', 'ffprobe', name)
+        if os.path.isfile(cand):
+            return cand
+        cand = os.path.join(base, name)
+        if os.path.isfile(cand):
+            return cand
+    return None
 
 
 def reset_ffprobe_cache() -> None:
@@ -98,13 +123,19 @@ def find_ffprobe(force: bool = False) -> Optional[str]:
                 return explicit
             logger.warning(
                 "ffprobe: указанный путь не найден (%s), "
-                "ищу в PATH", cfg_path)
+                "ищу рядом с приложением и в PATH", cfg_path)
+        bundled = _bundled_ffprobe()
+        if bundled:
+            _find_cache = bundled
+            _find_cache_done = True
+            logger.info("ffprobe (встроенный): %s", bundled)
+            return bundled
         path = shutil.which(FFPROBE_PATH)
         _find_cache = path
         _find_cache_done = True
         if path is None:
             logger.warning(
-                "ffprobe не найден в PATH — "
+                "ffprobe не найден — "
                 "определение разрешения будет недоступно.")
         else:
             logger.info("ffprobe найден в PATH: %s", path)
@@ -161,6 +192,21 @@ def _safe_env() -> Dict[str, str]:
     env.setdefault('LANG', 'C.UTF-8')
     env.setdefault('LC_ALL', 'C.UTF-8')
     return env
+
+
+def _no_window_kwargs() -> dict:
+    """Не позволяет Windows создавать консольное окно."""
+    if not sys.platform.startswith("win"):
+        return {}
+    creationflags = getattr(
+        subprocess, 'CREATE_NO_WINDOW', 0x08000000)
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = 0
+    return {
+        'creationflags': creationflags,
+        'startupinfo': startupinfo,
+    }
 
 
 def _is_denied_scheme(url: str) -> bool:
@@ -224,7 +270,6 @@ def get_stream_resolution(
     """Возвращает (разрешение, ошибка). Не бросает исключений."""
     if not url or not url.strip():
         return None, "empty url"
-    # FIX: явная проверка запрещённых схем до запуска
     if _is_denied_scheme(url):
         return None, "denied scheme"
     ffprobe = find_ffprobe()
@@ -245,6 +290,7 @@ def get_stream_resolution(
             check=False,
             shell=False,
             env=_safe_env(),
+            **_no_window_kwargs(),
         )
         if result.returncode != 0:
             err = (result.stderr or "").strip()[:200]

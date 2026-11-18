@@ -383,7 +383,6 @@ class ChannelTableModel(QAbstractTableModel):
                         return dup_color_both(key)
                     return dup_color_url(
                         self._dup_url_key.get(ch.uid) or "")
-                # FIX: подсветка UA только для живых ссылок
                 if (ch.link.user_agent
                         and ch.status.url_status is not False):
                     base = semantic_colors()['working']
@@ -460,7 +459,6 @@ class ChannelTableModel(QAbstractTableModel):
 
         insert_after = getattr(
             self, '_pending_insert_after', 0)
-        # FIX: сбрасываем, чтобы не «протухло» при следующем drop
         self._pending_insert_after = 0
         target_row = -1
 
@@ -536,8 +534,6 @@ class ChannelTableModel(QAbstractTableModel):
             ch.link.link_source = ""
             ch.link.user_agent = ""
             ch.link.extra_headers.clear()
-            # FIX: очищаем EXTVLCOPT до применения UA-правил,
-            # иначе старая строка http-user-agent останется.
             ch.link.extvlcopt_lines.clear()
             ch.link.is_repaired = False
             ch.status.reset()

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import threading
 import weakref
 from contextlib import suppress
@@ -54,7 +55,6 @@ from constants import (
     STATUS_FILTER_ALL, STATUS_FILTER_ITEMS, StatusText,
 )
 from logging_setup import logger
-from qt_constants import OK_CANCEL_BB, YES_NO
 from models import ChannelData, LinkQuality
 from name_normalizer import display_name as _display_name
 from parsers import M3UParser
@@ -69,6 +69,12 @@ from plural_ru import (
 )
 
 
+OK_CANCEL_BB = (QDialogButtonBox.StandardButton.Ok |
+                QDialogButtonBox.StandardButton.Cancel)
+YES_NO = (QMessageBox.StandardButton.Yes |
+          QMessageBox.StandardButton.No)
+
+
 def _settings() -> QSettings:
     from PyQt6.QtCore import QCoreApplication
     org = (QCoreApplication.organizationName()
@@ -76,6 +82,12 @@ def _settings() -> QSettings:
     app = (QCoreApplication.applicationName()
            or "KseniaM3UEditor")
     return QSettings(org, app)
+
+
+def _get_app_dir() -> str:
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
 
 
 class _PlaylistCreateTask(QRunnable):
@@ -390,6 +402,11 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(
             f"Ksenia M3U Editor {APP_VERSION}")
         self.resize(1400, 900)
+        # FIX: иконка окна (заголовок + панель задач)
+        _icon_path = os.path.join(_get_app_dir(), 'assets',
+                                  'ksenia.ico')
+        if os.path.exists(_icon_path):
+            self.setWindowIcon(QIcon(_icon_path))
         self.core = ApplicationCore.instance()
         self.tabs: Dict[QWidget, PlaylistTab] = {}
         self.current_tab: Optional[PlaylistTab] = None
@@ -1899,8 +1916,6 @@ class MainWindow(QMainWindow):
         if event.isAccepted():
             app = QApplication.instance()
             if app is not None:
-                # FIX: quit через event loop, чтобы не было
-                # рекурсии closeEvent → quit → closeEvent.
                 QTimer.singleShot(0, app.quit)
 
 

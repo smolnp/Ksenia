@@ -31,8 +31,6 @@ from logging_setup import logger
 from paths import Paths
 
 
-# Ключи, которые были в старых версиях и должны быть
-# вычищены из загружаемого JSON.
 _LEGACY_KEYS_TO_DROP = frozenset({
     'sources_finder_auto_load_after_add',
     'sources_finder_include_github',

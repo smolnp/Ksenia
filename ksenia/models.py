@@ -50,9 +50,7 @@ class LinkQuality(Enum):
 
 
 class ChannelSnapshot(NamedTuple):
-    """Компактный снапшот канала для Undo/Redo."""
     uid: int
-    # ── meta ──
     name: str
     group: str
     tvg_id: str
@@ -70,7 +68,6 @@ class ChannelSnapshot(NamedTuple):
     audio_track: str
     epg_source: str
     epg_alternative_names: tuple
-    # ── link ──
     url: str
     user_agent: str
     extvlcopt_lines: tuple
@@ -79,7 +76,6 @@ class ChannelSnapshot(NamedTuple):
     alternative_urls: tuple
     link_source: str
     is_repaired: bool
-    # ── status ──
     url_status: Optional[bool]
     status_text: str
     status_code: Optional[int]
@@ -87,7 +83,6 @@ class ChannelSnapshot(NamedTuple):
     ttfb_ms: Optional[float]
     link_response_time: Optional[float]
     link_quality: int
-    # ── прочее ──
     original_index: int
 
 
@@ -325,8 +320,6 @@ class ChannelData:
         c.modified_date = self.modified_date
         c.original_index = self.original_index
         return c
-
-    # ── ChannelSnapshot (для Undo/Redo) ──
 
     def snapshot(self) -> ChannelSnapshot:
         return ChannelSnapshot(
@@ -676,7 +669,6 @@ class ChannelData:
         self.link.is_repaired = bool(
             data.get('is_repaired', False))
 
-        # url_status: строго bool | None
         raw_status = data.get('url_status')
         if raw_status is None:
             self.status.url_status = None
