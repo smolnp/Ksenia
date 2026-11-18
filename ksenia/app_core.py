@@ -74,9 +74,14 @@ class _WorkerRegistry:
                             "Worker thread did not stop: %s", w)
         for r in runnables:
             with suppress(Exception):
-                stop = getattr(r, 'stop', None)
-                if callable(stop):
-                    stop()
+                # FIX: у _PlaylistCreateTask `stop` — это
+                # _StopToken (не callable), а у BaseWorker —
+                # метод. Поддерживаем оба варианта.
+                tok = getattr(r, 'stop', None)
+                if hasattr(tok, 'set'):
+                    tok.set()
+                elif callable(tok):
+                    tok()
 
 
 class ApplicationCore(QObject):
@@ -119,6 +124,13 @@ class ApplicationCore(QObject):
             return None
         return cls._instance
 
+    # P1.6-fix: публичные методы вместо прямого доступа к _workers
+    def register_runnable(self, r) -> None:
+        self._workers.add_runnable(r)
+
+    def unregister_runnable(self, r) -> None:
+        self._workers.remove_runnable(r)
+
     def _initialize(self):
         config_dir = Paths.get_config_dir()
         os.makedirs(config_dir, exist_ok=True)
@@ -128,7 +140,6 @@ class ApplicationCore(QObject):
             DomainBlacklistManager(config_dir))
         self.domain_user_agent_manager = (
             DomainUserAgentManager(config_dir))
-        # P9: per-domain SSL-исключения
         self.ssl_exception_manager = SslExceptionManager(config_dir)
 
         self.cache_manager = (
@@ -304,8 +315,6 @@ class ApplicationCore(QObject):
             lambda w=worker: self._workers.remove_thread(w))
         worker.start()
 
-    # ── Авто-проверка ссылок по расписанию ──
-
     def apply_auto_check_setting(self):
         try:
             hours = int(self.config.get(
@@ -363,7 +372,6 @@ class ApplicationCore(QObject):
         self._run_auto_link_validation(tabs)
 
     def _run_auto_link_validation(self, tabs: List[Any]) -> None:
-        """P0.11: проверяем _is_qobject_valid перед вызовом."""
         app = QApplication.instance()
         if app is None:
             return
@@ -496,6 +504,9 @@ class ApplicationCore(QObject):
             return False
 
     def _build_settings_snapshot(self) -> Dict[str, Any]:
+        # ПРИМЕЧАНИЕ: _domain_bl_manager потокобезопасен
+        # (внутри DomainBlacklistManager RLock), поэтому его
+        # можно передавать в воркер.
         return {
             'use_ip_filtering': bool(self.config.get(
                 'use_ip_filtering', True)),

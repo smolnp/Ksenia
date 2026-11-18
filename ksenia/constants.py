@@ -1,12 +1,17 @@
 # Copyright (C) 2025 SmolNP
 # SPDX-License-Identifier: GPL-3.0-or-later
 # См. LICENSE в корне проекта.
-"""Константы, статусы, фильтры (без цветов — они в theme.py)."""
+"""Константы, статусы, фильтры (без цветов — они в theme.py).
+
+P0.7: модуль НЕ импортирует PyQt6.QtWidgets на уровне модуля,
+чтобы CLI/headless-режим не тянул GUI-зависимости.
+
+Qt-константы (YES_NO, OK_CANCEL_BB, CLOSE_BB) живут в
+qt_constants.py. Импортировать их из constants.py — ошибка.
+"""
 from __future__ import annotations
 
-from PyQt6.QtWidgets import QDialogButtonBox, QMessageBox
-
-APP_VERSION = "0.2.3"  # ← bump версии после P0
+APP_VERSION = "0.2.3"
 APP_ORG = "Ksenia"
 APP_NAME = "KseniaM3UEditor"
 
@@ -115,12 +120,6 @@ STATUS_FILTER_ITEMS = [
     STATUS_FILTER_UNCHECKED,
 ]
 
-YES_NO = (QMessageBox.StandardButton.Yes |
-          QMessageBox.StandardButton.No)
-OK_CANCEL_BB = (QDialogButtonBox.StandardButton.Ok |
-                QDialogButtonBox.StandardButton.Cancel)
-CLOSE_BB = QDialogButtonBox.StandardButton.Close
-
 FFPROBE_TIMEOUT_SEC = 5
 FFPROBE_PATH = "ffprobe"
 FFPROBE_MAX_WORKERS = 4
@@ -134,22 +133,22 @@ AUTO_CHECK_MIN_INTERVAL_HOURS = 1
 
 class StatusText:
     UNCHECKED = "⚪ Не проверено"
-    NO_URL = "∅ Нет ссылки"           # ← было «Нет URL»
+    NO_URL = "∅ Нет ссылки"
     WORKING = "✓ Работает"
     NOT_WORKING = "✗ Не работает"
     UNSUPPORTED = "🟦 Не поддерживается"
     TIMEOUT = "⏳ Таймаут"
-    DNS_FAIL = "🌐 DNS не разрешается"  # ← было «DNS не резолвится»
+    DNS_FAIL = "🌐 DNS не разрешается"
     CONN_ERROR = "🔗 Ошибка соединения"
     GEOBLOCK = "🌍 Геоблок (403)"
     NOT_FOUND = "❌ Не найден (404)"
     CANCELLED = "⏹ Отменено"
-    BLOCKED_BY_DOMAIN = "🚫 Домен/IP в чёрном списке"  # ← было «Заблокирован ЧС домен/IP»
+    BLOCKED_BY_DOMAIN = "🚫 Домен/IP в чёрном списке"
     EMPTY_RESPONSE = "📭 Пустой ответ"
     HTML_INSTEAD_OF_STREAM = "📄 HTML вместо потока"
     JSON_INSTEAD_OF_STREAM = "📄 JSON вместо потока"
     NON_VIDEO_CONTENT = "📄 Не видео-контент"
-    REPAIRED = "🔧 Автопочинка"       # ← было «Починена»
+    REPAIRED = "🔧 Автопочинка"
     FFPROBE_MISSING = "🎬 ffprobe недоступен"
 
 

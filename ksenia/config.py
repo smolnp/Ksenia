@@ -72,7 +72,6 @@ class Config:
         'keep_backup_links': True,
         'max_alternative_urls': 5,
         'use_ip_filtering': True,
-        # P0.7: verify_ssl=True по умолчанию
         'verify_ssl': True,
         'cell_font_size': 10,
         'cache_cleanup_days': 30,
@@ -133,17 +132,13 @@ class Config:
         'verify_candidates_max_workers':
             VERIFY_CANDIDATES_MAX_WORKERS_DEFAULT,
         'apply_filters_on_file_open': True,
-        # ── Пути к сторонним приложениям ──
         'ffprobe_path': '',
         'mpv_path': '',
-        # ── Кодировка при «Сохранить как» ──
         'default_save_encoding': 'auto',
-        # ── Авто-проверка ссылок ──
         'auto_check_on_open': False,
         'auto_check_interval_hours':
             AUTO_CHECK_INTERVAL_HOURS_DEFAULT,
         'last_auto_check_ts': 0.0,
-        # Ширины столбцов таблицы каналов.
         'column_widths': {},
         'language': 'ru',
     }
@@ -188,14 +183,14 @@ class Config:
                 return self.DEFAULT.get(key, value)
         if expected is list:
             if isinstance(value, list):
-                return value
+                return list(value)
             if isinstance(value, str):
                 return [v.strip() for v in value.split(',')
                         if v.strip()]
             return list(self.DEFAULT.get(key, []) or [])
         if expected is dict:
             if isinstance(value, dict):
-                return value
+                return dict(value)
             return dict(self.DEFAULT.get(key, {}) or {})
         if expected is str:
             if isinstance(value, str):
@@ -325,6 +320,10 @@ class LinkReplacementSettings:
         if name.startswith('_'):
             object.__setattr__(self, name, value)
             return
+        if name not in Config.DEFAULT:
+            raise AttributeError(
+                f"LinkReplacementSettings: неизвестный ключ "
+                f"конфига {name!r}")
         self._cfg().set(name, value)
 
     def is_blacklisted(self, url: str) -> bool:

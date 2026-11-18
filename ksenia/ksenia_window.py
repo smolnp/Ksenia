@@ -13,7 +13,7 @@ from functools import partial
 from typing import Dict, List, Optional, Set, Tuple
 
 from PyQt6.QtCore import (
-    QSettings, QRunnable, Qt, QThreadPool, pyqtSignal)
+    QSettings, QRunnable, Qt, QThreadPool, QTimer, pyqtSignal)
 from PyQt6.QtGui import QAction, QIcon, QPalette
 from PyQt6.QtWidgets import (
     QApplication, QComboBox, QDialog, QDialogButtonBox,
@@ -54,6 +54,7 @@ from constants import (
     STATUS_FILTER_ALL, STATUS_FILTER_ITEMS, StatusText,
 )
 from logging_setup import logger
+from qt_constants import OK_CANCEL_BB, YES_NO
 from models import ChannelData, LinkQuality
 from name_normalizer import display_name as _display_name
 from parsers import M3UParser
@@ -68,15 +69,12 @@ from plural_ru import (
 )
 
 
-OK_CANCEL_BB = (QDialogButtonBox.StandardButton.Ok |
-                QDialogButtonBox.StandardButton.Cancel)
-YES_NO = (QMessageBox.StandardButton.Yes |
-          QMessageBox.StandardButton.No)
-
-
 def _settings() -> QSettings:
-    org = QApplication.organizationName() or "Ksenia"
-    app = QApplication.applicationName() or "KseniaM3UEditor"
+    from PyQt6.QtCore import QCoreApplication
+    org = (QCoreApplication.organizationName()
+           or "Ksenia")
+    app = (QCoreApplication.applicationName()
+           or "KseniaM3UEditor")
     return QSettings(org, app)
 
 
@@ -343,15 +341,16 @@ class _PlaylistCreateTask(QRunnable):
             self.core.playlist_from_sources_failed.emit(str(e))
         finally:
             with suppress(Exception):
-                self.core._workers.remove_runnable(self)
+                self.core.unregister_runnable(self)
 
 
 class _StableExportTask(QRunnable):
-    def __init__(self, tab_ref, fp, win_ref):
+    def __init__(self, tab_ref, fp, win_ref, core):
         super().__init__()
         self.tab_ref = tab_ref
         self.fp = fp
         self.win_ref = win_ref
+        self.core = core
         self.setAutoDelete(True)
 
     def run(self):
@@ -376,6 +375,9 @@ class _StableExportTask(QRunnable):
             w = self.win_ref()
             if w is not None and _is_qobject_valid(w):
                 w._bg_export_failed.emit(str(e))
+        finally:
+            with suppress(Exception):
+                self.core.unregister_runnable(self)
 
 
 class MainWindow(QMainWindow):
@@ -1131,7 +1133,7 @@ class MainWindow(QMainWindow):
         task = _PlaylistCreateTask(
             self.core, sources_to_load, opts, _stop, win_ref,
             epg_sources=None)
-        self.core._workers.add_runnable(task)
+        self.core.register_runnable(task)
         QThreadPool.globalInstance().start(task)
 
     def _finish_create_playlist_from_sources(
@@ -1271,7 +1273,8 @@ class MainWindow(QMainWindow):
         tab = self.current_tab
         win_ref = weakref.ref(self)
         tab_ref = weakref.ref(tab)
-        task = _StableExportTask(tab_ref, fp, win_ref)
+        task = _StableExportTask(tab_ref, fp, win_ref, self.core)
+        self.core.register_runnable(task)
         QThreadPool.globalInstance().start(task)
 
     def _import_file(self):
@@ -1894,10 +1897,11 @@ class MainWindow(QMainWindow):
 
         super().closeEvent(event)
         if event.isAccepted():
-            with suppress(Exception):
-                app = QApplication.instance()
-                if app is not None:
-                    app.quit()
+            app = QApplication.instance()
+            if app is not None:
+                # FIX: quit через event loop, чтобы не было
+                # рекурсии closeEvent → quit → closeEvent.
+                QTimer.singleShot(0, app.quit)
 
 
 from cli import (  # noqa: E402,F401

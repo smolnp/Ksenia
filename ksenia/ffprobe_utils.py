@@ -11,12 +11,12 @@
   - protocol_whitelist: http,https,tcp,tls,crypto (без file)
   - env: только безопасные переменные, без *_PROXY
   - shell=False явно
+  - явная проверка file://, concat://, subfile:// до запуска
 
 Проблема 240p vs 1080p:
   HLS-мастер-плейлист может содержать несколько вариантов
-  качества. Раньше мы брали v:0 (первый), который часто
-  оказывается самым низким. Теперь читаем ВСЕ видеопотоки
-  и выбираем с максимальным разрешением.
+  качества. Читаем ВСЕ видеопотоки и выбираем с максимальным
+  разрешением.
 """
 from __future__ import annotations
 
@@ -33,15 +33,17 @@ from constants import (
 from logging_setup import logger
 
 
-# Кеш результата поиска ffprobe.
 _find_cache_lock = threading.Lock()
 _find_cache: Optional[str] = None
 _find_cache_done: bool = False
 
-# Протоколы, которые разрешены ffprobe.
-# НЕ включаем file, concat, subfile, rtmp, rtsp, udp —
-# это векторы атаки (чтение локальных файлов, SSRF).
 _ALLOWED_PROTOCOLS = "http,https,tcp,tls,crypto"
+
+# Схемы, которые ffprobe НЕ должен обрабатывать даже если
+# каким-то образом попали в URL.
+_DENIED_SCHEMES = ('file://', 'concat://', 'subfile://',
+                    'rtmp://', 'rtsp://', 'udp://', 'tcp://',
+                    'rtp://')
 
 
 def _configured_path() -> str:
@@ -129,15 +131,25 @@ def normalize_resolution(width: int, height: int) -> str:
     return f"{height}p"
 
 
-def _safe_env() -> Dict[str, str]:
-    """Безопасное окружение для ffprobe.
+def resolution_rank(res: str) -> int:
+    low = (res or "").lower()
+    if "4k" in low or "2160" in low:
+        return 4
+    if "1080" in low:
+        return 3
+    if "720" in low:
+        return 2
+    if "576" in low or "540" in low or "480" in low \
+            or "360" in low:
+        return 1
+    return 0
 
-    Не включает HTTP_PROXY/HTTPS_PROXY (иначе ffprobe пойдёт
-    через прокси, что может сломать проверку), а также
-    LD_PRELOAD/DYLD_INSERT_LIBRARIES (защита от инъекций).
-    """
+
+def _safe_env() -> Dict[str, str]:
+    """Безопасное окружение для ffprobe."""
     if sys.platform.startswith("win"):
-        keys = ('PATH', 'PATHEXT', 'SystemRoot', 'TEMP', 'TMP',
+        keys = ('PATH', 'PATHEXT', 'SystemRoot', 'WINDIR',
+                'SYSTEMDRIVE', 'TEMP', 'TMP',
                 'USERPROFILE', 'COMSPEC')
     else:
         keys = ('PATH', 'HOME', 'TMPDIR')
@@ -151,27 +163,22 @@ def _safe_env() -> Dict[str, str]:
     return env
 
 
+def _is_denied_scheme(url: str) -> bool:
+    low = url.strip().lower()
+    return any(low.startswith(s) for s in _DENIED_SCHEMES)
+
+
 def _build_ffprobe_cmd(
         ffprobe: str, url: str,
         user_agent: str = "",
         extra_headers: Optional[Dict[str, str]] = None,
 ) -> list:
-    """Строит команду ffprobe.
-
-    ВАЖНО: НЕ используем -select_streams v:0, потому что
-    для HLS-мастер-плейлиста это даёт первый вариант,
-    который часто оказывается самым низким (240p).
-    Читаем ВСЕ потоки и выбираем максимальное разрешение
-    в get_stream_resolution().
-    """
     cmd = [
         ffprobe, "-v", "error",
         "-show_entries",
         "stream=index,codec_type,width,height",
         "-of", "json",
-        # P0.6: запрет file://, concat://, subfile://
         "-protocol_whitelist", _ALLOWED_PROTOCOLS,
-        # Для HLS и медленных потоков
         "-analyzeduration", "5000000",
         "-probesize", "10000000",
         "-rw_timeout", "5000000",
@@ -189,14 +196,6 @@ def _build_ffprobe_cmd(
 
 
 def _pick_best_stream(streams: List[dict]) -> Tuple[int, int]:
-    """Выбирает видеопоток с максимальным разрешением.
-
-    Возвращает (width, height) или (0, 0), если видеопотоков
-    нет.
-
-    P0.6-fix: для HLS-мастер-плейлиста с несколькими
-    вариантами качества это даёт 1080p, а не 240p (первый).
-    """
     best_w = 0
     best_h = 0
     for s in streams:
@@ -222,14 +221,12 @@ def get_stream_resolution(
         user_agent: str = "",
         extra_headers: Optional[Dict[str, str]] = None,
 ) -> Tuple[Optional[str], str]:
-    """Возвращает (разрешение, ошибка). Не бросает исключений.
-
-    Читает ВСЕ видеопотоки и выбирает максимальное
-    разрешение — это решает проблему 240p vs 1080p для
-    HLS-мастер-плейлистов.
-    """
+    """Возвращает (разрешение, ошибка). Не бросает исключений."""
     if not url or not url.strip():
         return None, "empty url"
+    # FIX: явная проверка запрещённых схем до запуска
+    if _is_denied_scheme(url):
+        return None, "denied scheme"
     ffprobe = find_ffprobe()
     if not ffprobe:
         return None, "ffprobe not found"
@@ -246,7 +243,7 @@ def get_stream_resolution(
             text=True,
             timeout=max(1, int(timeout)),
             check=False,
-            shell=False,  # P0.6: явно
+            shell=False,
             env=_safe_env(),
         )
         if result.returncode != 0:
@@ -279,16 +276,3 @@ def get_stream_resolution(
     except Exception as e:
         logger.exception("ffprobe error для %s", url[:80])
         return None, str(e)[:200]
-
-
-def resolution_rank(res: str) -> int:
-    low = (res or "").lower()
-    if "4k" in low or "2160" in low:
-        return 4
-    if "1080" in low:
-        return 3
-    if "720" in low:
-        return 2
-    if "576" in low or "480" in low:
-        return 1
-    return 0

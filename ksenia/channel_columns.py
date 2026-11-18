@@ -7,6 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, List, Optional
 
+from ffprobe_utils import resolution_rank
 from models import ChannelData
 
 
@@ -45,7 +46,6 @@ def _resolution_value(ch: ChannelData) -> str:
 
 
 def _resolution_sort(ch: ChannelData) -> Any:
-    from ffprobe_utils import resolution_rank
     return (-resolution_rank(ch.status.resolution or ""),
             ch.status.resolution or "")
 
@@ -156,8 +156,6 @@ def columns_for_channels(
             if spec.key in ("tvg_id", "logo"):
                 result.append(spec)
             elif spec.key == "resolution":
-                # P1.9: если пользователь явно включил —
-                # показываем всегда, даже если пусто.
                 if spec.key in user_keys:
                     result.append(spec)
                 elif any(ch.status.resolution for ch in channels):

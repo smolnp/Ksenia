@@ -34,6 +34,9 @@ _GLUE_RE = re.compile(r'^(-?\d+)(?=[a-zA-Z])')
 _PROTOCOLS = ('http://', 'https://', 'rtmp://', 'rtsp://', 'udp://',
               'tcp://', 'rtp://', 'srt://', 'rist://')
 
+# Ремонт схем http:\\ / https:\\ (1+ бэкслешей) → ://
+_SCHEME_REPAIR_RE = re.compile(r'^(https?):\\+', re.IGNORECASE)
+
 
 def _find_name_comma(line: str) -> int:
     in_quotes = False
@@ -70,8 +73,6 @@ def _is_valid_url_candidate(url: str) -> bool:
         return True
     if u.startswith('/'):
         return True
-    # Ужесточение: без схемы/слэшей принимаем только длинные
-    # строки без пробелов, похожие на домен/путь.
     if len(u) > 10 and ' ' not in u and (
             '/' in u or '.' in u):
         return True
@@ -79,12 +80,7 @@ def _is_valid_url_candidate(url: str) -> bool:
 
 
 def _unescape_extinf_name(raw: str) -> str:
-    """Снимает экранирование, которое накладывает update_extinf.
-
-    В имени канала (после последней запятой в #EXTINF) мы
-    экранируем `\\` → `\\\\` и `"` → `\\"`. При чтении файла
-    надо вернуть как было.
-    """
+    """Снимает экранирование, которое накладывает update_extinf."""
     if not raw:
         return ""
     out: list[str] = []
@@ -161,14 +157,17 @@ class M3UParser:
             channel.meta.original_name = fix(raw)
             channel.meta.name = channel.meta.original_name
 
-        low = channel.link.extinf.lower()
-        if re.search(r'\b(?:4k|uhd|2160)\b', low):
+        # FIX: качество — только по имени канала, а не по всей
+        # строке #EXTINF (иначе «HD» в group-title ложно
+        # выставляет качество).
+        name_low = (channel.meta.original_name or "").lower()
+        if re.search(r'\b(?:4k|uhd|2160)\b', name_low):
             channel.meta.quality = 4
-        elif re.search(r'\b(?:1080|fhd)\b', low):
+        elif re.search(r'\b(?:1080|fhd)\b', name_low):
             channel.meta.quality = 3
-        elif re.search(r'\b(?:720|hd)\b', low):
+        elif re.search(r'\b(?:720|hd)\b', name_low):
             channel.meta.quality = 2
-        elif re.search(r'\b(?:480|sd)\b', low):
+        elif re.search(r'\b(?:480|sd)\b', name_low):
             channel.meta.quality = 1
         return channel
 
@@ -219,8 +218,6 @@ class M3UParser:
                 assign_original_index)
             channels.append(pending_channel)
             pending_channel = None
-            # Очищаем EXTVLCOPT, чтобы они не «прилипали» к
-            # следующему #EXTINF.
             pending_vlcopts.clear()
 
         while i < n:
@@ -237,7 +234,6 @@ class M3UParser:
                     if pending_channel is None:
                         pending_extgrp = grp
                     else:
-                        # EXTGRP после #EXTINF — применяем сразу.
                         if (not pending_channel.meta.group
                                 or pending_channel.meta.group
                                 == DEFAULT_GROUP):
@@ -277,10 +273,8 @@ class M3UParser:
 
             if pending_channel is not None:
                 url = fix(line)
-                if url.startswith('http:\\\\'):
-                    url = url.replace('\\\\', '/').replace('\\', '/')
-                elif url.startswith('https:\\\\'):
-                    url = url.replace('\\\\', '/').replace('\\', '/')
+                # FIX: универсальный ремонт схемы http(s):\\
+                url = _SCHEME_REPAIR_RE.sub(r'\1://', url)
 
                 if _is_valid_url_candidate(url):
                     pending_channel.link.url = url
@@ -292,6 +286,9 @@ class M3UParser:
                         parse_index += 1
                     channels.append(pending_channel)
                     pending_channel = None
+                    # FIX: очищаем EXTVLCOPT, чтобы не прилипли
+                    # к следующему #EXTINF.
+                    pending_vlcopts.clear()
                     if len(channels) >= MAX_CHANNELS_PER_PLAYLIST:
                         logger.warning(
                             "M3UParser: reached max channels %d",
@@ -414,12 +411,15 @@ class PlaylistHeaderManager:
             escaped = ",".join(self._escape_attr(x)
                                for x in self.epg_sources)
             parts.append(f'url-tvg="{escaped}"')
+        # FIX: case-insensitive дедупликация attrs
+        custom_lower = {k.lower() for k in self.custom_attributes}
         for k, v in self.custom_attributes.items():
             parts.append(
                 f'{self._escape_attr(k)}="{self._escape_attr(v)}"')
         for k, v in self._original_attrs.items():
-            if (k not in self.custom_attributes
-                    and k.lower() not in ('url-tvg', 'x-tvg-url')):
+            kl = k.lower()
+            if (kl not in custom_lower
+                    and kl not in ('url-tvg', 'x-tvg-url')):
                 parts.append(
                     f'{self._escape_attr(k)}="{self._escape_attr(v)}"')
         self.header_lines.insert(0, ' '.join(parts))

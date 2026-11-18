@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import (
     QInputDialog, QLabel, QLineEdit, QPushButton, QProgressBar,
     QSpinBox, QTableWidgetItem, QVBoxLayout, QWidget)
 
-from constants import M3U_FILTER, OK_CANCEL_BB
+from constants import M3U_FILTER
 from dialogs_base import (BaseDialog, _NumericItem,
                            _is_qobject_valid, hint_label,
                            json_export_dialog, json_import_dialog,
@@ -25,6 +25,7 @@ from dialogs_base import (BaseDialog, _NumericItem,
 from logging_setup import logger
 from paths import (confirm, error_box, info_box,
                     open_file_dialog, warn_box)
+from qt_constants import OK_CANCEL_BB
 from sources import LinkSource, LinkSourceManager
 from theme import semantic_colors
 from utils import URLUtils, _StopToken

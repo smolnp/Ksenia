@@ -13,8 +13,6 @@ FULL (полная, для поиска) / CANONICAL (для записи).
     - В display_name() транслитерация НЕ применяется: официальные
       имена каналов (BBC Earth, Cartoon Network, TV BRICS, Mezzo,
       RTG, Viju TV1000...) должны оставаться на латинице.
-    - Для русских каналов, записанных латиницей, используйте
-      _SYNONYMS (Perviy Kanal → Первый канал) или загруженный EPG.
 """
 from __future__ import annotations
 
@@ -48,12 +46,6 @@ _STUB_MARKERS = ('заглушка', 'no_epg', 'no epg', 'placeholder',
 
 # Базовые синонимы — работают даже без iptv_org_aliases.json.
 # Ключи — casefold + сжатие пробелов (_raw_alias_key).
-#
-# ВАЖНО: словарь применяется ТОЛЬКО к точному совпадению всего
-# «сырого» имени (после casefold и сжатия пробелов). Поэтому
-# официальные латинские имена каналов (BBC Earth, Cartoon Network,
-# Mezzo, RTG, TV BRICS, Viju TV1000 и т.п.) не затрагиваются —
-# их просто нет в словаре.
 _SYNONYMS: Dict[str, str] = {
     # ── Первый канал ──
     "1 канал": "Первый канал",
@@ -626,21 +618,8 @@ _SYNONYMS: Dict[str, str] = {
     "moskva doverie": "Москва Доверие",
 }
 
-# Транслитерация латиница→кириллица.
-# ВНИМАНИЕ: используется ТОЛЬКО в NormMode.FULL (для поиска),
-# НЕ используется в display_name() — чтобы не портить официальные
-# латинские имена каналов (BBC Earth, Cartoon Network, Mezzo...).
-_DISPLAY_TRANSLIT_PAIRS = (
-    ('shch', 'щ'), ('sch', 'щ'), ('zh', 'ж'), ('kh', 'х'),
-    ('ts', 'ц'), ('ch', 'ч'), ('sh', 'ш'), ('yu', 'ю'),
-    ('ya', 'я'), ('yo', 'ё'), ('ye', 'е'),
-    ('a', 'а'), ('b', 'б'), ('v', 'в'), ('g', 'г'), ('d', 'д'),
-    ('e', 'е'), ('z', 'з'), ('i', 'и'), ('y', 'й'), ('k', 'к'),
-    ('l', 'л'), ('m', 'м'), ('n', 'н'), ('o', 'о'), ('p', 'п'),
-    ('r', 'р'), ('s', 'с'), ('t', 'т'), ('u', 'у'), ('f', 'ф'),
-    ('h', 'х'), ('c', 'к'), ('w', 'в'), ('x', 'кс'),
-)
-
+# Транслитерация латиница→кириллица для токенов.
+# Используется ТОЛЬКО в NormMode.FULL (для поиска).
 _TRANSLIT = {
     "ren": "рен", "sts": "стс", "tnt": "тнт", "ntv": "нтв",
     "russia": "россия", "match": "матч", "mir": "мир",
@@ -878,50 +857,6 @@ def transliterate_tokens(text: str) -> str:
                     for w in text.split())
 
 
-def _transliterate_word(word: str) -> str:
-    if not word or not word[0].isalpha():
-        return word
-    if not all(c.isalpha() or c in "-'" for c in word):
-        return word
-    if not all(ord(c) < 128 for c in word):
-        return word
-    low = word.casefold()
-    out: list[str] = []
-    i = 0
-    while i < len(low):
-        matched = False
-        for src, dst in _DISPLAY_TRANSLIT_PAIRS:
-            if low.startswith(src, i):
-                out.append(dst)
-                i += len(src)
-                matched = True
-                break
-        if not matched:
-            out.append(low[i])
-            i += 1
-    result = "".join(out)
-    if word[0].isupper():
-        result = result[:1].upper() + result[1:]
-    return result
-
-
-def _transliterate_latin_fallback(text: str) -> str:
-    if not text:
-        return text
-    cyr = sum(1 for c in text if _CYR_LO <= c.casefold() <= _CYR_HI)
-    lat = sum(1 for c in text if 'a' <= c.casefold() <= 'z')
-    if cyr >= lat:
-        return text
-    parts = re.split(r'(\s+)', text)
-    out: list[str] = []
-    for p in parts:
-        if not p or p.isspace():
-            out.append(p)
-            continue
-        out.append(_transliterate_word(p))
-    return "".join(out)
-
-
 def _raw_alias_key(text: str) -> str:
     if not text:
         return ""
@@ -937,14 +872,19 @@ def _apply_synonyms(s: str) -> str:
         return canon
     # FIX: если исходное имя содержит тег качества в скобках
     # («Первый канал (HD)»), попробуем снять его и поискать
-    # синоним по «чистому» имени. Качество вернём обратно.
+    # синоним по «чистому» имени. Качество вернём обратно,
+    # но только если канонический синоним его ещё не содержит.
     stripped = _QUALITY_PARENS_TAG.sub('', s).strip()
     stripped = _QUALITY_BRACKETS_TAG.sub('', stripped).strip()
     if stripped and stripped != s:
         canon = _SYNONYMS.get(_raw_alias_key(stripped))
         if canon:
             quality = _extract_quality_tag(s)
-            return f"{canon} {quality}".strip() if quality else canon
+            if not quality:
+                return canon
+            if canon.rstrip().lower().endswith(quality.lower()):
+                return canon
+            return f"{canon} {quality}".strip()
     return s
 
 
@@ -1051,9 +991,6 @@ def _normalize_impl(text: str, mode: str,
         return ""
     s = fix_encoding(text)
 
-    # Алиасы применяем в FULL и CANONICAL — чтобы canonical_key
-    # (а значит и stable_key) был стабилен между «Perviy Kanal»
-    # и «Первый канал».
     if use_aliases and mode in (NormMode.FULL.value,
                                  NormMode.CANONICAL.value):
         s = _apply_synonyms(s)

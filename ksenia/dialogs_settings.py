@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import (
     QTextEdit, QVBoxLayout, QWidget)
 
 from config import Config
-from constants import (OK_CANCEL_BB, URL_CHECK_MAX_WORKERS,
+from constants import (URL_CHECK_MAX_WORKERS,
                         DEFAULT_EPG_URL,
                         CHECK_RESULT_CACHE_TTL_HOURS,
                         EPG_CACHE_TTL_HOURS,
@@ -26,6 +26,7 @@ from constants import (OK_CANCEL_BB, URL_CHECK_MAX_WORKERS,
 from dialogs_base import BaseDialog, hint_label
 from logging_setup import logger
 from paths import confirm, error_box, info_box, warn_box
+from qt_constants import OK_CANCEL_BB
 
 
 SETTINGS_SPEC: List[Tuple[str, str, str, Dict[str, Any],
@@ -494,7 +495,6 @@ GENERAL_SPEC: List[Tuple[str, str, str, Dict[str, Any],
      {"placeholder": "http://example.com/epg.xml — "
                      "укажите свой источник EPG"},
      "main", "Программа передач по умолчанию (URL):"),
-    # ── Пути к сторонним приложениям ──
     ("ffprobe_path_edit", "ffprobe_path", "line",
      {"placeholder": "Пусто = искать в PATH. Можно указать "
                      "файл ffprobe(.exe) или папку с ним."},
@@ -503,7 +503,6 @@ GENERAL_SPEC: List[Tuple[str, str, str, Dict[str, Any],
      {"placeholder": "Пусто = искать стандартно. Можно "
                      "указать файл mpv(.exe) или папку с ним."},
      "external", "Путь к mpv:"),
-    # ── Кодировка при «Сохранить как» ──
     ("save_encoding_combo", "default_save_encoding", "combo",
      {"items": [
          ("Авто (как в исходном файле)", "auto"),
@@ -512,7 +511,6 @@ GENERAL_SPEC: List[Tuple[str, str, str, Dict[str, Any],
          ("Windows-1251", "cp1251"),
      ]},
      "main", "Кодировка при «Сохранить как»:"),
-    # ── Авто-проверка ссылок ──
     ("auto_check_on_open_check", "auto_check_on_open", "check",
      {}, "check",
      "Проверять все ссылки при открытии файла"),

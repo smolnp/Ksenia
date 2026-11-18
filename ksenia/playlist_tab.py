@@ -8,18 +8,15 @@ import os
 import queue
 import weakref
 from contextlib import contextmanager, suppress
-from datetime import datetime
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from PyQt6.QtCore import (
     QItemSelectionModel, QSettings, Qt, QTimer, pyqtSignal)
-from PyQt6.QtGui import QAction, QKeySequence, QShortcut
+from PyQt6.QtGui import QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QApplication, QCheckBox, QDialog,
-    QDialogButtonBox, QFrame, QGroupBox, QHBoxLayout,
-    QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget,
-    QMenu, QMessageBox, QPushButton, QTableView, QVBoxLayout,
-    QWidget)
+    QAbstractItemView, QApplication, QDialog, QDialogButtonBox,
+    QHBoxLayout, QHeaderView, QMessageBox, QPushButton,
+    QTableView, QVBoxLayout, QWidget)
 
 from app_core import ApplicationCore
 from channel_table_model import ChannelTableModel
@@ -41,11 +38,54 @@ from paths import (confirm, confirm_three, error_box, info_box,
 from player import (EmbeddedPlayerDialog, get_mpv_error,
                     is_mpv_available)
 from player_controller import PlayerController
+from playlist_actions import (
+    build_empty_menu, build_multi_row_menu, build_single_row_menu,
+    clear_urls, copy_channel, copy_selected_channels,
+    cut_channel, cut_selected_channels,
+    delete_by_predicate, delete_channel, delete_channels_without_groups,
+    delete_channels_without_metadata, delete_channels_without_urls,
+    delete_selected_channels, has_any_metadata,
+    move_channel_down, move_channel_up,
+    move_selected_down, move_selected_up, new_channel,
+    on_model_request_move, paste_channel, paste_selected_channels,
+    remove_all_broken_urls, remove_all_urls, remove_broken_url,
+    remove_selected_broken_urls, remove_selected_urls,
+    rename_groups, show_context_menu)
+from playlist_edit import (
+    add_link_from_current as _add_link_from_current,
+    add_link_from_sources as _add_link_from_sources,
+    add_selected_to_blacklist as _add_selected_to_blacklist,
+    add_to_blacklist as _add_to_blacklist,
+    apply_alternative_url as _apply_alternative_url,
+    apply_blacklist as _apply_blacklist,
+    block_domain_from_channel as _block_domain_from_channel,
+    clean_blocked_by_domain as _clean_blocked_by_domain,
+    do_apply_link as _do_apply_link,
+    edit_user_agent as _edit_user_agent,
+    has_meta_to_remove as _has_meta_to_remove,
+    remove_metadata as _remove_metadata,
+    replace_all_links as _replace_all_links,
+    replace_broken_links as _replace_broken_links,
+    replace_link_from_sources as _replace_link_from_sources,
+    replace_links_async as _replace_links_async,
+    replace_selected_links as _replace_selected_links,
+    replace_single_link as _replace_single_link)
 from playlist_io import (
     export_channels_csv, export_channels_json,
     export_stable_to_file, find_stable_url,
     render_playlist_text, resolve_save_encoding,
     save_playlist_file)
+from playlist_workers import (
+    apply_epg_metadata_to_all as _apply_epg_metadata_to_all,
+    apply_resolution_from_player as _apply_resolution_from_player,
+    check_all_urls as _check_all_urls,
+    check_selected_urls as _check_selected_urls,
+    check_single_url as _check_single_url,
+    check_urls_async as _check_urls_async,
+    drain_resolution_queue as _drain_resolution_queue,
+    load_epg_async as _load_epg_async,
+    mark_channel_status as _mark_channel_status,
+    start_background_resolution as _start_background_resolution)
 from undo import (
     UndoRedoManager, Command,
     AddChannel, RemoveChannel, ReorderChannels,
@@ -686,206 +726,6 @@ class PlaylistTab(QWidget):
             self._suppress_state_save = False
             self._loading = False
 
-    def _resolve_epg_urls_for_load(self) -> Optional[List[str]]:
-        urls = [u for u in self.header_manager.epg_sources
-                if u and u.strip()]
-        if urls:
-            return urls
-
-        default_url = self.core.get_default_epg_url()
-        if default_url:
-            if confirm(
-                    self,
-                    "В шапке плейлиста нет EPG (url-tvg).\n\n"
-                    f"Загрузить EPG по умолчанию?\n{default_url}",
-                    "Загрузка EPG"):
-                return [default_url]
-            url, ok = QInputDialog.getText(
-                self, "Загрузка EPG", "URL EPG (XMLTV):",
-                QLineEdit.EchoMode.Normal, default_url)
-        else:
-            url, ok = QInputDialog.getText(
-                self, "Загрузка EPG",
-                "URL EPG (XMLTV):\n\n"
-                "Встроенного EPG нет — укажите свой источник "
-                "(или задайте в «Настройки → Общие»).",
-                QLineEdit.EchoMode.Normal, "")
-        if not ok or not url or not url.strip():
-            return None
-        return [url.strip()]
-
-    def load_epg_async(self):
-        if not _is_qobject_valid(self):
-            return
-        if self._epg_worker and self._epg_worker.isRunning():
-            info_box(self, "Загрузка EPG уже идёт")
-            return
-        urls = self._resolve_epg_urls_for_load()
-        if not urls:
-            return
-        w = self.parent_window
-        if w is not None:
-            w.set_action("⏳ Загрузка EPG...")
-        from constants import EPG_LOAD_TIMEOUT_SEC
-        worker = EPGLoaderWorker(
-            urls, self.core.epg_db, timeout=EPG_LOAD_TIMEOUT_SEC)
-        self._epg_worker = worker
-
-        def on_progress(value, total, text):
-            w2 = self.parent_window
-            if w2 is not None:
-                w2.show_progress(value, total, text)
-
-        def on_loaded(count, errors):
-            if self._epg_worker is worker:
-                self._epg_worker = None
-            w2 = self.parent_window
-            if w2 is not None:
-                w2.hide_progress()
-            if not _is_qobject_valid(self):
-                return
-            msg = f"Загружено {count} программ"
-            if errors:
-                shown = errors[:5]
-                msg += "\n\nОшибки:\n" + "\n".join(shown)
-                if len(errors) > 5:
-                    msg += f"\n... и ещё {len(errors) - 5}"
-            info_box(self, msg, "EPG")
-            self.core.epg_updated.emit()
-
-        def on_error(msg):
-            if self._epg_worker is worker:
-                self._epg_worker = None
-            w2 = self.parent_window
-            if w2 is not None:
-                w2.hide_progress()
-            if _is_qobject_valid(self):
-                error_box(self, msg, "Ошибка EPG")
-
-        worker.progress.connect(
-            on_progress, Qt.ConnectionType.QueuedConnection)
-        worker.epg_loaded.connect(
-            on_loaded, Qt.ConnectionType.QueuedConnection)
-        worker.error.connect(
-            on_error, Qt.ConnectionType.QueuedConnection)
-        worker.start()
-
-    def apply_epg_metadata_to_all(self, silent: bool = False) -> bool:
-        if not _is_qobject_valid(self):
-            return False
-        if not self.core.epg_db.has_channel_info:
-            if not silent:
-                info_box(self, "EPG не загружен (или не содержит "
-                               "<channel>-записей).\n"
-                               "Загрузите EPG через "
-                               "«Инструменты → Загрузить EPG».",
-                          "EPG")
-            return False
-        if not self.all_channels:
-            return False
-        if (self._epg_meta_worker
-                and self._epg_meta_worker.isRunning()):
-            with suppress(Exception):
-                self._epg_meta_worker.stop()
-                self._epg_meta_worker.wait(2000)
-            self._epg_meta_worker = None
-
-        self._epg_meta_generation += 1
-        generation = self._epg_meta_generation
-
-        if not silent:
-            self.save_state("Применение EPG-метаданных")
-        w = self.parent_window
-        if w is not None and not silent:
-            w.set_action("⏳ Применение EPG-метаданных...")
-
-        worker = EPGMetadataApplyWorker(
-            self.all_channels, self.core.epg_db,
-            self.core.config, self.core.get_replacement_settings())
-        self._epg_meta_worker = worker
-        uid_map = {ch.uid: ch for ch in self.all_channels}
-
-        def on_progress(value, total, text):
-            w2 = self.parent_window
-            if w2 is not None and not silent:
-                w2.show_progress(value, total, text)
-
-        def on_applied(count, results):
-            if self._epg_meta_worker is worker:
-                self._epg_meta_worker = None
-            if not _is_qobject_valid(self):
-                return
-            if generation != self._epg_meta_generation:
-                return
-            w2 = self.parent_window
-            if w2 is not None and not silent:
-                w2.hide_progress()
-
-            touched_uids: Set[int] = set()
-            for uid, field, value in results:
-                ch = uid_map.get(uid)
-                if ch is None:
-                    continue
-                if field == 'epg_source':
-                    if ch.meta.epg_source != value:
-                        ch.meta.epg_source = value
-                        touched_uids.add(uid)
-                    continue
-                if field == 'epg_alternative_names':
-                    alts = [x for x in value.split("\x1f") if x]
-                    if ch.meta.epg_alternative_names != alts:
-                        ch.meta.epg_alternative_names = alts
-                        touched_uids.add(uid)
-                    continue
-                if field not in EPG_ALLOWED_META_FIELDS:
-                    continue
-                if getattr(ch.meta, field) != value:
-                    setattr(ch.meta, field, value)
-                    touched_uids.add(uid)
-            modified = 0
-            for uid in touched_uids:
-                ch = uid_map.get(uid)
-                if ch is None:
-                    continue
-                ch.update_extinf()
-                ch.touch()
-                modified += 1
-
-            if modified:
-                if not silent:
-                    self.undo_manager.save_state(
-                        self.all_channels,
-                        "Применение EPG-метаданных")
-                self._commit(reset_view=False, save_state=False)
-                if not silent:
-                    info_box(self,
-                             f"Обновлено {modified} "
-                             f"{channels_word(modified)}",
-                             "Готово")
-            else:
-                if not silent:
-                    info_box(self, "Метаданные не изменились "
-                                   "(нет совпадений или "
-                                   "всё уже актуально).", "EPG")
-
-        def on_error(msg):
-            if self._epg_meta_worker is worker:
-                self._epg_meta_worker = None
-            w2 = self.parent_window
-            if w2 is not None and not silent:
-                w2.hide_progress()
-            if _is_qobject_valid(self) and not silent:
-                error_box(self, msg, "Ошибка EPG")
-
-        worker.progress.connect(
-            on_progress, Qt.ConnectionType.QueuedConnection)
-        worker.applied.connect(
-            on_applied, Qt.ConnectionType.QueuedConnection)
-        worker.error.connect(
-            on_error, Qt.ConnectionType.QueuedConnection)
-        worker.start()
-        return True
-
     def update_info(self):
         st = self.core.get_stats(self.tab_id)
         parts = [
@@ -921,158 +761,6 @@ class PlaylistTab(QWidget):
             if shown:
                 info += " | 🎬 " + " ".join(shown)
         self.info_changed.emit(info)
-
-    def mark_channel_status(self, uid: int, ok: bool) -> None:
-        if not _is_qobject_valid(self):
-            return
-        ch = next((c for c in self.all_channels if c.uid == uid),
-                  None)
-        if ch is None:
-            return
-        ch.status.url_status = bool(ok)
-        ch.status.url_check_time = datetime.now()
-        ch.status.link_quality = (
-            LinkQuality.WORKING if ok else LinkQuality.NOT_WORKING)
-        ch.status.status_text = (
-            StatusText.WORKING if ok else StatusText.NOT_WORKING)
-        ch.touch()
-
-        with self._suppress_save():
-            try:
-                for r in range(self.model.rowCount()):
-                    c = self.model.channel_at(r)
-                    if c is not None and c.uid == uid:
-                        self.model.refresh_row(r)
-                        break
-            except Exception:
-                logger.exception("refresh_row")
-
-        if ch.link.url and self.core.cache_manager is not None:
-            try:
-                self.core.cache_manager.save_check_result(
-                    ch.meta.name, ch.link.url, bool(ok),
-                    ch.status.link_response_time or 0.0,
-                    ch.status.status_text,
-                    ch.status.status_code,
-                    ch.status.ttfb_ms,
-                    ch.status.resolution or "")
-            except Exception:
-                logger.exception("save_check_result")
-
-        self.core.bump_tab_revision(self.tab_id)
-        self.update_info()
-
-    def apply_resolution_from_player(self, uid: int,
-                                      w: int, h: int) -> None:
-        if not _is_qobject_valid(self):
-            return
-        if w <= 0 or h <= 0:
-            return
-        ch = next((c for c in self.all_channels
-                   if c.uid == uid), None)
-        if ch is None:
-            return
-        from ffprobe_utils import normalize_resolution
-        new_res = normalize_resolution(w, h)
-        if not new_res:
-            return
-        if ch.status.resolution == new_res:
-            return
-        old_res = ch.status.resolution
-        ch.status.resolution = new_res
-        row = self.model.row_of_uid(uid)
-        if row >= 0:
-            self.model.refresh_row(row)
-        self.update_info()
-        if ch.link.url and self.core.cache_manager is not None:
-            try:
-                self.core.cache_manager.save_check_result(
-                    ch.meta.name, ch.link.url, True,
-                    ch.status.link_response_time or 0.0,
-                    ch.status.status_text,
-                    ch.status.status_code,
-                    ch.status.ttfb_ms, new_res)
-            except Exception:
-                logger.exception("save_check_result (mpv)")
-        logger.info(
-            "mpv: разрешение «%s»: %s → %s (%dx%d)",
-            ch.meta.name or "?",
-            old_res or "(пусто)", new_res, w, h)
-
-    def _start_background_resolution(
-            self, channels: List[ChannelData]) -> None:
-        if not _is_qobject_valid(self):
-            return
-        if (self._bg_resolution_worker is not None
-                and self._bg_resolution_worker.isRunning()):
-            return
-        from ffprobe_utils import is_ffprobe_available
-        if not is_ffprobe_available():
-            logger.info("ffprobe недоступен — фоновое "
-                        "определение разрешения пропущено")
-            return
-
-        worker = BackgroundResolutionWorker(
-            channels, max_workers=3,
-            timeout=FFPROBE_TIMEOUT_SEC, delay_ms=150)
-        if not worker._items:
-            return
-        self._bg_resolution_worker = worker
-
-        def on_progress(value, total, text):
-            w = self.parent_window
-            if w is not None:
-                w.show_progress(value, total, text)
-
-        def on_done():
-            if self._bg_resolution_worker is worker:
-                self._bg_resolution_worker = None
-            self._resolution_timer.stop()
-            self._drain_resolution_queue()
-            w = self.parent_window
-            if w is not None:
-                w.hide_progress()
-
-        worker.progress.connect(
-            on_progress, Qt.ConnectionType.QueuedConnection)
-        worker.worker_done.connect(
-            on_done, Qt.ConnectionType.QueuedConnection)
-        worker.start()
-        self._resolution_timer.start()
-
-    def _drain_resolution_queue(self) -> None:
-        if not _is_qobject_valid(self):
-            return
-        changed = False
-        while True:
-            try:
-                uid, res = self._resolution_queue.get_nowait()
-            except queue.Empty:
-                break
-            ch = next(
-                (c for c in self.all_channels if c.uid == uid),
-                None)
-            if ch is None:
-                continue
-            if ch.status.resolution:
-                continue
-            ch.status.resolution = res
-            row = self.model.row_of_uid(uid)
-            if row >= 0:
-                self.model.refresh_row(row)
-            changed = True
-            if ch.link.url and self.core.cache_manager is not None:
-                try:
-                    self.core.cache_manager.save_check_result(
-                        ch.meta.name, ch.link.url, True,
-                        ch.status.link_response_time or 0.0,
-                        ch.status.status_text,
-                        ch.status.status_code,
-                        ch.status.ttfb_ms, res)
-                except Exception:
-                    logger.exception("save_check_result (bg)")
-        if changed:
-            self.update_info()
 
     def channel_for_row(self, row: int) -> Optional[ChannelData]:
         return self.model.channel_at(row)
@@ -1266,1264 +954,188 @@ class PlaylistTab(QWidget):
     def _play_in_player(self, row: int):
         self.player_controller.play_row(row)
 
+    # ── обёртки на playlist_workers ──
+
+    def load_epg_async(self):
+        _load_epg_async(self)
+
+    def apply_epg_metadata_to_all(self, silent: bool = False) -> bool:
+        return _apply_epg_metadata_to_all(self, silent)
+
+    def mark_channel_status(self, uid: int, ok: bool) -> None:
+        _mark_channel_status(self, uid, ok)
+
+    def apply_resolution_from_player(self, uid: int,
+                                      w: int, h: int) -> None:
+        _apply_resolution_from_player(self, uid, w, h)
+
+    def _start_background_resolution(self, channels):
+        _start_background_resolution(self, channels)
+
+    def _drain_resolution_queue(self) -> None:
+        _drain_resolution_queue(self)
+
     def check_urls_async(self, channels: List[ChannelData]):
-        if not _is_qobject_valid(self):
-            return
-        worker_existing = getattr(self, '_src_check_worker', None)
-        if (worker_existing is not None
-                and worker_existing.isRunning()):
-            info_box(self, "Проверка уже запущена")
-            return
-        to_check = [ch for ch in channels if ch.has_valid_url]
-        if not to_check:
-            info_box(self, "Нет ссылок для проверки")
-            return
-
-        if self.core.config.get('limit_check_enabled', False):
-            try:
-                limit = int(self.core.config.get(
-                    'max_channels_to_check', 2000))
-            except (ValueError, TypeError):
-                limit = 2000
-            if len(to_check) > limit:
-                if not confirm(
-                        self,
-                        f"Будет проверено только {limit} из "
-                        f"{len(to_check)} каналов (лимит в "
-                        f"«Настройки → Общие»). Продолжить?"):
-                    return
-                to_check = to_check[:limit]
-
-        from workers import SourceUrlCheckWorker, SourceCheckConfig
-        settings = self.core.get_replacement_settings()
-        w = self.parent_window
-        if w is not None:
-            w.set_action(
-                f"⏳ Проверка ссылок: {len(to_check)} каналов")
-
-        timeout = max(int(settings.check_timeout or 3), 3)
-        check_cfg = SourceCheckConfig.from_app_config(
-            self.core.config)
-        check_cfg = SourceCheckConfig(
-            max_workers=check_cfg.max_workers,
-            timeout=timeout,
-            trust_sec=0,
-            batch_size=check_cfg.batch_size,
-            verify_ssl=check_cfg.verify_ssl,
-        )
-        settings_snapshot = self.core._build_settings_snapshot()
-        try:
-            bl_index = self.core.blacklist_manager.build_index()
-        except Exception:
-            logger.exception("build_index")
-            bl_index = None
-
-        worker = SourceUrlCheckWorker(
-            source_name="__playlist__",
-            channels=to_check,
-            cache_manager=self.core.cache_manager,
-            check_config=check_cfg,
-            stop_token=None,
-            settings_snapshot=settings_snapshot,
-            blacklist_index=bl_index,
-            enable_ffprobe=False,
-        )
-        self._src_check_worker = worker
-
-        def on_progress(name, cur, tot):
-            w2 = self.parent_window
-            if w2 is not None:
-                w2.show_progress(cur, max(1, tot),
-                                  f"Проверено: {cur}/{tot}")
-
-        def on_done(name, working, total):
-            if getattr(self, '_src_check_worker', None) is worker:
-                self._src_check_worker = None
-            w2 = self.parent_window
-            if w2 is not None:
-                w2.hide_progress()
-            if not _is_qobject_valid(self):
-                return
-            with self._suppress_save():
-                self.undo_manager.save_state(
-                    self.all_channels, "Проверка ссылок")
-            self.sync_to_core()
-            with self._suppress_save():
-                self.model.refresh_all()
-            self.core.bump_tab_revision(self.tab_id)
-            self.update_info()
-            info_box(
-                self,
-                f"Проверка завершена.\n"
-                f"Работают: {working} | "
-                f"Не работают: {total - working} | "
-                f"Всего проверено: {total}",
-                "Проверка ссылок")
-            if not worker.is_stopped():
-                self._start_background_resolution(to_check)
-
-        def on_error(msg):
-            if getattr(self, '_src_check_worker', None) is worker:
-                self._src_check_worker = None
-            w2 = self.parent_window
-            if w2 is not None:
-                w2.hide_progress()
-            if _is_qobject_valid(self):
-                error_box(self, msg, "Ошибка проверки")
-
-        worker.source_check_progress.connect(on_progress)
-        worker.source_check_done.connect(on_done)
-        worker.error.connect(on_error)
-        worker.start()
+        _check_urls_async(self, channels)
 
     def _check_selected_urls(self):
-        if not self.selected_channels:
-            info_box(self, "Не выбрано ни одного канала")
-            return
-        with_urls = [ch for ch in self.selected_channels
-                     if ch.has_valid_url]
-        if not with_urls:
-            info_box(self, "У выбранных каналов нет ссылок")
-            return
-        self.check_urls_async(with_urls)
+        _check_selected_urls(self)
 
     def check_all_urls(self):
-        with_urls = [ch for ch in self.all_channels
-                     if ch.has_valid_url]
-        if not with_urls:
-            info_box(self, "Нет каналов со ссылками")
-            return
-        if not confirm(self,
-                       f"Проверить {len(with_urls)} "
-                       f"{links_word(len(with_urls))}?"):
-            return
-        self.check_urls_async(with_urls)
+        _check_all_urls(self)
 
     def _check_single_url(self, row: int):
-        ch = self.channel_for_row(row)
-        if ch and ch.link.url:
-            self.check_urls_async([ch])
+        _check_single_url(self, row)
 
-    def _clear_urls(self, channels: List[ChannelData],
-                    description: str, confirm_msg: str = "",
-                    only_broken: bool = False) -> int:
-        if only_broken:
-            targets = [ch for ch in channels
-                       if ch.status.url_status is False]
-        else:
-            targets = [ch for ch in channels if ch.has_valid_url]
-        if not targets:
-            return 0
-        if confirm_msg and not confirm(self, confirm_msg):
-            return 0
-        with self._edit_channels(description):
-            for ch in targets:
-                ch.clear_url()
-                ch.update_extinf()
-        return len(targets)
+    # ── обёртки на playlist_actions ──
 
-    def _remove_broken_url(self, row: int):
-        ch = self.channel_for_row(row)
-        if ch is None or ch.status.url_status is not False:
-            return
-        self._clear_urls([ch], "Удаление битой ссылки",
-                          only_broken=True)
+    def _clear_urls(self, channels, description, confirm_msg="",
+                    only_broken=False):
+        return clear_urls(self, channels, description,
+                          confirm_msg, only_broken)
+
+    def _remove_broken_url(self, row):
+        remove_broken_url(self, row)
 
     def _remove_selected_broken_urls(self):
-        n = self._clear_urls(
-            self.selected_channels, "Удаление битых ссылок",
-            only_broken=True)
-        if n:
-            info_box(self,
-                     f"Удалено {n} {links_word(n)}",
-                     "Готово")
+        remove_selected_broken_urls(self)
 
     def _remove_all_broken_urls(self):
-        n = self._clear_urls(
-            self.all_channels, "Удаление всех битых",
-            confirm_msg="Удалить все битые ссылки?",
-            only_broken=True)
-        if n:
-            info_box(self,
-                     f"Удалено {n} {links_word(n)}",
-                     "Готово")
+        remove_all_broken_urls(self)
 
     def _remove_selected_urls(self):
-        if not self.selected_channels:
-            return
-        n = self._clear_urls(
-            self.selected_channels, "Удаление ссылок у выбранных",
-            confirm_msg=f"Удалить ссылки у "
-                        f"{len(self.selected_channels)} "
-                        f"{channels_word(len(self.selected_channels))}?")
-        if n:
-            info_box(self,
-                     f"Удалено {n} {links_word(n)}",
-                     "Готово")
+        remove_selected_urls(self)
 
     def remove_all_urls(self):
-        if not self.all_channels:
-            return
-        n = self._clear_urls(
-            self.all_channels, "Удаление всех ссылок",
-            confirm_msg=f"Удалить все ссылки из "
-                        f"{len(self.all_channels)}?")
-        if n:
-            info_box(self,
-                     f"Удалено {n} {links_word(n)}",
-                     "Готово")
+        remove_all_urls(self)
 
-    def _delete_channels_by_predicate(
-            self, predicate: Callable[[ChannelData], bool],
-            description: str, confirm_msg: str) -> int:
-        targets = [ch for ch in self.all_channels if predicate(ch)]
-        if not targets:
-            return 0
-        if not confirm(self, confirm_msg):
-            return 0
-        del_uids = {ch.uid for ch in targets}
-        with self._edit_channels(description):
-            self.all_channels[:] = [ch for ch in self.all_channels
-                                     if ch.uid not in del_uids]
-            self._normalize_order()
-        return len(targets)
+    def _delete_channels_by_predicate(self, predicate, description,
+                                       confirm_msg):
+        return delete_by_predicate(self, predicate, description,
+                                   confirm_msg)
 
     def _new_channel(self):
-        self.save_state("Создание нового канала")
-        ch = ChannelData()
-        ch.meta.name = "Новый канал"
-        ch.meta.group = DEFAULT_GROUP
-        ch.original_index = -1
-        ch.update_extinf()
-        self.all_channels.append(ch)
-        self._normalize_order()
-        self.sync_to_core()
-        with self._suppress_save():
-            self._rebuild_model_safely(preserve_selection=True)
-        row = self.model.row_of_uid(ch.uid)
-        if row >= 0:
-            self.table.setCurrentIndex(self.model.index(row, 1))
-            self.table.edit(self.model.index(row, 1))
-        self.groups_changed.emit()
+        new_channel(self)
 
-    def _delete_channel(self, row: int = -1):
-        if row == -1:
-            if self.current_channel:
-                uids = {self.current_channel.uid}
-            else:
-                return
-        else:
-            ch = self.channel_for_row(row)
-            if ch is None:
-                return
-            uids = {ch.uid}
-
-        n = len(uids)
-        if n == 1:
-            ch = next((c for c in self.all_channels
-                       if c.uid in uids), None)
-            msg = (f"Удалить канал '{ch.meta.name}'?" if ch
-                   else "Удалить канал?")
-        else:
-            msg = f"Удалить выбранные {n} " \
-                  f"{channels_word(n)}?"
-        if not confirm(self, msg):
-            return
-        self.save_state("Удаление канала")
-        self.all_channels = [ch for ch in self.all_channels
-                              if ch.uid not in uids]
-        self._normalize_order()
-        self.sync_to_core()
-        new_uids = {ch.uid for ch in self.all_channels}
-        self.selected_channels = [
-            ch for ch in self.selected_channels
-            if ch.uid in new_uids]
-        if (self.current_channel is not None
-                and self.current_channel.uid not in new_uids):
-            self.current_channel = None
-        with self._suppress_save():
-            self._rebuild_model_safely(preserve_selection=True)
-        self.groups_changed.emit()
+    def _delete_channel(self, row=-1):
+        delete_channel(self, row)
 
     def _delete_selected_channels(self):
-        if not self.selected_channels:
-            return
-        uids = {ch.uid for ch in self.selected_channels}
-        n = len(uids)
-        if n == 1:
-            ch = next((c for c in self.all_channels
-                       if c.uid in uids), None)
-            msg = (f"Удалить канал '{ch.meta.name}'?" if ch
-                   else "Удалить канал?")
-        else:
-            msg = f"Удалить выбранные {n} " \
-                  f"{channels_word(n)}?"
-        if not confirm(self, msg):
-            return
-        self.save_state("Удаление канала")
-        self.all_channels = [ch for ch in self.all_channels
-                              if ch.uid not in uids]
-        self._normalize_order()
-        self.sync_to_core()
-        self.selected_channels = []
-        self.current_channel = None
-        with self._suppress_save():
-            self._rebuild_model_safely(preserve_selection=False)
-        self.groups_changed.emit()
+        delete_selected_channels(self)
 
     def delete_channels_without_urls(self):
-        n = self._delete_channels_by_predicate(
-            lambda ch: not ch.has_valid_url,
-            "Удаление каналов без ссылок",
-            "Удалить каналы без ссылок?")
-        if n:
-            info_box(self,
-                     f"Удалено {n} {channels_word(n)}",
-                     "Готово")
+        delete_channels_without_urls(self)
 
     def delete_channels_without_metadata(self):
-        n = self._delete_channels_by_predicate(
-            lambda ch: not self._has_any_metadata(ch),
-            "Удаление каналов без метаданных",
-            "Удалить каналы без метаданных?")
-        if n:
-            info_box(self,
-                     f"Удалено {n} {channels_word(n)}",
-                     "Готово")
+        delete_channels_without_metadata(self)
 
     def delete_channels_without_groups(self):
-        n = self._delete_channels_by_predicate(
-            lambda ch: not ch.meta.group
-                       or ch.meta.group == DEFAULT_GROUP,
-            "Удаление каналов без группы",
-            "Удалить каналы без группы (group-title пустой "
-            "или «Без группы»)?")
-        if n:
-            info_box(self,
-                     f"Удалено {n} {channels_word(n)}",
-                     "Готово")
+        delete_channels_without_groups(self)
 
     @staticmethod
-    def _has_any_metadata(ch: ChannelData) -> bool:
-        return bool(ch.meta.tvg_id or ch.meta.tvg_logo
-                    or ch.meta.tvg_name
-                    or (ch.meta.group
-                        and ch.meta.group != DEFAULT_GROUP)
-                    or ch.link.user_agent)
-
-    def block_domain_from_channel(self, channel: ChannelData):
-        if not channel:
-            info_box(self, "Канал не выбран")
-            return
-        target = self.find_channel_by_ref(channel)
-        if target is None:
-            info_box(self, f"Канал «{channel.meta.name}» "
-                            f"не найден в плейлисте.")
-            return
-        if not target.has_valid_url:
-            info_box(self, f"У канала «{target.meta.name}» "
-                            f"нет ссылки.")
-            return
-        host = URLUtils.extract_host(target.link.url)
-        if not host:
-            info_box(self, f"Не удалось определить домен/IP "
-                            f"из ссылки:\n"
-                            f"{target.link.url[:120]}")
-            return
-
-        dlg = BlockDomainDialog(host, self.all_channels, self)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        value, include, note, selected = dlg.get_result()
-        if not value:
-            return
-        added = self.core.add_domain_to_blacklist(
-            value, include_subdomains=include, note=note)
-        if not selected and not added:
-            info_box(self,
-                     f"Правило для «{value}» уже существует, "
-                     f"совпадений нет.",
-                     "Готово")
-        elif not selected:
-            info_box(self,
-                     f"Правило «{value}» добавлено. "
-                     f"Совпадений в плейлисте не найдено.",
-                     "Готово")
-        else:
-            self._clean_blocked_by_domain()
-            info_box(self,
-                     f"Правило «{value}» добавлено.\n"
-                     f"Очищено ссылок: {len(selected)}.\n"
-                     f"Каналы сохранены с метаданными.",
-                     "Готово")
-
-    def _clean_blocked_by_domain(self) -> int:
-        if not self.all_channels:
-            return 0
-        mgr = self.core.domain_blacklist_manager
-        if not mgr.get_all():
-            return 0
-        blocked_count = sum(
-            1 for ch in self.all_channels
-            if ch.link.url and mgr.matches_url(ch.link.url))
-        if blocked_count == 0:
-            return 0
-        self.flush_pending_state()
-        self.save_state("Очистка ссылок по чёрному списку "
-                        "доменов/IP")
-        _, cleaned = self.core.apply_domain_blacklist_clean(
-            self.all_channels)
-        self.sync_to_core()
-        with self._suppress_save():
-            self.model.refresh_all()
-        self.core.bump_tab_revision(self.tab_id)
-        self.update_info()
-        return cleaned
-
-    def _add_to_blacklist(self, row: int = -1):
-        if row == -1:
-            if not self.current_channel:
-                return
-            ch = self.current_channel
-        else:
-            ch = self.channel_for_row(row)
-            if ch is None:
-                return
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Добавить в чёрный список каналов")
-        dlg.resize(400, 200)
-        l = QVBoxLayout(dlg)
-        l.addWidget(QLabel(f"Канал: {ch.meta.name}"))
-        l.addWidget(QLabel(f"TVG-ID: {ch.meta.tvg_id}"))
-        g = QGroupBox("Параметры")
-        gl = QVBoxLayout(g)
-        nc = QCheckBox("По названию")
-        nc.setChecked(True)
-        gl.addWidget(nc)
-        tc = QCheckBox("По TVG-ID")
-        tc.setChecked(bool(ch.meta.tvg_id))
-        gl.addWidget(tc)
-        l.addWidget(g)
-        bb = QDialogButtonBox(OK_CANCEL_BB)
-        bb.accepted.connect(dlg.accept)
-        bb.rejected.connect(dlg.reject)
-        l.addWidget(bb)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        name = ch.meta.name if nc.isChecked() else ""
-        tid = ch.meta.tvg_id if tc.isChecked() else ""
-        if not name and not tid:
-            return
-        self.core.add_to_blacklist(name, tid)
-
-    def _add_selected_to_blacklist(self):
-        if not self.selected_channels:
-            return
-        chs = self.selected_channels.copy()
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Добавить в чёрный список каналов")
-        dlg.resize(450, 300)
-        l = QVBoxLayout(dlg)
-        l.addWidget(QLabel(f"Добавить {len(chs)} "
-                           f"{channels_word(len(chs))}:"))
-        lw = QListWidget()
-        for c in chs[:100]:
-            lw.addItem(f"{c.meta.name} [{c.meta.tvg_id}]"
-                       if c.meta.tvg_id else c.meta.name)
-        if len(chs) > 100:
-            lw.addItem(f"... и ещё {len(chs) - 100}")
-        l.addWidget(lw)
-        g = QGroupBox("Параметры")
-        gl = QVBoxLayout(g)
-        nc = QCheckBox("По названию")
-        nc.setChecked(True)
-        gl.addWidget(nc)
-        tc = QCheckBox("По TVG-ID")
-        tc.setChecked(True)
-        gl.addWidget(tc)
-        l.addWidget(g)
-        bb = QDialogButtonBox(OK_CANCEL_BB)
-        bb.accepted.connect(dlg.accept)
-        bb.rejected.connect(dlg.reject)
-        l.addWidget(bb)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        if not nc.isChecked() and not tc.isChecked():
-            return
-        added = 0
-        for c in chs:
-            name = c.meta.name if nc.isChecked() else ""
-            tid = (c.meta.tvg_id
-                   if tc.isChecked() and c.meta.tvg_id else "")
-            if not name and not tid:
-                continue
-            if self.core.add_to_blacklist(name, tid):
-                added += 1
-        if added > 0:
-            info_box(self,
-                     f"Добавлено {added} {channels_word(added)}",
-                     "Готово")
-
-    def _edit_user_agent(self, row: int):
-        ch = self.channel_for_row(row)
-        if not ch:
-            return
-        new_ua, ok = QInputDialog.getText(
-            self, "Правка User Agent", "User Agent:",
-            QLineEdit.EchoMode.Normal, ch.link.user_agent or "")
-        if not ok:
-            return
-        self.save_state("Изменение User Agent")
-        ua = sanitize_user_agent(new_ua)
-        ch.link.user_agent = ua
-        if ua:
-            ch.link.extra_headers['User-Agent'] = ua
-        else:
-            for k in list(ch.link.extra_headers.keys()):
-                if k.lower() == 'user-agent':
-                    del ch.link.extra_headers[k]
-        ch.update_extvlcopt_from_headers()
-        ch.touch()
-        self.sync_to_core()
-        for r in range(self.model.rowCount()):
-            c = self.model.channel_at(r)
-            if c is not None and c.uid == ch.uid:
-                self.model.refresh_row(r)
-                break
+    def _has_any_metadata(ch):
+        return has_any_metadata(ch)
 
     def _copy_channel(self):
-        w = self.parent_window
-        if w is None:
-            return
-        if len(self.selected_channels) > 1:
-            self._copy_selected_channels()
-            w.set_action(
-                f"✓ Скопировано каналов: "
-                f"{len(self.selected_channels)}")
-        elif self.current_channel is not None:
-            w.copied_channel = self.current_channel.copy()
-            w.copied_channels = None
-            w.set_action("✓ Скопирован 1 канал")
-        else:
-            w.copied_channel = None
-            w.copied_channels = None
+        copy_channel(self)
 
     def _cut_channel(self):
-        if not self.current_channel and not self.selected_channels:
-            return
-        if len(self.selected_channels) > 1:
-            self._copy_selected_channels()
-            self._delete_selected_channels()
-            return
-        if not self.current_channel:
-            return
-        target = self.current_channel
-        self._copy_channel()
-        uids = {target.uid}
-        if not confirm(self,
-                       f"Вырезать канал '{target.meta.name}'?"):
-            return
-        self.save_state("Вырезание канала")
-        self.all_channels = [ch for ch in self.all_channels
-                              if ch.uid not in uids]
-        self._normalize_order()
-        self.sync_to_core()
-        self.selected_channels = []
-        self.current_channel = None
-        with self._suppress_save():
-            self._rebuild_model_safely(preserve_selection=False)
-        self.groups_changed.emit()
+        cut_channel(self)
 
     def _cut_selected_channels(self):
-        if self.selected_channels:
-            self._copy_selected_channels()
-            self._delete_selected_channels()
+        cut_selected_channels(self)
 
     def _copy_selected_channels(self):
-        w = self.parent_window
-        if self.selected_channels and w is not None:
-            w.copied_channels = [ch.copy()
-                                  for ch in self.selected_channels]
-            w.copied_channel = None
+        copy_selected_channels(self)
 
-    def _paste_channel(self, row: int = -1):
-        w = self.parent_window
-        if w is None:
-            return
+    def _paste_channel(self, row=-1):
+        paste_channel(self, row)
 
-        if w.copied_channels:
-            self._paste_selected_channels(row)
-            return
+    def _paste_selected_channels(self, row=-1):
+        paste_selected_channels(self, row)
 
-        if not w.copied_channel:
-            return
-
-        self.save_state("Вставка канала")
-        ch = w.copied_channel.copy()
-        ch.original_index = -1
-
-        if (ch.link.url
-                and not self.core.config.get(
-                    'allow_duplicate_urls', False)):
-            for existing in self.all_channels:
-                if existing.link.url == ch.link.url:
-                    warn_box(
-                        self,
-                        f"Ссылка уже используется каналом "
-                        f"«{existing.meta.name}».\n\n"
-                        f"Включите «Разрешать одинаковые ссылки "
-                        f"у разных каналов» в общих настройках, "
-                        f"если это нужно.")
-                    return
-
-        ref_channel = (self.channel_for_row(row)
-                       if row >= 0 else None)
-        if ref_channel is None:
-            ref_channel = self.current_channel
-
-        if (ref_channel is not None
-                and ref_channel in self.all_channels):
-            idx = self.all_channels.index(ref_channel) + 1
-            self.all_channels.insert(idx, ch)
-        else:
-            self.all_channels.append(ch)
-
-        self._normalize_order()
-        self.sync_to_core()
-        with self._suppress_save():
-            self._rebuild_model_safely(preserve_selection=True)
-        self.groups_changed.emit()
-
-    def _paste_selected_channels(self, row: int = -1):
-        w = self.parent_window
-        if w is None or not w.copied_channels:
-            return
-        self.save_state("Вставка каналов")
-
-        ref_channel = (self.channel_for_row(row)
-                       if row >= 0 else None)
-        if ref_channel is None:
-            ref_channel = self.current_channel
-
-        if (ref_channel is not None
-                and ref_channel in self.all_channels):
-            base_idx = self.all_channels.index(ref_channel) + 1
-        else:
-            base_idx = len(self.all_channels)
-
-        allow_dup = bool(self.core.config.get(
-            'allow_duplicate_urls', False))
-        if not allow_dup:
-            existing_urls = {
-                ch.link.url for ch in self.all_channels
-                if ch.link.url
-            }
-            conflicts: List[str] = []
-            for ch in w.copied_channels:
-                url = ch.link.url
-                if url and url in existing_urls:
-                    conflicts.append(
-                        f"«{ch.meta.name}» → {url[:60]}")
-            if conflicts:
-                warn_box(
-                    self,
-                    "В буфере есть каналы со ссылками, которые "
-                    "уже используются в этом плейлисте:\n\n"
-                    + "\n".join(conflicts[:10])
-                    + (f"\n… и ещё {len(conflicts) - 10}"
-                       if len(conflicts) > 10 else "")
-                    + "\n\nВключите «Разрешать одинаковые ссылки "
-                      "у разных каналов» в общих настройках, "
-                      "если это нужно.")
-                return
-
-        for offset, ch in enumerate(w.copied_channels):
-            new = ch.copy()
-            new.original_index = -1
-            self.all_channels.insert(base_idx + offset, new)
-
-        self._normalize_order()
-        self.sync_to_core()
-        with self._suppress_save():
-            self._rebuild_model_safely(preserve_selection=True)
-        self.groups_changed.emit()
-
-        w.set_action(
-            f"✓ Вставлено каналов: {len(w.copied_channels)}")
-
-    def _on_model_request_move(self, uids: List[int],
-                                ref_uid: Optional[int],
-                                insert_after: int = 0):
-        if not uids:
-            return
-        moving_set = set(uids)
-        moving = [ch for ch in self.all_channels
-                  if ch.uid in moving_set]
-        if not moving:
-            return
-        if ref_uid is not None and ref_uid in moving_set:
-            return
-
-        ref_channel = None
-        if ref_uid is not None:
-            ref_channel = next(
-                (ch for ch in self.all_channels
-                 if ch.uid == ref_uid), None)
-
-        if self._state_save_timer.isActive():
-            self._state_save_timer.stop()
-            self._do_save_state()
-
-        remaining = [ch for ch in self.all_channels
-                     if ch.uid not in moving_set]
-
-        if ref_channel is not None:
-            if ref_channel not in remaining:
-                return
-            ref_idx = remaining.index(ref_channel)
-            insert_idx = ref_idx + (1 if insert_after else 0)
-        else:
-            insert_idx = len(remaining)
-
-        self.all_channels = (remaining[:insert_idx] + moving
-                              + remaining[insert_idx:])
-
-        h = self.table.horizontalHeader()
-        if h.sortIndicatorSection() != 0:
-            h.blockSignals(True)
-            h.setSortIndicator(0, Qt.SortOrder.AscendingOrder)
-            h.blockSignals(False)
-
-        self._normalize_order()
-        self.sync_to_core()
-        with self._suppress_save():
-            self._rebuild_model_safely(preserve_selection=True)
-
-        self._pending_state_desc = \
-            "Перемещение каналов (перетаскивание)"
-        self._do_save_state()
-
-        self._restore_selection(
-            moving_set, None,
-            self.table.verticalScrollBar().value())
+    def _on_model_request_move(self, uids, ref_uid, insert_after=0):
+        on_model_request_move(self, uids, ref_uid, insert_after)
 
     def _rename_groups(self):
-        if not self.selected_channels:
-            return
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Пакетное переименование")
-        dlg.resize(400, 200)
-        l = QVBoxLayout(dlg)
-        l.addWidget(QLabel(
-            f"Выбрано: {len(self.selected_channels)}"))
-        groups = {ch.meta.group for ch in self.selected_channels}
-        cur = (next(iter(groups)) if len(groups) == 1
-               else "РАЗНЫЕ")
-        l.addWidget(QLabel(f"<b>{cur}</b>"))
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.HLine)
-        l.addWidget(sep)
-        l.addWidget(QLabel("Новая группа:"))
-        edit = QLineEdit()
-        if len(groups) == 1:
-            edit.setText(cur)
-        edit.setPlaceholderText("Введите название")
-        l.addWidget(edit)
-        bb = QDialogButtonBox(OK_CANCEL_BB)
-        bb.accepted.connect(dlg.accept)
-        bb.rejected.connect(dlg.reject)
-        l.addWidget(bb)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        ng = edit.text().strip()
-        if not ng or ng == cur:
-            return
-        with self._edit_channels("Переименование групп"):
-            for ch in self.selected_channels:
-                ch.meta.group = ng
-                ch.update_extinf()
+        rename_groups(self)
 
-    def _move_channel_up(self, row: int = -1):
-        ch = (self.current_channel if row == -1
-              else self.channel_for_row(row))
-        if ch is None:
-            return
-        try:
-            idx = self.all_channels.index(ch)
-        except ValueError:
-            return
-        if idx > 0:
-            with self._edit_channels("Перемещение вверх"):
-                (self.all_channels[idx],
-                 self.all_channels[idx - 1]) = \
-                    (self.all_channels[idx - 1],
-                     self.all_channels[idx])
-                self._normalize_order()
+    def _move_channel_up(self, row=-1):
+        move_channel_up(self, row)
 
-    def _move_channel_down(self, row: int = -1):
-        ch = (self.current_channel if row == -1
-              else self.channel_for_row(row))
-        if ch is None:
-            return
-        try:
-            idx = self.all_channels.index(ch)
-        except ValueError:
-            return
-        if idx < len(self.all_channels) - 1:
-            with self._edit_channels("Перемещение вниз"):
-                (self.all_channels[idx],
-                 self.all_channels[idx + 1]) = \
-                    (self.all_channels[idx + 1],
-                     self.all_channels[idx])
-                self._normalize_order()
+    def _move_channel_down(self, row=-1):
+        move_channel_down(self, row)
 
     def _move_selected_up(self):
-        if not self.selected_channels:
-            return
-        indices = []
-        for ch in self.selected_channels:
-            try:
-                indices.append(self.all_channels.index(ch))
-            except ValueError:
-                continue
-        if not indices:
-            return
-        indices.sort()
-        self.save_state("Перемещение вверх")
-        for i, idx in enumerate(indices):
-            real_idx = idx - i
-            if real_idx > 0:
-                (self.all_channels[real_idx],
-                 self.all_channels[real_idx - 1]) = \
-                    (self.all_channels[real_idx - 1],
-                     self.all_channels[real_idx])
-        self._normalize_order()
-        self.sync_to_core()
-        with self._suppress_save():
-            self._rebuild_model_safely(preserve_selection=True)
+        move_selected_up(self)
 
     def _move_selected_down(self):
-        if not self.selected_channels:
-            return
-        indices = []
-        for ch in self.selected_channels:
-            try:
-                indices.append(self.all_channels.index(ch))
-            except ValueError:
-                continue
-        if not indices:
-            return
-        indices.sort(reverse=True)
-        self.save_state("Перемещение вниз")
-        last = len(self.all_channels) - 1
-        for i, idx in enumerate(indices):
-            real_idx = idx + i
-            if real_idx < last:
-                (self.all_channels[real_idx],
-                 self.all_channels[real_idx + 1]) = \
-                    (self.all_channels[real_idx + 1],
-                     self.all_channels[real_idx])
-        self._normalize_order()
-        self.sync_to_core()
-        with self._suppress_save():
-            self._rebuild_model_safely(preserve_selection=True)
+        move_selected_down(self)
+
+    def _show_context_menu(self, position):
+        show_context_menu(self, position)
+
+    # ── обёртки на playlist_edit ──
+
+    def block_domain_from_channel(self, channel: ChannelData):
+        _block_domain_from_channel(self, channel)
+
+    def _clean_blocked_by_domain(self) -> int:
+        return _clean_blocked_by_domain(self)
+
+    def _add_to_blacklist(self, row: int = -1):
+        _add_to_blacklist(self, row)
+
+    def _add_selected_to_blacklist(self):
+        _add_selected_to_blacklist(self)
+
+    def _edit_user_agent(self, row: int):
+        _edit_user_agent(self, row)
+
+    def apply_blacklist(self) -> int:
+        return _apply_blacklist(self)
+
+    def remove_metadata(self, opts: Dict[str, bool],
+                        scope: str = "all"):
+        _remove_metadata(self, opts, scope)
+
+    @staticmethod
+    def _has_meta_to_remove(ch: ChannelData,
+                             opts: Dict[str, bool]) -> bool:
+        return _has_meta_to_remove(ch, opts)
 
     def _apply_alternative_url(self, channel: ChannelData, url: str):
-        if not url or not url.strip():
-            return
-        self.save_state("Применение альтернативной ссылки")
-        if (channel.link.url and channel.link.url != url
-                and channel.link.url
-                not in channel.link.alternative_urls):
-            channel.link.alternative_urls.append(channel.link.url)
-        if url in channel.link.alternative_urls:
-            channel.link.alternative_urls.remove(url)
-        channel.link.url = url
-        channel.link.has_url = True
-        channel.link.is_repaired = False
-        channel.status.reset()
-        try:
-            self.core.domain_user_agent_manager\
-                .apply_rules_to_channel(channel)
-        except Exception:
-            logger.exception("apply_rules_to_channel")
-        channel.touch()
-        self.sync_to_core()
-        with self._suppress_save():
-            self.model.refresh_all()
+        _apply_alternative_url(self, channel, url)
 
     def _add_link_from_current(self):
-        if not self.current_channel:
-            return
-        for r in range(self.model.rowCount()):
-            ch = self.channel_for_row(r)
-            if ch is self.current_channel:
-                self._add_link_from_sources(r)
-                return
-        for r in range(self.model.rowCount()):
-            ch = self.channel_for_row(r)
-            if ch and ch.uid == self.current_channel.uid:
-                self._add_link_from_sources(r)
-                return
+        _add_link_from_current(self)
 
     def _add_link_from_sources(self, row: int):
-        ch = self.channel_for_row(row)
-        if ch is None:
-            return
-        if ch.has_valid_url:
-            info_box(self, f"'{ch.meta.name}' уже имеет ссылку.")
-            return
-        settings = self.core.get_replacement_settings()
-        alts = self.core.link_source_manager.find_matches_for_channel(
-            ch, settings,
-            config=self.core.config,
-            only_working=False,
-            epg_db=self.core.epg_db)
-        if not alts:
-            info_box(self, f"Не найдено для '{ch.meta.name}'.")
-            return
-        dlg = LinkSelectionDialog(ch.meta.name, alts, self)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        selected = dlg.get_selected()
-        if selected:
-            self._do_apply_link(ch, selected)
+        _add_link_from_sources(self, row)
 
     def _do_apply_link(self, channel: ChannelData,
                         source_ch: ChannelData):
-        if not source_ch.has_valid_url:
-            return
-        if not self.core.config.get('allow_duplicate_urls', False):
-            target_url = source_ch.link.url
-            for ch in self.all_channels:
-                if ch.uid != channel.uid and ch.link.url == target_url:
-                    warn_box(
-                        self,
-                        f"Ссылка уже используется каналом "
-                        f"«{ch.meta.name}».\n\n"
-                        f"Включите «Разрешать одинаковые ссылки "
-                        f"у разных каналов» в общих настройках, "
-                        f"если это нужно.")
-                    return
-        self.save_state("Добавление ссылки из источников")
-        if (channel.link.url
-                and channel.link.url != source_ch.link.url):
-            if channel.link.url not in channel.link.alternative_urls:
-                channel.link.alternative_urls.append(
-                    channel.link.url)
-        channel.link.url = source_ch.link.url
-        channel.link.has_url = True
-        channel.link.is_repaired = False
-        channel.status.reset()
-        channel.touch()
-        channel.link.link_source = source_ch.link.link_source
-        if source_ch.link.user_agent:
-            if self.core.should_remove_user_agent(channel.link.url):
-                channel.link.user_agent = ""
-                for k in list(channel.link.extra_headers.keys()):
-                    if k.lower() == 'user-agent':
-                        del channel.link.extra_headers[k]
-            else:
-                channel.link.user_agent = source_ch.link.user_agent
-                channel.link.extra_headers['User-Agent'] = \
-                    source_ch.link.user_agent
-        else:
-            ua = self.core.get_user_agent_for_url(channel.link.url)
-            if ua:
-                channel.link.user_agent = ua
-                channel.link.extra_headers['User-Agent'] = ua
-        channel.update_extinf()
-        channel.update_extvlcopt_from_headers()
-        self.sync_to_core()
-        with self._suppress_save():
-            self.model.refresh_all()
+        _do_apply_link(self, channel, source_ch)
 
     def _replace_link_from_sources(self, row: int):
-        ch = self.channel_for_row(row)
-        if ch is None:
-            return
-        settings = self.core.get_replacement_settings()
-        alts = self.core.link_source_manager.find_matches_for_channel(
-            ch, settings,
-            config=self.core.config,
-            only_working=False,
-            epg_db=self.core.epg_db)
-        if not alts:
-            info_box(self, f"Не найдено для '{ch.meta.name}'.")
-            return
-        dlg = LinkSelectionDialog(ch.meta.name, alts, self)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        selected = dlg.get_selected()
-        if selected:
-            self._do_apply_link(ch, selected)
+        _replace_link_from_sources(self, row)
 
     def replace_broken_links(self):
-        if not self.all_channels:
-            return
-        settings = self.core.get_replacement_settings()
-        to_process = [ch for ch in self.all_channels
-                      if ch.needs_replacement(settings)]
-        if not to_process:
-            info_box(self, "Нет каналов с битыми ссылками.")
-            return
-        self.replace_links_async(to_process)
+        _replace_broken_links(self)
 
     def replace_selected_links(self):
-        if not self.selected_channels:
-            return
-        settings = self.core.get_replacement_settings()
-        candidates: List[Tuple[ChannelData,
-                                List[ChannelData]]] = []
-        for ch in self.selected_channels:
-            alts = self.core.link_source_manager \
-                .find_matches_for_channel(
-                    ch, settings,
-                    config=self.core.config,
-                    only_working=False,
-                    epg_db=self.core.epg_db)
-            if alts:
-                candidates.append((ch, alts))
-        if not candidates:
-            info_box(self, "Не найдено альтернатив")
-            return
-        all_alts: List[ChannelData] = []
-        seen_urls: Set[str] = set()
-        for _, alts in candidates:
-            for a in alts:
-                if a.link.url and a.link.url not in seen_urls:
-                    seen_urls.add(a.link.url)
-                    all_alts.append(a)
-        if not all_alts:
-            return
-        dlg = LinkSelectionDialog(
-            f"{len(candidates)} каналов", all_alts, self)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        selected = dlg.get_selected()
-        if not selected:
-            return
-        self.save_state("Замена выбранных ссылок")
-        applied = 0
-        for ch, _ in candidates:
-            if (not ch.has_valid_url
-                    or ch.link.url == selected.link.url):
-                continue
-            if ch.link.url not in ch.link.alternative_urls:
-                ch.link.alternative_urls.append(ch.link.url)
-            ch.link.url = selected.link.url
-            ch.link.has_url = True
-            ch.link.is_repaired = False
-            ch.status.reset()
-            ch.touch()
-            if selected.link.user_agent:
-                ch.link.user_agent = selected.link.user_agent
-                ch.link.extra_headers['User-Agent'] = \
-                    selected.link.user_agent
-            ch.update_extinf()
-            ch.update_extvlcopt_from_headers()
-            applied += 1
-        self.sync_to_core()
-        with self._suppress_save():
-            self.model.refresh_all()
-        info_box(self,
-                 f"Заменено у {applied} "
-                 f"{channels_word(applied)}",
-                 "Готово")
+        _replace_selected_links(self)
 
     def replace_single_link(self, row: int):
-        self._replace_link_from_sources(row)
+        _replace_single_link(self, row)
 
     def replace_all_links(self):
-        if not self.all_channels:
-            return
-
-        sources = self.core.link_source_manager.get_enabled_sources()
-        if not sources:
-            info_box(
-                self,
-                "Нет включённых источников.\n\n"
-                "Откройте «Инструменты → Управление источниками» "
-                "и добавьте\n"
-                "хотя бы один источник. Затем нажмите "
-                "«🔄 Обновить всё»,\n"
-                "чтобы загрузить каналы и наполнить кэш "
-                "живых ссылок.",
-                "Исправление ссылок")
-            return
-
-        settings = self.core.get_replacement_settings()
-        to_process = [ch for ch in self.all_channels
-                      if ch.needs_replacement(settings)]
-        if not to_process:
-            info_box(self, "Нет каналов для замены.")
-            return
-
-        if not self.core.link_source_manager.has_alive_index():
-            reply = confirm_three(
-                self,
-                "Кэш живых ссылок источников пуст.\n\n"
-                "Сначала для каждой битой ссылки будет "
-                "выполнена автопочинка (http↔https, редиректы).\n"
-                "Затем, если починка не удалась, будет "
-                "использован кэш живых ссылок.\n\n"
-                "Кэш пуст. Нажмите «Да», чтобы открыть "
-                "менеджер источников и запустить "
-                "«🔄 Обновить всё».\n"
-                "«Нет» — продолжить (вероятно, только "
-                "автопочинка).\n"
-                "«Отмена» — прервать.",
-                "Кэш пуст")
-            if reply == 'yes':
-                w = self.parent_window
-                if w is not None:
-                    w._manage_sources()
-                return
-            if reply == 'cancel':
-                return
-
-        self.replace_links_async(to_process)
+        _replace_all_links(self)
 
     def replace_links_async(self, channels: List[ChannelData]):
-        if not _is_qobject_valid(self):
-            return
-        if (self._replacement_worker
-                and self._replacement_worker.isRunning()):
-            info_box(self, "Замена уже запущена")
-            return
-        settings = self.core.get_replacement_settings()
-        to_process = [ch for ch in channels
-                      if ch.needs_replacement(settings)]
-        if not to_process:
-            info_box(self, "Нет каналов для замены.")
-            return
-        w = self.parent_window
-        if w is not None:
-            w.set_action(f"⏳ Замена ссылок: "
-                          f"{len(to_process)} каналов")
-        max_workers = int(self.core.config.get(
-            'replacement_max_workers',
-            REPLACEMENT_MAX_WORKERS_DEFAULT))
-        self._replacement_worker = LinkReplacementWorker(
-            to_process, self.core.link_source_manager, settings,
-            config=self.core.config, max_workers=max_workers,
-            epg_db=self.core.epg_db)
+        _replace_links_async(self, channels)
 
-        uid_map: Dict[int, ChannelData] = {
-            ch.uid: ch for ch in self.all_channels}
-        repaired_uids: Set[int] = set()
-
-        def on_channel_updated(uid: int, old_url: str,
-                                new_url: str, name: str,
-                                from_alive: bool):
-            if not _is_qobject_valid(self):
-                return
-            ch = uid_map.get(uid)
-            if ch is None:
-                return
-            s = settings
-            if s.keep_backup_links and old_url and old_url.strip():
-                if old_url not in ch.link.alternative_urls:
-                    ch.link.alternative_urls.insert(0, old_url)
-                    ch.link.alternative_urls = \
-                        ch.link.alternative_urls[
-                            :s.max_alternative_urls]
-            ch.link.url = new_url
-            ch.link.has_url = True
-            if uid not in repaired_uids:
-                ch.link.is_repaired = False
-            ch.status.reset()
-            try:
-                self.core.domain_user_agent_manager\
-                    .apply_rules_to_channel(ch)
-                ch.update_extvlcopt_from_headers()
-            except Exception:
-                logger.exception("apply UA after replacement")
-            ch.touch()
-
-        def on_channel_repaired(uid: int, old_url: str,
-                                 new_url: str):
-            repaired_uids.add(uid)
-            ch = uid_map.get(uid)
-            if ch is None:
-                return
-            ch.link.is_repaired = True
-            try:
-                ch.status.status_text = StatusText.REPAIRED
-            except Exception:
-                pass
-            logger.info(
-                "Канал «%s»: автопочинка %s -> %s",
-                ch.meta.name or "?", (old_url or "")[:60],
-                (new_url or "")[:60])
-
-        def on_progress(value, maximum, text):
-            w2 = self.parent_window
-            if w2 is not None:
-                w2.show_progress(value, maximum, text)
-
-        def on_done(replaced, total):
-            w2 = self.parent_window
-            if w2 is not None:
-                w2.hide_progress()
-            if not _is_qobject_valid(self):
-                return
-            with self._suppress_save():
-                self.undo_manager.save_state(
-                    self.all_channels, "Замена ссылок")
-            self.sync_to_core()
-            with self._suppress_save():
-                self.model.refresh_all()
-            self.undo_state_changed.emit(
-                self.undo_manager.can_undo(),
-                self.undo_manager.can_redo())
-            repaired_n = len(repaired_uids)
-            if replaced == 0:
-                info_box(
-                    self,
-                    f"Заменено 0 из {total}.\n\n"
-                    "Автопочинка не смогла починить ссылки, "
-                    "а в кэше живых ссылок не нашлось замены.\n\n"
-                    "Проверьте:\n"
-                    "• источники обновлялись с проверкой ссылок?\n"
-                    "• имена каналов совпадают с именами "
-                    "в источниках?\n\n"
-                    "Откройте «Инструменты → Управление "
-                    "источниками» и нажмите «🔄 Обновить всё».",
-                    "Замена завершена")
-            else:
-                extra = ""
-                if repaired_n:
-                    extra = (f"\n🔧 Автопочинка: "
-                             f"{repaired_n} "
-                             f"{channels_word(repaired_n)} "
-                             f"починено без обращения к кэшу.")
-                info_box(
-                    self,
-                    f"{replaced_verb(replaced).capitalize()} "
-                    f"{replaced} из {total}.{extra}",
-                    "Замена завершена")
-            self._replacement_worker = None
-
-        def on_error(msg):
-            w2 = self.parent_window
-            if w2 is not None:
-                w2.hide_progress()
-            if _is_qobject_valid(self):
-                error_box(self, msg, "Ошибка замены")
-            self._replacement_worker = None
-
-        self._replacement_worker.channel_updated.connect(
-            on_channel_updated, Qt.ConnectionType.QueuedConnection)
-        self._replacement_worker.channel_repaired.connect(
-            on_channel_repaired, Qt.ConnectionType.QueuedConnection)
-        self._replacement_worker.progress.connect(
-            on_progress, Qt.ConnectionType.QueuedConnection)
-        self._replacement_worker.replacement_done.connect(
-            on_done, Qt.ConnectionType.QueuedConnection)
-        self._replacement_worker.error.connect(
-            on_error, Qt.ConnectionType.QueuedConnection)
-        self._replacement_worker.start()
+    # ── файл / экспорт / дубликаты / сравнение ──
 
     def edit_playlist_header(self):
         old_snapshot = self.header_manager.copy()
@@ -2550,77 +1162,6 @@ class PlaylistTab(QWidget):
             dict(hm._original_attrs)
         self.modified = True
         self.update_modified_status()
-
-    def apply_blacklist(self) -> int:
-        filtered, removed = self.core.apply_blacklist_to_channels(
-            self.all_channels)
-        if removed > 0:
-            with self._edit_channels(
-                    "Применение чёрного списка каналов"):
-                self.all_channels[:] = filtered
-                self._normalize_order()
-        return removed
-
-    def remove_metadata(self, opts: Dict[str, bool],
-                        scope: str = "all"):
-        if scope == "current":
-            if not self.current_channel:
-                return
-            chs = [self.current_channel]
-        elif scope == "selected":
-            if not self.selected_channels:
-                return
-            chs = self.selected_channels.copy()
-        else:
-            chs = self.all_channels.copy()
-        if not chs:
-            return
-        chs = [ch for ch in chs
-               if self._has_meta_to_remove(ch, opts)]
-        if not chs:
-            info_box(self,
-                     "Нет каналов с указанными метаданными")
-            return
-        if not confirm(self,
-                       f"Удалить из {len(chs)} "
-                       f"{channels_word(len(chs))}?"):
-            return
-        self.save_state("Удаление метаданных")
-        for ch in chs:
-            if opts.get('tvg_id'):
-                ch.meta.tvg_id = ""
-            if opts.get('tvg_logo'):
-                ch.meta.tvg_logo = ""
-            if opts.get('tvg_name'):
-                ch.meta.tvg_name = ""
-            if opts.get('group_title'):
-                ch.meta.group = DEFAULT_GROUP
-            if opts.get('user_agent'):
-                ch.link.user_agent = ""
-                for k in list(ch.link.extra_headers.keys()):
-                    if k.lower() == 'user-agent':
-                        del ch.link.extra_headers[k]
-                ch.update_extvlcopt_from_headers()
-            ch.update_extinf()
-            ch.touch()
-        self.sync_to_core()
-        with self._suppress_save():
-            self._rebuild_model_safely(preserve_selection=True)
-        self.groups_changed.emit()
-
-    @staticmethod
-    def _has_meta_to_remove(ch: ChannelData,
-                             opts: Dict[str, bool]) -> bool:
-        checks = (
-            ('tvg_id', bool(ch.meta.tvg_id)),
-            ('tvg_logo', bool(ch.meta.tvg_logo)),
-            ('tvg_name', bool(ch.meta.tvg_name)),
-            ('group_title', bool(
-                ch.meta.group
-                and ch.meta.group != DEFAULT_GROUP)),
-            ('user_agent', bool(ch.link.user_agent)),
-        )
-        return any(opts.get(k) and has for k, has in checks)
 
     def save_changes(self):
         w = self.parent_window
@@ -2891,167 +1432,6 @@ class PlaylistTab(QWidget):
                 f"отдельный сетевой запрос на канал."):
             return
         self._detect_resolution_for(with_urls)
-
-    def _show_context_menu(self, position):
-        menu = QMenu(self)
-        rows = sorted({idx.row() for idx in
-                       self.table.selectionModel().selectedRows()})
-        if rows:
-            if len(rows) == 1:
-                self._build_single_row_menu(menu, rows[0])
-            else:
-                self._build_multi_row_menu(menu, set(rows))
-        else:
-            self._build_empty_menu(menu)
-        menu.exec(self.table.mapToGlobal(position))
-
-    def _build_single_row_menu(self, menu: QMenu, row: int):
-        ch = self.channel_for_row(row)
-        if ch:
-            if ch.has_valid_url:
-                menu.addAction(make_action(
-                    menu, "▶ Смотреть в проигрывателе",
-                    lambda r=row: self._play_in_player(r)))
-                menu.addSeparator()
-            menu.addAction(make_action(
-                menu, "Редактировать User Agent...",
-                lambda r=row: self._edit_user_agent(r)))
-            if ch.link.alternative_urls:
-                alt = menu.addMenu(
-                    f"Альтернативные ссылки "
-                    f"({len(ch.link.alternative_urls)})")
-                for i, u in enumerate(
-                        ch.link.alternative_urls[:10]):
-                    a = make_action(
-                        alt, f"{i + 1}. {u[:60]}...",
-                        lambda checked=False, uu=u, cc=ch:
-                        self._apply_alternative_url(cc, uu))
-                    alt.addAction(a)
-            menu.addSeparator()
-            if ch.status.url_status is False:
-                menu.addAction(make_action(
-                    menu, "Удалить битую ссылку",
-                    lambda r=row: self._remove_broken_url(r)))
-                menu.addSeparator()
-            src_ch = self.find_channel_by_ref(ch)
-            if src_ch is not None and src_ch.has_valid_url:
-                host = URLUtils.extract_host(src_ch.link.url)
-                if host:
-                    is_ip = URLUtils.is_ip_address(host)
-                    label = (
-                        f"🚫 Заблокировать IP «{host}»"
-                        if is_ip
-                        else f"🚫 Заблокировать домен «{host}»")
-                    menu.addAction(make_action(
-                        menu, label,
-                        lambda c=src_ch:
-                        self.block_domain_from_channel(c)))
-                menu.addSeparator()
-        menu.addAction(make_action(menu, "Новый канал",
-                                    self._new_channel))
-        menu.addAction(make_action(menu, "Копировать канал",
-                                    self._copy_channel))
-        menu.addAction(make_action(menu, "Вырезать канал",
-                                    self._cut_channel))
-        menu.addAction(make_action(
-            menu, "Вставить канал",
-            lambda r=row: self._paste_channel(r)))
-        menu.addSeparator()
-        menu.addAction(make_action(
-            menu, "Пакетное переименование групп",
-            self._rename_groups))
-        menu.addSeparator()
-        menu.addAction(make_action(
-            menu, "Добавить в чёрный список каналов",
-            lambda r=row: self._add_to_blacklist(r)))
-        menu.addSeparator()
-        menu.addAction(make_action(
-            menu, "Проверить ссылку",
-            lambda r=row: self._check_single_url(r)))
-        menu.addAction(make_action(
-            menu, "Заменить ссылку из источников...",
-            lambda r=row: self.replace_single_link(r)))
-        if ch and ch.has_valid_url:
-            menu.addAction(make_action(
-                menu, "🎬 Определить разрешение (ffprobe)",
-                lambda r=row: self._detect_resolution_for_row(r)))
-        menu.addSeparator()
-        menu.addAction(make_action(
-            menu, "Удалить канал",
-            lambda r=row: self._delete_channel(r)))
-
-    def _build_multi_row_menu(self, menu: QMenu, rows: Set[int]):
-        cnt = len(rows)
-        a = QAction(f"Выбрано каналов: {cnt}", menu)
-        a.setEnabled(False)
-        menu.addAction(a)
-        menu.addSeparator()
-        menu.addAction(make_action(menu, "Новый канал",
-                                    self._new_channel))
-        menu.addAction(make_action(
-            menu, f"Копировать каналы ({cnt})",
-            self._copy_selected_channels))
-        menu.addAction(make_action(
-            menu, f"Вырезать каналы ({cnt})",
-            self._cut_selected_channels))
-        menu.addAction(make_action(
-            menu, f"Вставить каналы ({cnt})",
-            lambda: self._paste_selected_channels(min(rows))))
-        menu.addSeparator()
-        menu.addAction(make_action(
-            menu, "Пакетное переименование групп",
-            self._rename_groups))
-        menu.addSeparator()
-        menu.addAction(make_action(
-            menu, f"Удалить выбранные ({cnt})",
-            self._delete_selected_channels))
-        menu.addSeparator()
-        menu.addAction(make_action(
-            menu, f"Проверить ссылки ({cnt})",
-            self._check_selected_urls))
-        menu.addAction(make_action(
-            menu, f"Заменить ссылки из источников ({cnt})...",
-            self.replace_selected_links))
-        menu.addAction(make_action(
-            menu, f"Добавить в чёрный список каналов ({cnt})",
-            self._add_selected_to_blacklist))
-        menu.addSeparator()
-        menu.addAction(make_action(
-            menu, f"🎬 Определить разрешение ({cnt})...",
-            self._detect_resolution_selected))
-        menu.addSeparator()
-        menu.addAction(make_action(
-            menu, f"Удалить битые ссылки ({cnt})",
-            self._remove_selected_broken_urls))
-        menu.addAction(make_action(
-            menu, f"Удалить все ссылки ({cnt})",
-            self._remove_selected_urls))
-
-    def _build_empty_menu(self, menu: QMenu):
-        menu.addAction(make_action(
-            menu, "🎬 Определить разрешение у всех...",
-            self._detect_resolution_all))
-        menu.addSeparator()
-        menu.addAction(make_action(menu, "Новый канал",
-                                    self._new_channel))
-        menu.addAction(make_action(menu, "Вставить канал",
-                                    self._paste_channel))
-        menu.addSeparator()
-        menu.addAction(make_action(
-            menu, "Пакетное переименование групп",
-            self._rename_groups))
-        menu.addSeparator()
-        menu.addAction(make_action(
-            menu, "Удалить дубликаты...",
-            self.show_duplicate_finder))
-        menu.addAction(make_action(
-            menu, "Сравнить плейлисты...",
-            self.show_compare))
-        menu.addSeparator()
-        menu.addAction(make_action(
-            menu,
-            "Применить метаданные из EPG ко всем каналам",
-            lambda: self.apply_epg_metadata_to_all(silent=False)))
 
     def disconnect_signals(self):
         try:

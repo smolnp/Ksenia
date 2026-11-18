@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import os
 import signal
@@ -66,7 +67,6 @@ def run_cli(args: argparse.Namespace) -> int:
               or QCoreApplication(sys.argv))
     _qcore.setOrganizationName(APP_ORG)
     _qcore.setApplicationName(APP_NAME)
-    # P0.9: --lang не существует, удалён.
 
     from app_core import ApplicationCore
     core = ApplicationCore.instance()
@@ -188,12 +188,12 @@ def run_cli(args: argparse.Namespace) -> int:
 
     if args.export_stable:
         ssm = core.stable_state_manager
-        written = 0
-        skipped_n = 0
         total = len(all_channels)
+        # FIX: --check-workers реально используется
+        workers = max(1, min(int(args.check_workers), 32))
+        timeout = max(2, int(args.timeout))
         print(f"[+] Stable-экспорт: {total} каналов, "
-              f"timeout={args.timeout}s, "
-              f"workers={args.check_workers}")
+              f"timeout={timeout}s, workers={workers}")
 
         def find_url(ch: ChannelData) -> Optional[str]:
             cands: List[str] = []
@@ -213,7 +213,7 @@ def run_cli(args: argparse.Namespace) -> int:
                     continue
                 ok, rt, _msg, _code, _ttfb, _repaired = \
                     URLUtils.check_url(
-                        u, args.timeout, verify_ssl=False,
+                        u, timeout, verify_ssl=False,
                         try_repair=True)
                 if ok is True and (rt is None
                                    or rt * 1000
@@ -221,38 +221,71 @@ def run_cli(args: argparse.Namespace) -> int:
                     return u
             return None
 
-        with open(args.export, 'w', encoding='utf-8') as f:
-            f.write("#EXTM3U\n\n")
-            for i, ch in enumerate(all_channels):
-                if (i + 1) % 25 == 0 or i == total - 1:
-                    print(f"    Проверка: {i+1}/{total}")
+        results: List[Optional[str]] = [None] * total
+        done = [0]
+
+        def _one(item):
+            idx, ch = item
+            try:
                 url = find_url(ch)
-                if not url:
-                    skipped_n += 1
-                    continue
-                key = ch.stable_key(settings)
-                if not ssm.get(key):
-                    ssm.set(key, url)
-                tmp = ch.copy()
-                tmp.link.url = url
-                tmp.link.has_url = True
-                tmp.update_extinf()
-                f.write(tmp.link.extinf + '\n')
-                for line in tmp.link.extvlcopt_lines:
-                    f.write(line + '\n')
-                f.write(url + '\n')
-                written += 1
-        ssm.save()
+            except Exception:
+                logger.exception("find_url for %s", ch.meta.name)
+                url = None
+            results[idx] = url
+            done[0] += 1
+            if done[0] % 25 == 0 or done[0] == total:
+                print(f"    Проверка: {done[0]}/{total}")
+            return idx, url
+
+        written = 0
+        skipped_n = 0
+        try:
+            with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=workers) as ex:
+                futures = [
+                    ex.submit(_one, (i, ch))
+                    for i, ch in enumerate(all_channels)]
+                for fut in concurrent.futures.as_completed(
+                        futures):
+                    with suppress(Exception):
+                        fut.result()
+            # FIX: результат пишем строго в исходном порядке
+            with open(args.export, 'w', encoding='utf-8') as f:
+                f.write("#EXTM3U\n\n")
+                for i, ch in enumerate(all_channels):
+                    url = results[i]
+                    if not url:
+                        skipped_n += 1
+                        continue
+                    key = ch.stable_key(settings)
+                    if not ssm.get(key):
+                        ssm.set(key, url)
+                    tmp = ch.copy()
+                    tmp.link.url = url
+                    tmp.link.has_url = True
+                    tmp.update_extinf()
+                    f.write(tmp.link.extinf + '\n')
+                    for line in tmp.link.extvlcopt_lines:
+                        f.write(line + '\n')
+                    f.write(url + '\n')
+                    written += 1
+        finally:
+            # FIX: сохраняем stable_state даже при исключении
+            with suppress(Exception):
+                ssm.save()
         print(f"[✓] Stable: записано {written}, "
               f"пропущено {skipped_n}")
     else:
-        with open(args.export, 'w', encoding='utf-8') as f:
-            f.write("#EXTM3U\n\n")
-            for ch in all_channels:
-                f.write(ch.link.extinf + '\n')
-                for line in ch.link.extvlcopt_lines:
-                    f.write(line + '\n')
-                f.write((ch.link.url or '') + '\n')
+        try:
+            with open(args.export, 'w', encoding='utf-8') as f:
+                f.write("#EXTM3U\n\n")
+                for ch in all_channels:
+                    f.write(ch.link.extinf + '\n')
+                    for line in ch.link.extvlcopt_lines:
+                        f.write(line + '\n')
+                    f.write((ch.link.url or '') + '\n')
+        finally:
+            pass
         print(f"[✓] Экспорт: {len(all_channels)} каналов → "
               f"{args.export}")
 
@@ -262,7 +295,15 @@ def run_cli(args: argparse.Namespace) -> int:
 def _install_signal_handlers(app) -> None:
     def handler(signum, frame):
         logger.info("Received signal %s, shutting down...", signum)
-        app.quit()
+        # FIX: quit через event loop, потокобезопасно
+        try:
+            from PyQt6.QtCore import (
+                QMetaObject, Qt as _Qt)
+            QMetaObject.invokeMethod(
+                app, "quit", _Qt.ConnectionType.QueuedConnection)
+        except Exception:
+            with suppress(Exception):
+                app.quit()
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         with suppress(ValueError, OSError):

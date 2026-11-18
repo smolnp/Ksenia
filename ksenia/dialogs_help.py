@@ -19,11 +19,11 @@ from PyQt6.QtWidgets import (
     QPushButton, QSplitter, QTabWidget, QTextBrowser,
     QVBoxLayout, QWidget)
 
-from constants import (APP_VERSION, CLOSE_BB, DONATION_URL,
-                        DONATION_WALLET)
+from constants import (APP_VERSION, DONATION_URL, DONATION_WALLET)
 from dialogs_base import BaseDialog
 from logging_setup import logger
 from paths import error_box, open_external
+from qt_constants import CLOSE_BB
 
 
 _HEADING_RE = re.compile(

@@ -50,16 +50,7 @@ class LinkQuality(Enum):
 
 
 class ChannelSnapshot(NamedTuple):
-    """Компактный снапшот канала для Undo/Redo.
-
-    Включает ВСЕ поля ChannelMetadata, ChannelLink, ChannelStatus,
-    кроме preferred_audio_lang/preferred_video_lang (плеер не
-    вызывает save_state). original_name НЕ включается — оно
-    устанавливается при парсинге и не меняется.
-
-    P1.2: NamedTuple даёт hash() в C-цикле (O(полей)), без
-    json.dumps/pickle — это и есть "fast".
-    """
+    """Компактный снапшот канала для Undo/Redo."""
     uid: int
     # ── meta ──
     name: str
@@ -83,7 +74,7 @@ class ChannelSnapshot(NamedTuple):
     url: str
     user_agent: str
     extvlcopt_lines: tuple
-    extra_headers: tuple  # ((k, v), ...) — tuple of pairs
+    extra_headers: tuple
     has_url: bool
     alternative_urls: tuple
     link_source: str
@@ -338,10 +329,6 @@ class ChannelData:
     # ── ChannelSnapshot (для Undo/Redo) ──
 
     def snapshot(self) -> ChannelSnapshot:
-        """Компактный снапшот всех значимых полей.
-
-        P1.2: NamedTuple — hash() в C-цикле, без сериализации.
-        """
         return ChannelSnapshot(
             uid=self.uid,
             name=self.meta.name or "",
@@ -388,23 +375,11 @@ class ChannelData:
         )
 
     def fast_hash(self) -> int:
-        """Быстрый хэш от текущего состояния канала.
-
-        O(полей), но без json.dumps/pickle — hash(NamedTuple)
-        работает в C-цикле в 20-50 раз быстрее.
-        """
         return hash(self.snapshot())
 
     def restore_from_snapshot(self, s: ChannelSnapshot) -> None:
-        """Восстанавливает все поля из снапшота.
-
-        Вызывается Command.apply/undo. Не трогает
-        preferred_* (они не в снапшоте) и original_name
-        (устанавливается парсингом).
-        """
         if s is None:
             return
-        # meta
         self.meta.name = s.name
         self.meta.group = s.group
         self.meta.tvg_id = s.tvg_id
@@ -423,7 +398,6 @@ class ChannelData:
         self.meta.epg_source = s.epg_source
         self.meta.epg_alternative_names = list(
             s.epg_alternative_names or [])
-        # link
         self.link.url = s.url
         self.link.user_agent = s.user_agent
         self.link.extvlcopt_lines = list(
@@ -435,7 +409,6 @@ class ChannelData:
             s.alternative_urls or [])
         self.link.link_source = s.link_source
         self.link.is_repaired = s.is_repaired
-        # status
         self.status.url_status = s.url_status
         self.status.status_text = s.status_text
         self.status.status_code = s.status_code
@@ -447,9 +420,7 @@ class ChannelData:
                 int(s.link_quality or 0))
         except (ValueError, TypeError):
             self.status.link_quality = LinkQuality.UNKNOWN
-        # прочее
         self.original_index = s.original_index
-        # extinf — производное, пересоздаём
         try:
             self.update_extinf()
         except Exception:
@@ -606,10 +577,6 @@ class ChannelData:
         return t
 
     def to_dict(self) -> Dict[str, Any]:
-        """Полный dict — для экспорта/импорта, НЕ для Undo.
-
-        Для Undo используйте snapshot()/restore_from_snapshot().
-        """
         return {
             'uid': self.uid,
             **{k: getattr(self.meta, k)
@@ -709,7 +676,13 @@ class ChannelData:
         self.link.is_repaired = bool(
             data.get('is_repaired', False))
 
-        self.status.url_status = data.get('url_status')
+        # url_status: строго bool | None
+        raw_status = data.get('url_status')
+        if raw_status is None:
+            self.status.url_status = None
+        else:
+            self.status.url_status = bool(raw_status)
+
         st = data.get('status_text', StatusText.UNCHECKED)
         if not isinstance(st, str) or st not in _VALID_STATUS_TEXTS:
             st = StatusText.UNCHECKED

@@ -17,6 +17,6 @@ Keywords=iptv;m3u;m3u8;playlist;tv;epg;
 Keywords[ru]=iptv;m3u;m3u8;плейлист;тв;epg;
 StartupNotify=true
 StartupWMClass=KseniaM3UEditor
-MimeType=audio/x-mpegurl;application/vnd.apple.mpegurl;application/x-mpegurl;
+MimeType=audio/x-mpegurl;application/vnd.apple.mpegurl;application/x-mpegurl
 X-KDE-StartupNotify=true
 X-GNOME-UsesNotifications=false

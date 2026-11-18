@@ -50,7 +50,6 @@ def _resolution_qcolor(ch: ChannelData) -> Optional[QColor]:
 class ChannelTableModel(QAbstractTableModel):
     MIME_TYPE = "application/x-ksenia-channel-uids"
 
-    # P0.1: сигнал с insert_after (0 = до, 1 = после)
     request_move = pyqtSignal(list, object, int)
 
     def __init__(self, parent=None):
@@ -384,7 +383,9 @@ class ChannelTableModel(QAbstractTableModel):
                         return dup_color_both(key)
                     return dup_color_url(
                         self._dup_url_key.get(ch.uid) or "")
-                if ch.link.user_agent:
+                # FIX: подсветка UA только для живых ссылок
+                if (ch.link.user_agent
+                        and ch.status.url_status is not False):
                     base = semantic_colors()['working']
                     c = QColor(base)
                     c.setAlpha(60)
@@ -445,18 +446,6 @@ class ChannelTableModel(QAbstractTableModel):
         return mime
 
     def dropMimeData(self, data, action, row, column, parent):
-        """P0.2: insert_after вычисляется из parent/row.
-
-        Qt передаёт:
-          - parent.isValid() → drop НА строку parent.row()
-          - row == -1 → drop в конец
-          - row >= 0 → drop ПЕРЕД строкой row (если parent
-            не валиден)
-
-        Внутренний drag&drop с InsertAfter вычисляется
-        в PlaylistTab.dropEvent и передаётся через
-        _pending_insert_after.
-        """
         if not data.hasFormat(self.MIME_TYPE):
             return False
         if action == Qt.DropAction.IgnoreAction:
@@ -471,6 +460,8 @@ class ChannelTableModel(QAbstractTableModel):
 
         insert_after = getattr(
             self, '_pending_insert_after', 0)
+        # FIX: сбрасываем, чтобы не «протухло» при следующем drop
+        self._pending_insert_after = 0
         target_row = -1
 
         if parent.isValid():
@@ -545,6 +536,9 @@ class ChannelTableModel(QAbstractTableModel):
             ch.link.link_source = ""
             ch.link.user_agent = ""
             ch.link.extra_headers.clear()
+            # FIX: очищаем EXTVLCOPT до применения UA-правил,
+            # иначе старая строка http-user-agent останется.
+            ch.link.extvlcopt_lines.clear()
             ch.link.is_repaired = False
             ch.status.reset()
             if core is not None:

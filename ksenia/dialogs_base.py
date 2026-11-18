@@ -19,12 +19,13 @@ from PyQt6.QtWidgets import (
     QTableWidgetItem, QVBoxLayout)
 
 from constants import (
-    JSON_FILTER, OK_CANCEL_BB, CLOSE_BB,
+    JSON_FILTER,
     THEME_ICON_NEGATIVE_TTL_SEC, THEME_ICON_CACHE_MAX,
     MAX_JSON_BYTES)
 from logging_setup import logger
 from paths import (error_box, warn_box, open_file_dialog,
                     save_file_dialog)
+from qt_constants import CLOSE_BB, OK_CANCEL_BB
 
 try:
     import shiboken6

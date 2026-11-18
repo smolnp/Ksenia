@@ -60,40 +60,51 @@
   <url type="homepage">https://github.com/smolnp/Ksenia</url>
   <url type="bugtracker">https://github.com/smolnp/Ksenia/issues</url>
 
-  <developer_name>SmolNP (Nikolai Smolyaninov)</developer_name>
+  <developer>
+    <name>SmolNP (Nikolai Smolyaninov)</name>
+  </developer>
 
   <content_rating type="oars-1.1"/>
 
   <releases>
-    <release version="0.2.2" date="2026-10-23">
+    <release version="0.2.3" date="2025-11-18">
       <description>
-        <p>Исправлены критические ошибки парсинга и undo.</p>
-        <p>Устранена утечка EXTVLCOPT между каналами.</p>
+        <p>Исправлены критические ошибки парсинга, undo и воркеров.</p>
+        <p>Устранена утечка EXTVLCOPT между каналами и при смене URL.</p>
         <p>Исправлена потеря канала при undo с коллизией uid.</p>
-        <p>Восстановлен откат undo при исключении в блоке правки.</p>
-        <p>Исправлен undo для диалога поиска дубликатов.</p>
-        <p>Кэш normalized_index: корректный TTL в статистике.</p>
-        <p>Порядок кодировок: utf-8-sig перед utf-8 (BOM).</p>
-        <p>Громкость плеера применяется сразу после подключения IPC.</p>
-        <p>Алиасы синонимов применяются к именам с тегом качества.</p>
-        <p>Генератор источников использует один Session на воркер.</p>
-        <p>_PlaylistCreateTask регистрируется в реестре воркеров.</p>
-        <p xml:lang="ru">Исправлены критические ошибки парсинга и undo.</p>
-        <p xml:lang="ru">Устранена утечка EXTVLCOPT между каналами.</p>
+        <p>CLI: --check-workers реально используется; stable-экспорт сохраняет порядок.</p>
+        <p>Остановка _PlaylistCreateTask и _StableExportTask при выходе.</p>
+        <p>Публичные register_runnable / unregister_runnable вместо core._workers.</p>
+        <p>constants.py больше не тянет QtWidgets в headless-режиме.</p>
+        <p>ffprobe: расширенный safe_env на Windows; явная проверка file://, concat://, subfile://.</p>
+        <p>Исправлены дубликаты в синонимах имён каналов (HD/4K).</p>
+        <p>Единый движок для ffprobe-воркеров.</p>
+        <p xml:lang="ru">Исправлены критические ошибки парсинга, undo и воркеров.</p>
+        <p xml:lang="ru">Устранена утечка EXTVLCOPT между каналами и при смене URL.</p>
         <p xml:lang="ru">Исправлена потеря канала при undo с коллизией uid.</p>
-        <p xml:lang="ru">Восстановлен откат undo при исключении в блоке правки.</p>
-        <p xml:lang="ru">Исправлен undo для диалога поиска дубликатов.</p>
-        <p xml:lang="ru">Кэш normalized_index: корректный TTL в статистике.</p>
-        <p xml:lang="ru">Порядок кодировок: utf-8-sig перед utf-8 (BOM).</p>
-        <p xml:lang="ru">Громкость плеера применяется сразу после подключения IPC.</p>
-        <p xml:lang="ru">Алиасы синонимов применяются к именам с тегом качества.</p>
-        <p xml:lang="ru">Генератор источников использует один Session на воркер.</p>
-        <p xml:lang="ru">_PlaylistCreateTask регистрируется в реестре воркеров.</p>
+        <p xml:lang="ru">CLI: --check-workers реально используется; stable-экспорт сохраняет порядок.</p>
+        <p xml:lang="ru">Остановка _PlaylistCreateTask и _StableExportTask при выходе.</p>
+        <p xml:lang="ru">Публичные register_runnable / unregister_runnable вместо core._workers.</p>
+        <p xml:lang="ru">constants.py больше не тянет QtWidgets в headless-режиме.</p>
+        <p xml:lang="ru">ffprobe: расширенный safe_env на Windows; явная проверка file://, concat://, subfile://.</p>
+        <p xml:lang="ru">Исправлены дубликаты в синонимах имён каналов (HD/4K).</p>
+        <p xml:lang="ru">Единый движок для ffprobe-воркеров.</p>
       </description>
     </release>
-    <release version="0.2.1" date="2026-09-26">
+    <release version="0.2.2" date="2025-10-23">
+      <description>
+        <p>Исправлены ошибки парсинга и undo.</p>
+        <p>Устранена утечка EXTVLCOPT между каналами.</p>
+        <p>Исправлена потеря канала при undo с коллизией uid.</p>
+        <p xml:lang="ru">Исправлены ошибки парсинга и undo.</p>
+        <p xml:lang="ru">Устранена утечка EXTVLCOPT между каналами.</p>
+        <p xml:lang="ru">Исправлена потеря канала при undo с коллизией uid.</p>
+      </description>
+    </release>
+    <release version="0.2.1" date="2025-09-26">
       <description>
         <p>Первая стабильная публичная версия.</p>
+        <p xml:lang="ru">Первая стабильная публичная версия.</p>
       </description>
     </release>
   </releases>

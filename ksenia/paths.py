@@ -1,28 +1,44 @@
 # Copyright (C) 2025 SmolNP
 # SPDX-License-Identifier: GPL-3.0-or-later
 # См. LICENSE в корне проекта.
-"""Пути и диалоговые хелперы (без логгера)."""
+"""Пути, диалоги подтверждения, безопасная запись файлов."""
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Optional
 
-from PyQt6.QtCore import QUrl
-from PyQt6.QtGui import QDesktopServices
-from PyQt6.QtWidgets import QFileDialog, QMessageBox
+from PyQt6.QtWidgets import (
+    QApplication, QFileDialog, QMessageBox, QWidget,
+)
 
-from constants import YES_NO
 from logging_setup import logger
+from qt_constants import YES_NO
+
+
+def _is_qobject_valid(obj) -> bool:
+    if obj is None:
+        return False
+    try:
+        import shiboken6
+        return shiboken6.isValid(obj)
+    except Exception:
+        # если shiboken6 нет или объект ещё валиден —
+        # считаем валидным
+        return True
 
 
 class Paths:
+    """Каталоги приложения (config, cache, help, log)."""
+
     @staticmethod
     def get_config_dir() -> str:
         if sys.platform.startswith("linux"):
-            base = os.environ.get('XDG_CONFIG_HOME',
-                                  os.path.expanduser('~/.config'))
+            base = os.environ.get(
+                'XDG_CONFIG_HOME',
+                os.path.expanduser('~/.config'))
             return os.path.join(base, "ksenia")
         appdata = os.environ.get('APPDATA')
         if appdata:
@@ -30,109 +46,138 @@ class Paths:
         return os.path.expanduser("~/.ksenia")
 
     @staticmethod
-    def get_log_path() -> str:
-        return os.path.join(Paths.get_config_dir(), "editor.log")
+    def get_cache_dir() -> str:
+        return os.path.join(Paths.get_config_dir(), "cache")
 
     @staticmethod
-    def get_app_dir() -> str:
-        if getattr(sys, 'frozen', False):
-            return (getattr(sys, '_MEIPASS', None)
-                    or os.path.dirname(sys.executable))
-        return os.path.dirname(os.path.abspath(__file__))
+    def get_log_path() -> str:
+        return os.path.join(Paths.get_config_dir(), "editor.log")
 
     @staticmethod
     def get_help_dir() -> str:
         return os.path.join(Paths.get_app_dir(), "help")
 
-
-def error_box(parent, msg, title: str = "") -> None:
-    QMessageBox.critical(parent, title or "Ошибка", str(msg))
-
-
-def warn_box(parent, msg, title: str = "") -> None:
-    QMessageBox.warning(parent, title or "Предупреждение", str(msg))
+    @staticmethod
+    def get_app_dir() -> str:
+        return os.path.dirname(os.path.abspath(sys.argv[0]))
 
 
-def info_box(parent, msg, title: str = "") -> None:
-    QMessageBox.information(parent, title or "Информация", str(msg))
+def parse_datetime(value) -> Optional[datetime]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(float(value))
+        except (ValueError, OSError, OverflowError):
+            return None
+    if not isinstance(value, str) or not value.strip():
+        return None
+    s = value.strip()
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%f",
+                "%Y-%m-%dT%H:%M:%S",
+                "%Y-%m-%d %H:%M:%S",
+                "%Y-%m-%d"):
+        try:
+            return datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+    try:
+        return datetime.fromisoformat(s)
+    except ValueError:
+        return None
 
 
-def confirm(parent, msg, title: str = "") -> bool:
+# ── Диалоги подтверждения ──
+
+def confirm(parent: Optional[QWidget], msg: str,
+            title: str = "") -> bool:
+    """Возвращает True, если пользователь нажал «Да»."""
+    if parent is not None and not _is_qobject_valid(parent):
+        parent = None
     return QMessageBox.question(
-        parent, title or "Подтверждение", msg, YES_NO
+        parent,
+        title or "Подтверждение",
+        msg,
+        YES_NO,
     ) == QMessageBox.StandardButton.Yes
 
 
-def confirm_three(parent, msg, title: str = "") -> str:
-    r = QMessageBox.question(
-        parent, title or "Подтверждение", msg,
-        QMessageBox.StandardButton.Yes |
-        QMessageBox.StandardButton.No |
-        QMessageBox.StandardButton.Cancel)
-    return {QMessageBox.StandardButton.Yes: 'yes',
-            QMessageBox.StandardButton.No: 'no',
-            QMessageBox.StandardButton.Cancel: 'cancel'}.get(r, 'cancel')
+def confirm_three(parent: Optional[QWidget], msg: str,
+                  title: str = "") -> str:
+    """Возвращает 'yes' / 'no' / 'cancel'."""
+    if parent is not None and not _is_qobject_valid(parent):
+        parent = None
+    box = QMessageBox(parent)
+    box.setWindowTitle(title or "Подтверждение")
+    box.setText(msg)
+    box.setIcon(QMessageBox.Icon.Question)
+    box.setStandardButtons(
+        QMessageBox.StandardButton.Yes
+        | QMessageBox.StandardButton.No
+        | QMessageBox.StandardButton.Cancel)
+    box.setDefaultButton(QMessageBox.StandardButton.Yes)
+    ret = box.exec()
+    if ret == QMessageBox.StandardButton.Yes:
+        return 'yes'
+    if ret == QMessageBox.StandardButton.No:
+        return 'no'
+    return 'cancel'
 
 
-def confirm_then(parent, msg, action, *, title: str = "") -> bool:
-    if not confirm(parent, msg, title):
-        return False
-    action()
-    return True
+def info_box(parent, msg: str, title: str = "") -> None:
+    if parent is not None and not _is_qobject_valid(parent):
+        parent = None
+    QMessageBox.information(
+        parent, title or "Информация", msg)
 
 
-def open_file_dialog(parent, title: str = "",
-                     filters: str = "",
-                     initial_dir: str = "") -> Optional[str]:
-    if not filters:
-        from constants import M3U_FILTER
-        filters = M3U_FILTER
+def warn_box(parent, msg: str, title: str = "") -> None:
+    if parent is not None and not _is_qobject_valid(parent):
+        parent = None
+    QMessageBox.warning(
+        parent, title or "Предупреждение", msg)
+
+
+def error_box(parent, msg: str, title: str = "") -> None:
+    if parent is not None and not _is_qobject_valid(parent):
+        parent = None
+    QMessageBox.critical(
+        parent, title or "Ошибка", msg)
+
+
+def open_file_dialog(parent, title: str, filter_str: str,
+                     start_dir: str = "") -> str:
+    if parent is not None and not _is_qobject_valid(parent):
+        parent = None
     fp, _ = QFileDialog.getOpenFileName(
-        parent, title or "Открыть", initial_dir, filters)
-    return fp or None
+        parent, title, start_dir, filter_str)
+    return fp or ""
 
 
-def save_file_dialog(parent, title: str = "",
-                     default_name: str = "",
-                     filters: str = "",
-                     default_ext: str = "") -> Optional[str]:
-    if not filters:
-        from constants import M3U_FILTER
-        filters = M3U_FILTER
+def save_file_dialog(parent, title: str, default: str,
+                     filter_str: str, suffix: str = "") -> str:
+    if parent is not None and not _is_qobject_valid(parent):
+        parent = None
     fp, _ = QFileDialog.getSaveFileName(
-        parent, title or "Сохранить", default_name, filters)
+        parent, title, default, filter_str)
     if not fp:
-        return None
-    if default_ext and not fp.lower().endswith(default_ext):
-        fp += default_ext
+        return ""
+    if suffix and not fp.lower().endswith(suffix.lower()):
+        fp += suffix
     return fp
 
 
-def open_external(url: str) -> bool:
-    if not url:
-        return False
+def open_external(path: str) -> None:
+    """Открывает файл/папку системным приложением."""
     try:
-        if url.startswith(('http://', 'https://', 'mailto:')):
-            return QDesktopServices.openUrl(QUrl(url))
-        return QDesktopServices.openUrl(QUrl.fromLocalFile(url))
+        if sys.platform.startswith("win"):
+            os.startfile(path)  # type: ignore[attr-defined]
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", path])
+        else:
+            subprocess.Popen(["xdg-open", path])
     except Exception:
-        logger.exception("open_external")
-        return False
-
-
-def parse_datetime(s, fmt: str = "%Y-%m-%d %H:%M:%S"
-                   ) -> Optional[datetime]:
-    if not s or not isinstance(s, str):
-        return None
-    iso = s[:-1] + "+00:00" if s.endswith("Z") else s
-    try:
-        return datetime.strptime(s, fmt)
-    except (ValueError, TypeError):
-        pass
-    try:
-        dt = datetime.fromisoformat(iso)
-        if dt.tzinfo is not None:
-            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
-        return dt
-    except (ValueError, TypeError):
-        return None
+        logger.exception("open_external(%r)", path)
+        raise

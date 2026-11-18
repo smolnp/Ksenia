@@ -37,6 +37,11 @@ from sources import LinkSource, LinkSourceManager
 from utils import URLUtils, _StopToken
 
 
+# Сколько времени ждём источники, прежде чем принудительно
+# завершить воркеры (фаза 2 в SourcesRefreshWorker).
+SOURCE_CHECK_DEADLINE_SEC = 3600
+
+
 class BaseWorker(QThread):
     progress = pyqtSignal(int, int, str)
     error = pyqtSignal(str)
@@ -88,7 +93,6 @@ class SourceCheckConfig:
     timeout: int = SOURCE_CHECK_TIMEOUT_DEFAULT
     trust_sec: int = SOURCE_CHECK_TRUST_SEC_DEFAULT
     batch_size: int = SOURCE_CHECK_BATCH_SIZE_DEFAULT
-    # P0.7: verify_ssl=True по умолчанию
     verify_ssl: bool = True
 
     @classmethod
@@ -109,17 +113,57 @@ class SourceCheckConfig:
         )
 
 
-# ── BackgroundResolutionWorker (P2-фаза) ──
+# ── Общий движок для ffprobe-воркеров ──
 
-class BackgroundResolutionWorker(BaseWorker):
-    """Фоновое определение разрешения после проверки ссылок.
+class _ResolutionScanMixin:
+    """Общий код для BackgroundResolutionWorker / ResolutionWorker."""
 
-    НЕ трогает ChannelData напрямую — результаты кладутся
-    в потокобезопасную очередь, которую забирает GUI-поток.
+    def _run_resolution_scan(self):
+        total = len(self._items)
+        if total == 0:
+            return
+        self.progress.emit(
+            0, total, "ffprobe: определение разрешения…")
+        done = [0]
+        lock = threading.Lock()
+        delay = getattr(self, '_delay', 0.0)
 
-    Низкий приоритет: 2-4 потока, задержка между запусками,
-    таймаут 5 с. Не мешает пользователю работать.
-    """
+        def _one(item):
+            if self.is_stopped():
+                return
+            uid, url, ua, hdrs = item
+            if delay > 0:
+                time.sleep(delay)
+            if self.is_stopped():
+                return
+            try:
+                res, _err = get_stream_resolution(
+                    url, timeout=self._timeout,
+                    user_agent=ua,
+                    extra_headers=hdrs or None)
+            except Exception:
+                logger.exception(
+                    "ffprobe: %s", url[:80])
+                res = None
+            if self.is_stopped():
+                return
+            with lock:
+                done[0] += 1
+                cur = done[0]
+            if res:
+                self._queue.put((uid, res))
+                self.resolution_ready.emit(uid, res)
+            self.progress.emit(
+                cur, total, f"ffprobe: {cur}/{total}")
+
+        list(run_parallel(self._items, _one,
+                          self._max_workers, self._stop_token))
+
+
+# ── BackgroundResolutionWorker ──
+
+class BackgroundResolutionWorker(
+        _ResolutionScanMixin, BaseWorker):
     resolution_ready = pyqtSignal(int, str)
 
     def __init__(self, channels: List[ChannelData], *,
@@ -152,47 +196,10 @@ class BackgroundResolutionWorker(BaseWorker):
         return self._queue
 
     def _execute(self):
-        total = len(self._items)
-        if total == 0:
-            return
-        self.progress.emit(
-            0, total, "ffprobe: определение разрешения…")
-        done = [0]
-        lock = threading.Lock()
-
-        def _one(item):
-            if self.is_stopped():
-                return
-            uid, url, ua, hdrs = item
-            if self._delay > 0:
-                time.sleep(self._delay)
-            if self.is_stopped():
-                return
-            try:
-                res, _err = get_stream_resolution(
-                    url, timeout=self._timeout,
-                    user_agent=ua,
-                    extra_headers=hdrs or None)
-            except Exception:
-                logger.exception("ffprobe bg: %s", url[:80])
-                res = None
-            if self.is_stopped():
-                return
-            with lock:
-                done[0] += 1
-                cur = done[0]
-            if res:
-                # В очередь — GUI-поток заберёт.
-                self._queue.put((uid, res))
-                self.resolution_ready.emit(uid, res)
-            self.progress.emit(
-                cur, total, f"ffprobe: {cur}/{total}")
-
-        list(run_parallel(self._items, _one,
-                          self._max_workers, self._stop_token))
+        self._run_resolution_scan()
 
 
-# ── Existing workers ──
+# ── LinkReplacementWorker ──
 
 class LinkReplacementWorker(BaseWorker):
     channel_updated = pyqtSignal(int, str, str, str, bool)
@@ -235,12 +242,6 @@ class LinkReplacementWorker(BaseWorker):
                 return False
             self._used_urls.add(url)
             return True
-
-    def _release_url(self, url: str):
-        if not url:
-            return
-        with self._used_urls_lock:
-            self._used_urls.discard(url)
 
     @staticmethod
     def _is_url_valid(url: str) -> bool:
@@ -375,7 +376,6 @@ class LinkReplacementWorker(BaseWorker):
             return
         self._preload_sources()
         workers = min(self.max_workers, total)
-        # P1.6: list[0] + lock вместо nonlocal
         processed_box = [0]
         progress_lock = threading.Lock()
         last_emit = [0.0]
@@ -554,6 +554,8 @@ class LinkReplacementWorker(BaseWorker):
             return None
 
 
+# ── SourceUrlCheckWorker ──
+
 class SourceUrlCheckWorker(BaseWorker):
     source_check_progress = pyqtSignal(str, int, int)
     source_check_done = pyqtSignal(str, int, int)
@@ -662,11 +664,15 @@ class SourceUrlCheckWorker(BaseWorker):
                 continue
             to_check.append(ch)
 
+        # FIX: total для done/прогресса = len(passed), а не
+        # len(self.channels) — «проверено X из Y» корректно.
+        passed_total = len(passed)
+
         self.source_check_progress.emit(
-            self.source_name, checked, total)
+            self.source_name, checked, passed_total)
         if not to_check:
             self.source_check_done.emit(
-                self.source_name, working, total)
+                self.source_name, working, passed_total)
             return
 
         lock = threading.Lock()
@@ -674,7 +680,6 @@ class SourceUrlCheckWorker(BaseWorker):
                              Optional[int], Optional[float],
                              str]] = []
         pending_lock = threading.Lock()
-        # P1.6: list[0] вместо nonlocal
         emit_counter = [0]
         working_box = [working]
         checked_box = [checked]
@@ -762,7 +767,11 @@ class SourceUrlCheckWorker(BaseWorker):
 
             with pending_lock:
                 emit_counter[0] += 1
-                if emit_counter[0] % self._CHANNEL_EMIT_EVERY == 0:
+                # FIX: эмитим также на последнем канале, чтобы
+                # маленькие плейлисты (<25) тоже получили
+                # channel_checked.
+                if (emit_counter[0] % self._CHANNEL_EMIT_EVERY == 0
+                        or emit_counter[0] == len(to_check)):
                     with suppress(Exception):
                         self.channel_checked.emit(
                             self.source_name, bool(ok),
@@ -791,10 +800,10 @@ class SourceUrlCheckWorker(BaseWorker):
                     continue
                 with lock:
                     cur = checked_box[0]
-                if cur - last_emit >= 5 or cur == len(to_check):
+                if cur - last_emit >= 5 or cur == passed_total:
                     last_emit = cur
                     self.source_check_progress.emit(
-                        self.source_name, cur, total)
+                        self.source_name, cur, passed_total)
         except Exception:
             logger.exception("check_one")
 
@@ -805,15 +814,12 @@ class SourceUrlCheckWorker(BaseWorker):
             flush_batch(leftover)
 
         self.source_check_done.emit(
-            self.source_name, working_box[0], total)
+            self.source_name, working_box[0], passed_total)
 
 
-class ResolutionWorker(BaseWorker):
-    """Ручное определение разрешения по запросу.
+# ── ResolutionWorker ──
 
-    Результат идёт через signal resolution_ready(uid, res) —
-    ChannelData не меняется напрямую (это делает GUI-поток).
-    """
+class ResolutionWorker(_ResolutionScanMixin, BaseWorker):
     resolution_ready = pyqtSignal(int, str)
 
     def __init__(self, channels: List[ChannelData], *,
@@ -834,37 +840,15 @@ class ResolutionWorker(BaseWorker):
         self._max_workers = max(
             1, min(int(max_workers), 8))
         self._timeout = max(2, int(timeout))
+        # FIX: чтобы mixin был единым
+        self._queue: "queue.Queue" = queue.Queue()
+        self._delay = 0.0
 
     def _execute(self):
-        total = len(self._items)
-        if total == 0:
-            return
-        self.progress.emit(0, total,
-                            "ffprobe: определение разрешения…")
-        done = [0]
-        lock = threading.Lock()
+        self._run_resolution_scan()
 
-        def _one(item):
-            if self.is_stopped():
-                return
-            uid, url, ua, hdrs = item
-            res, _err = get_stream_resolution(
-                url, timeout=self._timeout,
-                user_agent=ua,
-                extra_headers=hdrs or None)
-            if self.is_stopped():
-                return
-            with lock:
-                done[0] += 1
-                cur = done[0]
-            if res:
-                self.resolution_ready.emit(uid, res)
-            self.progress.emit(
-                cur, total, f"ffprobe: {cur}/{total}")
 
-        list(run_parallel(self._items, _one,
-                          self._max_workers, self._stop_token))
-
+# ── SourcesRefreshWorker ──
 
 class SourcesRefreshWorker(BaseWorker):
     PHASE1_END = 40
@@ -1040,7 +1024,7 @@ class SourcesRefreshWorker(BaseWorker):
                 break
             w.start()
 
-        deadline = time.time() + 3600
+        deadline = time.time() + SOURCE_CHECK_DEADLINE_SEC
         for w in workers:
             if self.is_stopped():
                 break
@@ -1101,6 +1085,8 @@ class SourcesRefreshWorker(BaseWorker):
             self.PHASE3_END, self.PHASE3_END, "[3/3] Готово")
 
 
+# ── EPGLoaderWorker ──
+
 class EPGLoaderWorker(BaseWorker):
     epg_loaded = pyqtSignal(int, list)
 
@@ -1120,6 +1106,8 @@ class EPGLoaderWorker(BaseWorker):
             self.urls, self.timeout, self._stop_token)
         self.epg_loaded.emit(count, errors)
 
+
+# ── EPGMetadataApplyWorker ──
 
 class EPGMetadataApplyWorker(BaseWorker):
     applied = pyqtSignal(int, list)
@@ -1161,10 +1149,13 @@ class EPGMetadataApplyWorker(BaseWorker):
             self._prefer_tvg_id = True
 
     def _execute(self):
+        total = len(self._channels)
         if not self.epg_db.has_channel_info:
+            # FIX: прогресс эмитим даже при пустом EPG
+            self.progress.emit(
+                total, total, "EPG-метаданные: EPG не загружен")
             self.applied.emit(0, [])
             return
-        total = len(self._channels)
         if total == 0:
             self.applied.emit(0, [])
             return
